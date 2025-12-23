@@ -1,5 +1,5 @@
-import { HttpServer } from '../interface/input/http/HttpServer';
-import { GreetingInject } from './greetingInject';
+import { HttpServer } from '../implementations/input/http/HttpServer';
+import { GreetingInject } from './greeting';
 
 export class DepInject {
   private greeting: GreetingInject = new GreetingInject();

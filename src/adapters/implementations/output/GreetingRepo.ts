@@ -1,5 +1,5 @@
 import { Greeting } from '../../../core/entities/Greeting';
-import { IGreetingRepository } from '../../../use-cases/interface/output/IGreetingRepository';
+import { IGreetingRepository } from '../../../use-cases/interface/output/IGreetingRepo';
 
 
 export class GreetingRepoConcrete implements IGreetingRepository {

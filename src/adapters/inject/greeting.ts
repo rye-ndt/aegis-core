@@ -1,6 +1,6 @@
-import { GreetingUseCaseConcrete } from "../../use-cases/implementation/GreetingUseCase";
-import { GreetingControllerConcrete } from "../interface/input/http/GreetingController";
-import { GreetingRepoConcrete } from "../interface/output/InMemoryGreetingRepository";
+import { GreetingUseCaseConcrete } from "../../use-cases/implementations/GreetingUseCase";
+import { GreetingControllerConcrete } from "../implementations/input/http/GreetingCtl";
+import { GreetingRepoConcrete } from "../implementations/output/GreetingRepo";
 
 export class GreetingInject {
     private repo: GreetingRepoConcrete | null = null;

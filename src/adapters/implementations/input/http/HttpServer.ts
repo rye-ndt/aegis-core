@@ -1,5 +1,5 @@
 import * as http from 'http';
-import { GreetingControllerConcrete } from './GreetingController';
+import { GreetingControllerConcrete } from './GreetingCtl';
 
 type RouteHandler = (
   req: http.IncomingMessage,

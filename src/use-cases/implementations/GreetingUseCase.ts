@@ -1,6 +1,6 @@
 import { Greeting } from '../../core/entities/Greeting';
 import { IGreetingUseCase } from '../interface/input/IGreetingUseCase';
-import { IGreetingRepository } from '../interface/output/IGreetingRepository';
+import { IGreetingRepository } from '../interface/output/IGreetingRepo';
 
 /**
  * Greeting Use Case Implementation

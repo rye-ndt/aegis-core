@@ -1,7 +1,7 @@
 {
-  "name": "hexagonal-hello-world",
+  "name": "hexagonal-llm",
   "version": "1.0.0",
-  "description": "Hexagonal Architecture Hello World API with TypeScript",
+  "description": "Hexagonal LLM, with TypeScript",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
