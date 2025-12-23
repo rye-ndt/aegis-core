@@ -1,3 +1,13 @@
+export interface IAgentResponse {
+    text: string
+    toolCalled: string[]
+}
+
+export interface IAgentRequest {
+    prompt: string
+    sessionID: string
+}
+
 export interface IAgentUseCase {
-    streamResponse(prompt: string): Promise<string>
+    streamResponse(request: IAgentRequest): Promise<IAgentResponse>
 }

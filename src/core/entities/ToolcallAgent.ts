@@ -14,11 +14,5 @@ export class ToolcallAgent extends Agent {
         this.toolList = toolList
     }
 
-    async stream(prompt: string): Promise<string> {
-        return ""
-    }
 
-    async response(prompt: string): Promise<string> {
-        return ""
-    }
 }
