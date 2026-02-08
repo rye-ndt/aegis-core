@@ -2,8 +2,7 @@ import { IncomingMessage, ServerResponse } from 'http';
 import { IGreetingUseCase } from '../../../../use-cases/interface/input/IGreetingUseCase';
 
 export class GreetingControllerConcrete {
-  constructor(private readonly greetingUseCase: IGreetingUseCase) { }
-
+  constructor(private readonly greetingUseCase: IGreetingUseCase) {}
 
   async handleGetGreeting(_req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
@@ -17,12 +16,7 @@ export class GreetingControllerConcrete {
     }
   }
 
-
-  async handleGetPersonalizedGreeting(
-    _req: IncomingMessage,
-    res: ServerResponse,
-    name: string
-  ): Promise<void> {
+  async handleGetPersonalizedGreeting(_req: IncomingMessage, res: ServerResponse, name: string): Promise<void> {
     try {
       const greeting = await this.greetingUseCase.getPersonalizedGreeting(name);
 

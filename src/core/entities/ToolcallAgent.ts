@@ -1,18 +1,16 @@
-import { Agent } from "./Agent";
+import { Agent } from './Agent';
 
 export interface Tool {
-    name: string
-    description: string
-    responseSchema: any
+  name: string;
+  description: string;
+  responseSchema: any;
 }
 
 export class ToolcallAgent extends Agent {
-    private toolList: Tool[] //search, generate image, store memory 
+  private toolList: Tool[]; //search, generate image, store memory
 
-    constructor(name: string, model: string, guidancePrompts: string[], toolList: Tool[]) {
-        super(name, model, guidancePrompts)
-        this.toolList = toolList
-    }
-
-
+  constructor(name: string, model: string, guidancePrompts: string[], toolList: Tool[]) {
+    super(name, model, guidancePrompts);
+    this.toolList = toolList;
+  }
 }

@@ -10,6 +10,7 @@ npm start
 ```
 
 Test the API:
+
 ```bash
 curl http://localhost:3000/api/greeting
 curl http://localhost:3000/api/greeting/YourName
@@ -42,6 +43,7 @@ src/
 ## Dependencies
 
 Only dev dependencies:
+
 - `typescript`
 - `ts-node`
 - `@types/node`

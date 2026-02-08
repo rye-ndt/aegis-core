@@ -1,6 +1,6 @@
 /**
  * Greeting Entity - Core Domain Object
- * 
+ *
  * This is a pure domain entity with no external dependencies.
  * It represents the core business concept of a greeting.
  */

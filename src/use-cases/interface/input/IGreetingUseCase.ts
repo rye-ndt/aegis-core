@@ -1,8 +1,8 @@
-import { Greeting } from '../../../core/entities/Greeting';
+import { Greeting } from "../../../core/entities/Greeting";
 
 /**
  * Primary Port - Greeting Use Case Interface
- * 
+ *
  * This is a "driving" port that defines what the application can do.
  * Controllers (adapters) will use this interface to invoke business logic.
  */

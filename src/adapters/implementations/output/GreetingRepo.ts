@@ -1,7 +1,6 @@
 import { Greeting } from '../../../core/entities/Greeting';
 import { IGreetingRepository } from '../../../use-cases/interface/output/IGreetingRepo';
 
-
 export class GreetingRepoConcrete implements IGreetingRepository {
   async getDefaultGreeting(): Promise<Greeting> {
     return new Greeting('Hello, World!');

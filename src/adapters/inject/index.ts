@@ -15,5 +15,4 @@ export class DepInject {
   }
 }
 
-
 export const depInjectConcrete = new DepInject();

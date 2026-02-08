@@ -2,7 +2,7 @@ import { Greeting } from '../../../core/entities/Greeting';
 
 /**
  * Secondary Port - Greeting Repository Interface
- * 
+ *
  * This is a "driven" port that defines what the application needs.
  * Infrastructure adapters will implement this interface.
  */

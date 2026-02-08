@@ -4,7 +4,7 @@ import { GreetingControllerConcrete } from './GreetingCtl';
 type RouteHandler = (
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  params?: Record<string, string>
+  params?: Record<string, string>,
 ) => Promise<void>;
 
 interface Route {
@@ -16,7 +16,7 @@ interface Route {
 
 /**
  * HTTP Server - Primary Adapter
- * 
+ *
  * A minimal HTTP server using Node.js built-in http module.
  * No external routing libraries - just pure Node.js.
  */
@@ -31,12 +31,10 @@ export class HttpServer {
   }
 
   registerController(greetingController: GreetingControllerConcrete): void {
-    this.addRoute('GET', '/api/greeting', (req, res) =>
-      greetingController.handleGetGreeting(req, res)
-    );
+    this.addRoute('GET', '/api/greeting', (req, res) => greetingController.handleGetGreeting(req, res));
 
     this.addRoute('GET', '/api/greeting/:name', (req, res, params) =>
-      greetingController.handleGetPersonalizedGreeting(req, res, params?.name || '')
+      greetingController.handleGetPersonalizedGreeting(req, res, params?.name || ''),
     );
   }
 
@@ -56,10 +54,7 @@ export class HttpServer {
     });
   }
 
-  private async handleRequest(
-    req: http.IncomingMessage,
-    res: http.ServerResponse
-  ): Promise<void> {
+  private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const method = req.method || 'GET';
     const url = req.url || '/';
     const pathname = url.split('?')[0];

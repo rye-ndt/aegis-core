@@ -10,8 +10,7 @@ const main = async (): Promise<void> => {
     console.error('Failed to start server:', error);
     process.exit(1);
   }
-}
-
+};
 
 process.on('SIGINT', () => {
   console.log('\n👋 Shutting down gracefully...');
