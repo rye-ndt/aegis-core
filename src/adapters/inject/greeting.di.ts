@@ -1,15 +1,15 @@
-import { GreetingUseCaseConcrete } from '../../use-cases/implementations/GreetingUseCase';
-import { GreetingControllerConcrete } from '../implementations/input/http/GreetingCtl';
-import { GreetingRepoConcrete } from '../implementations/output/GreetingRepo';
+import { GreetingUseCaseConcrete } from "../../use-cases/implementations/greeting.usecase";
+import { GreetingControllerConcrete } from "../implementations/input/http/greeting.controller";
+import { IGreetingRepository } from "../../use-cases/interface/output/IGreetingRepo";
 
 export class GreetingInject {
-  private repo: GreetingRepoConcrete | null = null;
+  private repo: IGreetingRepository | null = null;
   private useCase: GreetingUseCaseConcrete | null = null;
   private ctl: GreetingControllerConcrete | null = null;
 
-  getRepo(): GreetingRepoConcrete {
+  getRepo(): IGreetingRepository {
     if (!this.repo) {
-      this.repo = new GreetingRepoConcrete();
+      this.repo = new GreetingRepositoryConcrete();
     }
 
     return this.repo;

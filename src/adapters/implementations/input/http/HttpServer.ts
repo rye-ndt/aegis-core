@@ -1,10 +1,11 @@
-import * as http from 'http';
-import { GreetingControllerConcrete } from './GreetingCtl';
+import * as http from "http";
+import { GreetingControllerConcrete } from "./greeting.controller";
+import { ProcessControllerConcrete } from "./process.controller";
 
 type RouteHandler = (
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  params?: Record<string, string>,
+  params?: Record<string, string>
 ) => Promise<void>;
 
 interface Route {
@@ -31,10 +32,27 @@ export class HttpServer {
   }
 
   registerController(greetingController: GreetingControllerConcrete): void {
-    this.addRoute('GET', '/api/greeting', (req, res) => greetingController.handleGetGreeting(req, res));
+    this.addRoute("GET", "/api/greeting", (req, res) =>
+      greetingController.handleGetGreeting(req, res)
+    );
 
-    this.addRoute('GET', '/api/greeting/:name', (req, res, params) =>
-      greetingController.handleGetPersonalizedGreeting(req, res, params?.name || ''),
+    this.addRoute("GET", "/api/greeting/:name", (req, res, params) =>
+      greetingController.handleGetPersonalizedGreeting(
+        req,
+        res,
+        params?.name || ""
+      )
+    );
+  }
+
+  registerProcessController(
+    processController: ProcessControllerConcrete
+  ): void {
+    this.addRoute("POST", "/api/process", (req, res) =>
+      processController.handleProcess(req, res)
+    );
+    this.addRoute("POST", "/api/query", (req, res) =>
+      processController.handleQuery(req, res)
     );
   }
 
@@ -43,7 +61,7 @@ export class HttpServer {
 
     const pattern = path.replace(/:([^/]+)/g, (_match, paramName) => {
       paramNames.push(paramName);
-      return '([^/]+)';
+      return "([^/]+)";
     });
 
     this.routes.push({
@@ -54,10 +72,13 @@ export class HttpServer {
     });
   }
 
-  private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const method = req.method || 'GET';
-    const url = req.url || '/';
-    const pathname = url.split('?')[0];
+  private async handleRequest(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    const method = req.method || "GET";
+    const url = req.url || "/";
+    const pathname = url.split("?")[0];
 
     for (const route of this.routes) {
       if (route.method !== method) continue;
@@ -75,8 +96,8 @@ export class HttpServer {
     }
 
     // 404 Not Found
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found', path: pathname }));
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not Found", path: pathname }));
   }
 
   /**
@@ -87,7 +108,13 @@ export class HttpServer {
       this.server.listen(this.port, () => {
         console.log(`🚀 Server running at http://localhost:${this.port}`);
         console.log(`📍 Try: curl http://localhost:${this.port}/api/greeting`);
-        console.log(`📍 Try: curl http://localhost:${this.port}/api/greeting/YourName`);
+        console.log(
+          `📍 Try: curl http://localhost:${this.port}/api/greeting/YourName`
+        );
+        console.log(
+          `📍 POST /api/process (body: rawData, userID, requestTimestamp, requestID)`
+        );
+        console.log(`📍 POST /api/query (body: rawQuery)`);
         resolve();
       });
     });

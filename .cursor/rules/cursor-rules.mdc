@@ -1,0 +1,30 @@
+---
+alwaysApply: true
+---
+
+# Cursor Rules
+
+- **Be predictable**
+  - No “smart moves” or pattern discovery unless explicitly asked.
+  - Strictly follow existing codebase rules and conventions (folder structure, naming, style).
+
+- **Be reusable**
+  - Any reusable string or numeric value MUST be defined in an enum.
+  - Do NOT introduce single-use values.
+  - If something looks like an enum, check the enum directory first and reuse if it exists.
+  - All enums MUST live in the same enum directory, under /src/helpers/enums
+
+- **Think twice**
+  - If anything is unclear, confirm with the user before implementing.
+  - Do NOT assume or invent behavior.
+
+- **Be concise**
+  - Output MUST be short and informative.
+  - Do NOT explain changes unless explicitly asked.
+  - No follow-up suggestions, conclusions, or summaries.
+
+- **Be documented**
+  - For important features, document what and why in `CONTEXT.md` (root).
+  - Keep it short; reference file paths/lines instead of duplicating code.
+  - Read `CONTEXT.md` before implementation if global context may matter.
+  - Skip documentation for simple features.

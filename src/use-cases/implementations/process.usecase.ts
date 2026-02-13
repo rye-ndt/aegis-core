@@ -10,6 +10,7 @@ import {
 } from "../interface/input/IStoreData";
 import {
   ICategorizeService,
+  IChunker,
   IVectorDB,
   IVectorService,
 } from "../interface/output/IVectorize";
@@ -20,31 +21,42 @@ export class ProcessUserRequest implements IProcessUserRequest {
   private vectorizer: IVectorService;
   private categorizer: ICategorizeService;
   private vectorDB: IVectorDB;
+  private chunker: IChunker;
 
   //user can store, retrieve and request for aggregation / compilation
   constructor(
     vectorizer: IVectorService,
     categorizer: ICategorizeService,
-    vectorDB: IVectorDB
+    chunker: IChunker,
+    vectorDB: IVectorDB,
   ) {
     this.vectorizer = vectorizer;
     this.categorizer = categorizer;
     this.vectorDB = vectorDB;
+    this.chunker = chunker;
   }
 
   async processAndStore(data: IRawData): Promise<IStoreResponse> {
     try {
       //vectorize
-      const vectors = await this.vectorizer.process(data.rawData);
+      const chunks = await this.chunker.process(data.rawData);
 
-      //categorize
+      const vectors = await Promise.all(
+        chunks.map(async (chunk) => {
+          const vector = await this.vectorizer.process(chunk);
+          return vector;
+        }),
+      );
+
+      const flattenedVectors = vectors.flat();
+
       const category = await this.categorizer.process(data.rawData);
 
       //store the data
       const storeData: StandardizedData = {
         id: newUuid(),
         rawData: data.rawData,
-        vector: vectors,
+        vector: flattenedVectors,
         category: category,
         createdAtTimestamp: newCurrentUTCEpoch(),
         updatedAtTimestamp: newCurrentUTCEpoch(),
@@ -61,7 +73,7 @@ export class ProcessUserRequest implements IProcessUserRequest {
       }
 
       throw new IError(
-        "An unknown error occurred while processing and storing data."
+        "An unknown error occurred while processing and storing data.",
       );
     }
   }
@@ -70,13 +82,15 @@ export class ProcessUserRequest implements IProcessUserRequest {
     try {
       //categorize the query
       const category = await this.categorizer.queryCategoryFromRequest(
-        query.rawQuery
+        query.rawQuery,
       );
+
+      const queryVectors = await this.vectorizer.process(query.rawQuery);
 
       //query and response
       const queryResponse = await this.vectorDB.retrieve(
         category,
-        query.rawQuery
+        queryVectors,
       );
 
       return {

@@ -19,8 +19,12 @@ export interface IVectorDB {
   store(data: StandardizedData): Promise<void>;
   retrieve(
     category: SUPPORTED_CATEGORIES,
-    query: string
+    queryVectors: IVector[],
   ): Promise<StandardizedData[]>;
+}
+
+export interface IChunker {
+  process(text: string): Promise<string[]>;
 }
 
 export interface IVectorReferenceDB {
