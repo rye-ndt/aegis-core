@@ -14,3 +14,25 @@ export enum PRIMARY_CATEGORY {
   RESEARCH = "research",
   OTHER = "other",
 }
+
+export enum PERSONALITIES {
+  CALM = "calm",
+  AGGRESSIVE = "aggressive",
+  ANALYTICAL = "analytical",
+  CREATIVE = "creative",
+  LOGICAL = "logical",
+  INTUITIVE = "intuitive",
+  PRACTICAL = "practical",
+  THEORETICAL = "theoretical",
+  EMPATHETIC = "empathetic",
+  DIRECT = "direct",
+  PATIENT = "patient",
+  ENTHUSIASTIC = "enthusiastic",
+  SCEPTICAL = "sceptical",
+  SUPPORTIVE = "supportive",
+  HUMOROUS = "humorous",
+  FORMAL = "formal",
+  CASUAL = "casual",
+  MINIMALIST = "minimalist",
+  THOROUGH = "thorough",
+}
