@@ -1,9 +1,9 @@
 import axios from "axios";
-import { TextChunk } from "../../../../use-cases/interface/input/chunker.interface";
+import { TextChunk } from "../../../../use-cases/interface/output/chunker.interface";
 import {
   ChunkVector,
   IVectorizer,
-} from "../../../../use-cases/interface/input/vectorizer.interface";
+} from "../../../../use-cases/interface/output/vectorizer.interface";
 
 interface Config {
   modelName: string;
@@ -41,7 +41,7 @@ export class NomicEmbedder implements IVectorizer {
         );
 
         return {
-          chunkId: chunk.id as ChunkVector["chunkId"],
+          chunkId: chunk.id,
           vector: data.embedding,
         };
       }),
@@ -49,3 +49,4 @@ export class NomicEmbedder implements IVectorizer {
     return results;
   }
 }
+

@@ -3,7 +3,7 @@ import {
   IProcessUserRequest,
   IRawData,
   IQueryData,
-} from "../../../../use-cases/interface/output/process.interface";
+} from "../../../../use-cases/interface/input/process.interface";
 import { readJsonBody } from "./helper";
 
 export class ProcessControllerConcrete {

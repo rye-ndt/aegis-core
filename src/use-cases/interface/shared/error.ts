@@ -11,3 +11,4 @@ export class IError extends Error {
     return this.code;
   }
 }
+

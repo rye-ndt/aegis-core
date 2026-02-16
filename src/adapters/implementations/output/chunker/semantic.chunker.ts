@@ -3,8 +3,8 @@ import { newUuid } from "../../../../helpers/uuid";
 import {
   IChunker,
   TextChunk,
-} from "../../../../use-cases/interface/input/chunker.interface";
-import { IVectorizer } from "../../../../use-cases/interface/input/vectorizer.interface";
+} from "../../../../use-cases/interface/output/chunker.interface";
+import { IVectorizer } from "../../../../use-cases/interface/output/vectorizer.interface";
 
 interface Config {
   ollamaUrl: string;
@@ -162,3 +162,4 @@ function buildChunk(sentences: string[], sims: number[]): SemanticChunk {
     avgSimilarity: parseFloat(avgSimilarity.toFixed(4)),
   };
 }
+

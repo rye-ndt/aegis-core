@@ -7,3 +7,4 @@ export interface TextChunk {
 export interface IChunker {
   process(text: string): Promise<TextChunk[]>;
 }
+

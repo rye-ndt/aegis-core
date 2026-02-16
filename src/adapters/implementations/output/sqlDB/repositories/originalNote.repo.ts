@@ -1,11 +1,11 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import type {
   IOriginalNoteDB,
   OriginalNote,
   OriginalNoteCreate,
-} from "../../../../../use-cases/interface/input/sqlDB.interface";
+} from "../../../../../use-cases/interface/output/repository/originalNote.repo";
 import { originalNotes } from "../schema";
 
 export class DrizzleOriginalNoteRepo implements IOriginalNoteDB {
@@ -25,6 +25,15 @@ export class DrizzleOriginalNoteRepo implements IOriginalNoteDB {
     return rows[0] ?? null;
   }
 
+  async findByIds(ids: string[]): Promise<OriginalNote[]> {
+    if (ids.length === 0) return [];
+
+    return await this.db
+      .select()
+      .from(originalNotes)
+      .where(inArray(originalNotes.id, ids));
+  }
+
   async findLatestByUserId(
     userId: string,
     limit: number,
@@ -37,3 +46,4 @@ export class DrizzleOriginalNoteRepo implements IOriginalNoteDB {
       .limit(limit);
   }
 }
+

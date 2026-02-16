@@ -1,21 +1,18 @@
 import { newUuid } from "../../helpers/uuid";
-import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import {
   IProcessUserRequest,
   IQueryData,
   IQueryResponse,
   IRawData,
   IStoreResponse,
-  StandardizedData,
-} from "../interface/output/process.interface";
+} from "../interface/input/process.interface";
 
-import { IError } from "../interface/input/error.interface";
-import { IChunker } from "../interface/input/chunker.interface";
-import { ICategorizer } from "../interface/input/categorizer.interface";
-import {
-  IVectorDB,
-  IVectorizer,
-} from "../interface/input/vectorizer.interface";
+import { IError } from "../interface/shared/error";
+import { IChunker } from "../interface/output/chunker.interface";
+import { ICategorizer } from "../interface/output/categorizer.interface";
+import type { IVectorDB, IVectorWithMetadata } from "../interface/output/vectorDB.interface";
+import { IVectorizer } from "../interface/output/vectorizer.interface";
+import { PRIMARY_CATEGORY } from "../../helpers/enums/categories.enum";
 
 //defines what user can do to interact with the system
 export class ProcessUserRequest implements IProcessUserRequest {
@@ -23,7 +20,6 @@ export class ProcessUserRequest implements IProcessUserRequest {
   private categorizer: ICategorizer;
   private chunker: IChunker;
   private vectorDB: IVectorDB;
-  private sqlDB: IPostgresDB;
 
   //user can store, retrieve and request for aggregation / compilation
   constructor(
@@ -35,31 +31,37 @@ export class ProcessUserRequest implements IProcessUserRequest {
     this.vectorizer = vectorizer;
     this.categorizer = categorizer;
     this.chunker = chunker;
+    this.vectorDB = vectorDB;
   }
 
   async processAndStore(data: IRawData): Promise<IStoreResponse> {
     try {
-      //vectorize
       const chunks = await this.chunker.process(data.rawData);
-
       const categorizedChunks = await this.categorizer.batchProcess(chunks);
+      const categorizedByChunkId = new Map(
+        categorizedChunks.map((c) => [c.chunkId, c] as const),
+      );
 
       const chunkVectors = await this.vectorizer.batchProcess(chunks);
 
-      //store the data
-      const storeData: StandardizedData = {
-        id: newUuid(),
-        rawData: data.rawData,
-        vector: flattenedVectors,
-        category: category,
-        createdAtTimestamp: newCurrentUTCEpoch(),
-        updatedAtTimestamp: newCurrentUTCEpoch(),
-      };
+      const batchId = newUuid();
+      const vectors: IVectorWithMetadata[] = chunkVectors.map((v) => {
+        const categorized = categorizedByChunkId.get(v.chunkId);
+        return {
+          ...v,
+          id: batchId,
+          metadata: {
+            userId: data.userID,
+            primaryCategory: categorized?.category ?? PRIMARY_CATEGORY.OTHER,
+            tags: categorized?.tags ?? [],
+          },
+        };
+      });
 
-      await this.vectorDB.store(storeData);
+      await this.vectorDB.store(vectors);
 
       return {
-        id: storeData.id,
+        id: batchId,
       };
     } catch (err) {
       if (err instanceof IError) {
@@ -73,32 +75,9 @@ export class ProcessUserRequest implements IProcessUserRequest {
   }
 
   async query(query: IQueryData): Promise<IQueryResponse> {
-    try {
-      //categorize the query
-      const category = await this.categorizer.queryCategoryFromRequest(
-        query.rawQuery,
-      );
-
-      const queryVectors = await this.vectorizer.process(query.rawQuery);
-
-      //query and response
-      const queryResponse = await this.vectorDB.retrieve(
-        category,
-        queryVectors,
-      );
-
-      return {
-        rawData: queryResponse.map((data) => data.rawData),
-        referenceVectorIDs: queryResponse.map((data) => data.id),
-      };
-
-      //query and response
-    } catch (err) {
-      if (err instanceof IError) {
-        throw err;
-      }
-
-      throw new IError("An unknown error occurred while querying the data.");
-    }
+    void query;
+    throw new IError(
+      "Query is not implemented: no vector DB retrieve port is wired yet.",
+    );
   }
 }

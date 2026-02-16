@@ -1,4 +1,4 @@
-import type { ISqlDB } from "../../../../use-cases/interface/input/sqlDB.interface";
+import type { ISqlDB } from "../../../../use-cases/interface/output/sqlDB.interface";
 
 import { PostgresDB, type PostgresConfig } from "./drizzlePostgres.db";
 import { DrizzleOriginalNoteRepo } from "./repositories/originalNote.repo";

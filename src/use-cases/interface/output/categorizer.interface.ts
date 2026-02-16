@@ -1,9 +1,8 @@
-import { UUID } from "crypto";
 import { PRIMARY_CATEGORY } from "../../../helpers/enums/categories.enum";
 import { TextChunk } from "./chunker.interface";
 
 export interface CategorizedItem {
-  chunkId: UUID;
+  chunkId: string;
   category: PRIMARY_CATEGORY;
   tags: string[];
 }

@@ -7,5 +7,10 @@ export interface IPostgresDB {
 
 export interface ISqlDB extends IPostgresDB {
   originalNotes: IOriginalNoteDB;
-  materials: IMaterialDB;
+  /**
+   * Optional until a concrete SQL implementation is provided.
+   * (No current use-case depends on it.)
+   */
+  materials?: IMaterialDB;
 }
+

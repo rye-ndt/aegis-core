@@ -1,6 +1,6 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
-import type { ISqlDB } from "../interface/input/sqlDB.interface";
+import type { ISqlDB } from "../interface/output/sqlDB.interface";
 
 type Input = {
   userId: string;

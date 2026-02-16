@@ -26,3 +26,4 @@ export interface IMaterialDB {
     status: MATERIAL_STATUSES[],
   ): Promise<Material[]>;
 }
+

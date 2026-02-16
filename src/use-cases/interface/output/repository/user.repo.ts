@@ -23,3 +23,4 @@ export interface IUserDB {
   create(user: UserInit): Promise<void>;
   findById(id: string): Promise<IUser>;
 }
+

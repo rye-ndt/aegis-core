@@ -1,5 +1,5 @@
 import { PRIMARY_CATEGORY } from "../../../helpers/enums/categories.enum";
-import { IVector } from "./IVectorize";
+import { IVector } from "../shared/IVectorize";
 
 // What outer service expects this service to do
 export interface StandardizedData {
@@ -36,3 +36,4 @@ export interface IProcessUserRequest {
   processAndStore(data: IRawData): Promise<IStoreResponse>;
   query(query: IQueryData): Promise<IQueryResponse>;
 }
+

@@ -1,4 +1,4 @@
-import { ICleaner } from "../../../../use-cases/interface/output/IVectorize";
+import { ICleaner } from "../../../../use-cases/interface/shared/IVectorize";
 
 export class CleanerV1Service implements ICleaner {
   process(input: string): string {
@@ -27,3 +27,4 @@ export class CleanerV1Service implements ICleaner {
     return text.toLowerCase();
   }
 }
+

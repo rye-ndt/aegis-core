@@ -2,7 +2,7 @@ import { Pinecone as PineconeClient } from "@pinecone-database/pinecone";
 import {
   IVectorDB,
   IVectorWithMetadata,
-} from "../../../use-cases/interface/input/vectorizer.interface";
+} from "../../../use-cases/interface/output/vectorDB.interface";
 
 type PineconeMetadata = {
   id: string;

@@ -1,6 +1,7 @@
 import { GreetingUseCaseConcrete } from "../../use-cases/implementations/greeting.usecase";
 import { GreetingControllerConcrete } from "../implementations/input/http/greeting.controller";
 import { IGreetingRepository } from "../../use-cases/interface/output/IGreetingRepo";
+import { GreetingRepoConcrete } from "../implementations/output/greetingRepo";
 
 export class GreetingInject {
   private repo: IGreetingRepository | null = null;
@@ -9,7 +10,7 @@ export class GreetingInject {
 
   getRepo(): IGreetingRepository {
     if (!this.repo) {
-      this.repo = new GreetingRepositoryConcrete();
+      this.repo = new GreetingRepoConcrete();
     }
 
     return this.repo;

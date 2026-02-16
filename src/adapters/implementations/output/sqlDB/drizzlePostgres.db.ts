@@ -33,3 +33,4 @@ export class PostgresDB {
     await this.pool.end();
   }
 }
+

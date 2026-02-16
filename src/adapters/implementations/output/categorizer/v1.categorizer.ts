@@ -5,8 +5,8 @@ import { PRIMARY_CATEGORY } from "../../../../helpers/enums/categories.enum";
 import {
   CategorizedItem,
   ICategorizer,
-} from "../../../../use-cases/interface/input/categorizer.interface";
-import { TextChunk } from "../../../../use-cases/interface/input/chunker.interface";
+} from "../../../../use-cases/interface/output/categorizer.interface";
+import { TextChunk } from "../../../../use-cases/interface/output/chunker.interface";
 import { newUuid } from "../../../../helpers/uuid";
 
 const primaryCategoryValues = Object.values(PRIMARY_CATEGORY) as [
@@ -72,7 +72,7 @@ export class V1Categorizer implements ICategorizer {
 
     const parsed = message.parsed as z.infer<typeof CategorizedItemSchema>;
     return {
-      chunkId: newUuid() as CategorizedItem["chunkId"],
+      chunkId: newUuid(),
       category: parsed.category as PRIMARY_CATEGORY,
       tags: parsed.tags,
     };
@@ -123,10 +123,11 @@ Respond only with valid JSON matching the schema.`,
       }
 
       return {
-        chunkId: chunk.id as CategorizedItem["chunkId"],
+        chunkId: chunk.id,
         category: item.category as PRIMARY_CATEGORY,
         tags: item.tags,
       };
     });
   }
 }
+
