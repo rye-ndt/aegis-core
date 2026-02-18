@@ -1,7 +1,7 @@
 import { USER_STATUSES } from "../../../helpers/enums/statuses.enum";
 import { USER_ROLES } from "../../../helpers/enums/userRole.enum";
 
-export interface IRegisterUser {
+export interface IRegisterUserRequest {
   fullName: string;
   userName: string;
   password: string;
@@ -9,12 +9,16 @@ export interface IRegisterUser {
   email: string;
 }
 
-export interface ILoginUser {
+export interface ILoginUserRequest {
   userName: string;
   password: string;
 }
 
-export interface IUser {
+export interface IVerifyEmailRequest {
+  code: string;
+}
+
+export interface IUserResponse {
   id: string;
   fullName: string;
   userName: string;
@@ -26,10 +30,3 @@ export interface IUser {
   registeredAtEpoch: number;
 }
 
-export interface IUserUseCase {
-  register(data: IRegisterUser): Promise<IUser>;
-  login(data: ILoginUser): Promise<IUser>;
-  logout(accessToken: string): Promise<void>;
-  refresh(refreshToken: string): Promise<IUser>;
-  verifyEmail(bearerToken: string, code: string): Promise<IUser>;
-}

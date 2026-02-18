@@ -6,6 +6,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 
 import { PostgresDB, type PostgresConfig } from "./drizzlePostgres.db";
 import { DrizzleOriginalNoteRepo } from "./repositories/originalNote.repo";
+import { DrizzleUserRepo } from "./repositories/user.repo";
 
 /**
  * SQL adapter facade:
@@ -14,10 +15,12 @@ import { DrizzleOriginalNoteRepo } from "./repositories/originalNote.repo";
  */
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly originalNotes: DrizzleOriginalNoteRepo;
+  readonly users: DrizzleUserRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
     this.originalNotes = new DrizzleOriginalNoteRepo(this.db);
+    this.users = new DrizzleUserRepo(this.db);
   }
 
   async beginTransaction(): Promise<ITransaction> {

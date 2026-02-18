@@ -1,5 +1,6 @@
 import { UserEntity } from "../../core/entities/User";
 import { ERROR_CODES } from "../../helpers/enums/errorCodes.enum";
+import { USER_ROLES } from "../../helpers/enums/userRole.enum";
 import { VERIFICATION_CODE_TTL } from "../../helpers/enums/verificationCode.enum";
 import { VERIFICATION_EMAIL_SUBJECT } from "../../helpers/enums/verificationEmail.enum";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
@@ -55,6 +56,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       hashedPassword,
       email: data.email,
       dob: data.dob,
+      role: USER_ROLES.USER,
       status: user.getStatus(),
       createdAtEpoch: now,
       updatedAtEpoch: now,
@@ -72,6 +74,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       id: init.id,
       fullName: init.fullName,
       userName: init.userName,
+      role: init.role,
       status: init.status,
       bearerToken: tokens.bearerToken,
       refreshToken: tokens.refreshToken,
@@ -102,6 +105,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       hashedPassword: existingUser.hashedPassword,
       email: existingUser.email,
       dob: existingUser.dob,
+      role: existingUser.role,
       status: user.getStatus(),
       updatedAtEpoch,
     });
@@ -114,6 +118,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       id: existingUser.id,
       fullName: existingUser.fullName,
       userName: existingUser.userName,
+      role: existingUser.role,
       status: user.getStatus(),
       bearerToken,
       refreshToken,
@@ -145,6 +150,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       id: user.id,
       fullName: user.fullName,
       userName: user.userName,
+      role: user.role,
       status: user.status,
       bearerToken,
       refreshToken,
@@ -175,6 +181,7 @@ export class UserUseCaseImpl implements IUserUseCase {
       id: existingUser.id,
       fullName: existingUser.fullName,
       userName: existingUser.userName,
+      role: existingUser.role,
       status: existingUser.status,
       bearerToken,
       refreshToken: newRefreshToken,

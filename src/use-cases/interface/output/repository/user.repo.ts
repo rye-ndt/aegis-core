@@ -2,6 +2,7 @@ import {
   PERSONALITIES,
   PRIMARY_CATEGORY,
 } from "../../../../helpers/enums/categories.enum";
+import { USER_ROLES } from "../../../../helpers/enums/userRole.enum";
 import { USER_STATUSES } from "../../../../helpers/enums/statuses.enum";
 import type {
   ILoginUser,
@@ -15,6 +16,7 @@ export interface UserInit {
   hashedPassword: string;
   email: string;
   dob: number;
+  role: USER_ROLES;
   status: USER_STATUSES;
   createdAtEpoch: number;
   updatedAtEpoch: number;
@@ -27,6 +29,7 @@ export interface UserUpdate {
   hashedPassword: string;
   email: string;
   dob: number;
+  role: USER_ROLES;
   status: USER_STATUSES;
   updatedAtEpoch: number;
 }

@@ -1,6 +1,7 @@
 import * as http from "http";
 import { GreetingControllerConcrete } from "./greeting.controller";
 import { ProcessControllerConcrete } from "./process.controller";
+import { UserControllerConcrete } from "./user.controller";
 
 type RouteHandler = (
   req: http.IncomingMessage,
@@ -53,6 +54,28 @@ export class HttpServer {
     );
     this.addRoute("POST", "/api/query", (req, res) =>
       processController.handleQuery(req, res)
+    );
+  }
+
+  registerUserController(userController: UserControllerConcrete): void {
+    this.addRoute("POST", "/api/users/register", (req, res) =>
+      userController.handleRegister(req, res)
+    );
+
+    this.addRoute("POST", "/api/users/login", (req, res) =>
+      userController.handleLogin(req, res)
+    );
+
+    this.addRoute("POST", "/api/users/logout", (req, res) =>
+      userController.handleLogout(req, res)
+    );
+
+    this.addRoute("POST", "/api/users/refresh", (req, res) =>
+      userController.handleRefresh(req, res)
+    );
+
+    this.addRoute("POST", "/api/users/verify-email", (req, res) =>
+      userController.handleVerifyEmail(req, res)
     );
   }
 
