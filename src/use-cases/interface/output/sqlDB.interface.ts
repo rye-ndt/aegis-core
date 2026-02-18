@@ -5,6 +5,16 @@ export interface IPostgresDB {
   close(): Promise<void>;
 }
 
+/**
+ * Open transaction handle. Use run() to execute one or more callbacks within the same transaction.
+ * Call commit() or rollback() when done.
+ */
+export interface ITransaction {
+  run<T>(fn: (tx: ISqlDB) => Promise<T>): Promise<T>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+}
+
 export interface ISqlDB extends IPostgresDB {
   originalNotes: IOriginalNoteDB;
   /**
@@ -12,5 +22,6 @@ export interface ISqlDB extends IPostgresDB {
    * (No current use-case depends on it.)
    */
   materials?: IMaterialDB;
+  /** Starts a transaction. Pass callbacks to run(); then commit() or rollback(). */
+  beginTransaction(): Promise<ITransaction>;
 }
-

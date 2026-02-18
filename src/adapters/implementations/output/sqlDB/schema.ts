@@ -15,4 +15,3 @@ export const originalNotes = pgTable("original_notes", {
   createdAtTimestamp: integer("created_at_timestamp").notNull(),
   updatedAtTimestamp: integer("updated_at_timestamp").notNull(),
 });
-

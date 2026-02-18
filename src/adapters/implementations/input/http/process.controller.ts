@@ -1,13 +1,13 @@
 import { IncomingMessage, ServerResponse } from "http";
 import {
-  IProcessUserRequest,
+  IProcessNoteUseCase,
   IRawData,
   IQueryData,
 } from "../../../../use-cases/interface/input/process.interface";
 import { readJsonBody } from "./helper";
 
 export class ProcessControllerConcrete {
-  constructor(private readonly processUseCase: IProcessUserRequest) {}
+  constructor(private readonly processUseCase: IProcessNoteUseCase) {}
 
   async handleProcess(
     req: IncomingMessage,

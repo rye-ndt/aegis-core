@@ -1,11 +1,11 @@
 import { PRIMARY_CATEGORY } from "../../../helpers/enums/categories.enum";
-import { IVector } from "../shared/IVectorize";
+import { IVectorWithMetadata } from "../output/vectorDB.interface";
 
 // What outer service expects this service to do
 export interface StandardizedData {
   id: string;
   rawData: string;
-  vector: IVector[];
+  vector: IVectorWithMetadata[];
   category: PRIMARY_CATEGORY;
   payload?: any;
   createdAtTimestamp: number;
@@ -32,8 +32,7 @@ export interface IQueryResponse {
   referenceVectorIDs: string[];
 }
 
-export interface IProcessUserRequest {
+export interface IProcessNoteUseCase {
   processAndStore(data: IRawData): Promise<IStoreResponse>;
   query(query: IQueryData): Promise<IQueryResponse>;
 }
-

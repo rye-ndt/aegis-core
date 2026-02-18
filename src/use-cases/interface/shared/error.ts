@@ -1,3 +1,8 @@
+import {
+  ERROR_CODES,
+  ERROR_CODES_MAP,
+} from "../../../helpers/enums/errorCodes.enum";
+
 export class IError extends Error {
   code: string;
 
@@ -12,3 +17,6 @@ export class IError extends Error {
   }
 }
 
+export const throwError = (code: ERROR_CODES): never => {
+  throw new IError(ERROR_CODES_MAP[code], code);
+};

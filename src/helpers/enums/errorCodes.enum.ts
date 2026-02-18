@@ -1,0 +1,22 @@
+export enum ERROR_CODES {
+  UNKNOWN_ERROR = "UNKNOWN_ERROR",
+  USER_ALREADY_EXISTS = "USER_ALREADY_EXISTS",
+  WEAK_PASSWORD = "WEAK_PASSWORD",
+  INVALID_EMAIL = "INVALID_EMAIL",
+  INVALID_TOKEN = "INVALID_TOKEN",
+  USER_NOT_FOUND = "USER_NOT_FOUND",
+  USER_ALREADY_VERIFIED = "USER_ALREADY_VERIFIED",
+  INVALID_VERIFICATION_CODE = "INVALID_VERIFICATION_CODE",
+}
+
+export const ERROR_CODES_MAP = {
+  [ERROR_CODES.UNKNOWN_ERROR]: "An unknown error occurred.",
+  [ERROR_CODES.USER_ALREADY_EXISTS]:
+    "A user with this username or email already exists.",
+  [ERROR_CODES.WEAK_PASSWORD]: "Password must be at least 8 characters long.",
+  [ERROR_CODES.INVALID_EMAIL]: "Invalid email address.",
+  [ERROR_CODES.INVALID_TOKEN]: "Invalid token.",
+  [ERROR_CODES.USER_NOT_FOUND]: "User not found.",
+  [ERROR_CODES.USER_ALREADY_VERIFIED]: "User already verified.",
+  [ERROR_CODES.INVALID_VERIFICATION_CODE]: "Invalid verification code.",
+};

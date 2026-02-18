@@ -29,6 +29,10 @@ export class PostgresDB {
     return this._db;
   }
 
+  protected getPool(): Pool {
+    return this.pool;
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

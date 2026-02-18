@@ -46,4 +46,3 @@ export class DrizzleOriginalNoteRepo implements IOriginalNoteDB {
       .limit(limit);
   }
 }
-

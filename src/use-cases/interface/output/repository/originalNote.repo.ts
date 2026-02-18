@@ -6,12 +6,9 @@ export type OriginalNote = {
   updatedAtTimestamp: number;
 };
 
-export type OriginalNoteCreate = OriginalNote;
-
 export interface IOriginalNoteDB {
-  create(note: OriginalNoteCreate): Promise<void>;
+  create(note: OriginalNote): Promise<void>;
   findById(id: string): Promise<OriginalNote | null>;
   findByIds(ids: string[]): Promise<OriginalNote[]>;
   findLatestByUserId(userId: string, limit: number): Promise<OriginalNote[]>;
 }
-

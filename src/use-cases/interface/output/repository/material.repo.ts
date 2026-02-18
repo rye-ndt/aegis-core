@@ -16,6 +16,7 @@ export interface Material {
 
 export interface IMaterialDB {
   create(material: Material): Promise<void>;
+  batchCreate(materials: Material[]): Promise<void>;
   findByIds(ids: string[], status: MATERIAL_STATUSES[]): Promise<Material[]>;
   findByCategory(
     category: PRIMARY_CATEGORY,
@@ -27,3 +28,17 @@ export interface IMaterialDB {
   ): Promise<Material[]>;
 }
 
+export interface IMaterialVector {
+  id: string;
+  materialId: string;
+  vectorId: string;
+  createdAtEpoch: number;
+  updatedAtEpoch: number;
+}
+
+export interface IMaterialVectorDB {
+  create(materialVector: IMaterialVector): Promise<void>;
+  batchCreate(materialVectors: IMaterialVector[]): Promise<void>;
+  findByMaterialId(materialId: string): Promise<IMaterialVector[]>;
+  findByVectorId(vectorId: string): Promise<IMaterialVector[]>;
+}

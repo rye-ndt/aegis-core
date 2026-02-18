@@ -15,4 +15,3 @@ export interface IVectorWithMetadata extends ChunkVector {
 export interface IVectorDB {
   store(chunkVectors: IVectorWithMetadata[]): Promise<void>;
 }
-

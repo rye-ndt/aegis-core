@@ -1,5 +1,5 @@
 import { ProcessControllerConcrete } from "../implementations/input/http/process.controller";
-import type { IProcessUserRequest } from "../../use-cases/interface/input/process.interface";
+import type { IProcessNoteUseCase } from "../../use-cases/interface/input/process.interface";
 import { ProcessUserRequest } from "../../use-cases/implementations/process.usecase";
 import type { IChunker } from "../../use-cases/interface/output/chunker.interface";
 import type { ICategorizer } from "../../use-cases/interface/output/categorizer.interface";
@@ -16,7 +16,7 @@ export class ProcessInject {
   private vectorizer: IVectorizer | null = null;
   private categorizer: ICategorizer | null = null;
   private chunker: IChunker | null = null;
-  private useCase: IProcessUserRequest | null = null;
+  private useCase: IProcessNoteUseCase | null = null;
   private ctl: ProcessControllerConcrete | null = null;
 
   getVectorDB(): IVectorDB {
@@ -57,9 +57,7 @@ export class ProcessInject {
         {
           ollamaUrl: process.env.OLLAMA_URL ?? "",
           model: process.env.OLLAMA_CHUNK_MODEL ?? "",
-          similarityThreshold: Number(
-            process.env.SEMANTIC_CHUNK_SIM_THRESHOLD,
-          ),
+          similarityThreshold: Number(process.env.SEMANTIC_CHUNK_SIM_THRESHOLD),
           maxSentencesPerChunk: Number(
             process.env.SEMANTIC_CHUNK_MAX_SENTENCES,
           ),
@@ -74,7 +72,7 @@ export class ProcessInject {
     return this.chunker;
   }
 
-  getUseCase(): IProcessUserRequest {
+  getUseCase(): IProcessNoteUseCase {
     if (!this.useCase) {
       this.useCase = new ProcessUserRequest(
         this.getVectorizer(),

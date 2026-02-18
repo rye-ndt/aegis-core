@@ -1,4 +1,5 @@
-import { depInjectConcrete } from './adapters/inject';
+import "dotenv/config";
+import { depInjectConcrete } from "./adapters/inject";
 
 const main = async (): Promise<void> => {
   const port = parseInt(process.env.PORT || '3000', 10);
