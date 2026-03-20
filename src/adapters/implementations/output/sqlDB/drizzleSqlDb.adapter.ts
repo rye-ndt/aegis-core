@@ -5,7 +5,6 @@ import type {
 import { drizzle } from "drizzle-orm/node-postgres";
 
 import { PostgresDB, type PostgresConfig } from "./drizzlePostgres.db";
-import { DrizzleOriginalNoteRepo } from "./repositories/originalNote.repo";
 import { DrizzleUserRepo } from "./repositories/user.repo";
 
 /**
@@ -14,12 +13,10 @@ import { DrizzleUserRepo } from "./repositories/user.repo";
  * - exposes per-table repositories (each with its own signatures)
  */
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
-  readonly originalNotes: DrizzleOriginalNoteRepo;
   readonly users: DrizzleUserRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
-    this.originalNotes = new DrizzleOriginalNoteRepo(this.db);
     this.users = new DrizzleUserRepo(this.db);
   }
 
@@ -27,9 +24,8 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     const client = await this.getPool().connect();
     await client.query("BEGIN");
     const txDb = drizzle({ client });
-    const originalNotes = new DrizzleOriginalNoteRepo(txDb);
     const txFacade: ISqlDB = {
-      originalNotes,
+      users: new DrizzleUserRepo(txDb),
       close: async () => {},
       beginTransaction: async () => {
         throw new Error("Nested transaction not implemented");

@@ -1,6 +1,6 @@
-import { IMaterialDB } from "./repository/material.repo";
-import { IOriginalNoteDB } from "./repository/originalNote.repo";
 import type { IUserDB } from "./repository/user.repo";
+import type { IConversationDB } from "./repository/conversation.repo";
+import type { IMessageDB } from "./repository/message.repo";
 
 export interface IPostgresDB {
   close(): Promise<void>;
@@ -17,13 +17,9 @@ export interface ITransaction {
 }
 
 export interface ISqlDB extends IPostgresDB {
-  originalNotes: IOriginalNoteDB;
-  /**
-   * Optional until a concrete SQL implementation is provided.
-   * (No current use-case depends on it.)
-   */
-  materials?: IMaterialDB;
   users?: IUserDB;
+  conversations?: IConversationDB;
+  messages?: IMessageDB;
   /** Starts a transaction. Pass callbacks to run(); then commit() or rollback(). */
   beginTransaction(): Promise<ITransaction>;
 }

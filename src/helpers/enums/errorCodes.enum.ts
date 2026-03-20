@@ -1,9 +1,3 @@
-// Content group
-export enum CONTENT_ERROR_CODES {
-  CONTENT_NOT_FOUND = "CONTENT_NOT_FOUND",
-  UNKNOWN_ERROR = "UNKNOWN_ERROR",
-}
-
 // User group
 export enum USER_ERROR_CODES {
   USER_ALREADY_EXISTS = "USER_ALREADY_EXISTS",
@@ -15,22 +9,35 @@ export enum USER_ERROR_CODES {
   INVALID_VERIFICATION_CODE = "INVALID_VERIFICATION_CODE",
 }
 
+// Assistant group
+export enum ASSISTANT_ERROR_CODES {
+  CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND",
+  TOOL_NOT_FOUND = "TOOL_NOT_FOUND",
+  TRANSCRIPTION_FAILED = "TRANSCRIPTION_FAILED",
+  ORCHESTRATION_FAILED = "ORCHESTRATION_FAILED",
+  UNKNOWN_ERROR = "UNKNOWN_ERROR",
+}
+
 export const ERROR_CODES = {
-  ...CONTENT_ERROR_CODES,
   ...USER_ERROR_CODES,
+  ...ASSISTANT_ERROR_CODES,
 } as const;
 
-export type ERROR_CODES = CONTENT_ERROR_CODES | USER_ERROR_CODES;
+export type ERROR_CODES = USER_ERROR_CODES | ASSISTANT_ERROR_CODES;
 
 export const ERROR_CODES_MAP: Record<ERROR_CODES, string> = {
-  [CONTENT_ERROR_CODES.CONTENT_NOT_FOUND]: "Content not found.",
-  [CONTENT_ERROR_CODES.UNKNOWN_ERROR]: "An unknown error occurred.",
   [USER_ERROR_CODES.USER_ALREADY_EXISTS]:
     "A user with this username or email already exists.",
-  [USER_ERROR_CODES.WEAK_PASSWORD]: "Password must be at least 8 characters long.",
+  [USER_ERROR_CODES.WEAK_PASSWORD]:
+    "Password must be at least 8 characters long.",
   [USER_ERROR_CODES.INVALID_EMAIL]: "Invalid email address.",
   [USER_ERROR_CODES.INVALID_TOKEN]: "Invalid token.",
   [USER_ERROR_CODES.USER_NOT_FOUND]: "User not found.",
   [USER_ERROR_CODES.USER_ALREADY_VERIFIED]: "User already verified.",
   [USER_ERROR_CODES.INVALID_VERIFICATION_CODE]: "Invalid verification code.",
+  [ASSISTANT_ERROR_CODES.CONVERSATION_NOT_FOUND]: "Conversation not found.",
+  [ASSISTANT_ERROR_CODES.TOOL_NOT_FOUND]: "Tool not found.",
+  [ASSISTANT_ERROR_CODES.TRANSCRIPTION_FAILED]: "Audio transcription failed.",
+  [ASSISTANT_ERROR_CODES.ORCHESTRATION_FAILED]: "LLM orchestration failed.",
+  [ASSISTANT_ERROR_CODES.UNKNOWN_ERROR]: "An unknown error occurred.",
 };

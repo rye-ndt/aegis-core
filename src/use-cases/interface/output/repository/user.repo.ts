@@ -1,13 +1,6 @@
-import {
-  PERSONALITIES,
-  PRIMARY_CATEGORY,
-} from "../../../../helpers/enums/categories.enum";
+import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
 import { USER_ROLES } from "../../../../helpers/enums/userRole.enum";
 import { USER_STATUSES } from "../../../../helpers/enums/statuses.enum";
-import type {
-  ILoginUser,
-  IUser as UseCaseUser,
-} from "../../input/user.interface";
 
 export interface UserInit {
   id: string;
@@ -36,7 +29,6 @@ export interface UserUpdate {
 
 export interface IUser extends UserInit {
   personalities: PERSONALITIES[];
-  preferredCategories: PRIMARY_CATEGORY[];
   secondaryPersonalities: string[];
 }
 
