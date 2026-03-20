@@ -1,6 +1,6 @@
 import * as http from "http";
 import { GreetingControllerConcrete } from "./greeting.controller";
-import { ProcessControllerConcrete } from "./process.controller";
+import { AssistantControllerConcrete } from "./assistant.controller";
 import { UserControllerConcrete } from "./user.controller";
 
 type RouteHandler = (
@@ -46,14 +46,27 @@ export class HttpServer {
     );
   }
 
-  registerProcessController(
-    processController: ProcessControllerConcrete
+  registerAssistantController(
+    assistantController: AssistantControllerConcrete
   ): void {
-    this.addRoute("POST", "/api/process", (req, res) =>
-      processController.handleProcess(req, res)
+    this.addRoute("POST", "/api/assistant/chat", (req, res) =>
+      assistantController.handleChat(req, res)
     );
-    this.addRoute("POST", "/api/query", (req, res) =>
-      processController.handleQuery(req, res)
+    this.addRoute("POST", "/api/assistant/voice", (req, res) =>
+      assistantController.handleVoiceChat(req, res)
+    );
+    this.addRoute("GET", "/api/assistant/conversations", (req, res) =>
+      assistantController.handleListConversations(req, res)
+    );
+    this.addRoute(
+      "GET",
+      "/api/assistant/conversations/:conversationId",
+      (req, res, params) =>
+        assistantController.handleGetConversation(
+          req,
+          res,
+          params?.conversationId || ""
+        )
     );
   }
 
@@ -129,15 +142,7 @@ export class HttpServer {
   start(): Promise<void> {
     return new Promise((resolve) => {
       this.server.listen(this.port, () => {
-        console.log(`🚀 Server running at http://localhost:${this.port}`);
-        console.log(`📍 Try: curl http://localhost:${this.port}/api/greeting`);
-        console.log(
-          `📍 Try: curl http://localhost:${this.port}/api/greeting/YourName`
-        );
-        console.log(
-          `📍 POST /api/process (body: rawData, userID, requestTimestamp, requestID)`
-        );
-        console.log(`📍 POST /api/query (body: rawQuery)`);
+        console.log(`JARVIS running at http://localhost:${this.port}`);
         resolve();
       });
     });

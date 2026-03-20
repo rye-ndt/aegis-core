@@ -4,18 +4,6 @@
  */
 import { integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
 
-/**
- * Example table: original notes (raw user data before chunking/vectorization).
- * Add more tables as needed; each table can map to its own repository port.
- */
-export const originalNotes = pgTable("original_notes", {
-  id: uuid("id").primaryKey(),
-  userId: uuid("user_id").notNull(),
-  rawData: text("raw_data").notNull(),
-  createdAtTimestamp: integer("created_at_timestamp").notNull(),
-  updatedAtTimestamp: integer("updated_at_timestamp").notNull(),
-});
-
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
   fullName: text("full_name").notNull(),
@@ -26,11 +14,29 @@ export const users = pgTable("users", {
   role: text("role").notNull(),
   status: text("status").notNull(),
   personalities: text("personalities").array().notNull().default([]),
-  preferredCategories: text("preferred_categories").array().notNull().default([]),
   secondaryPersonalities: text("secondary_personalities")
     .array()
     .notNull()
     .default([]),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const conversations = pgTable("conversations", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  title: text("title").notNull(),
+  status: text("status").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const messages = pgTable("messages", {
+  id: uuid("id").primaryKey(),
+  conversationId: uuid("conversation_id").notNull(),
+  role: text("role").notNull(),
+  content: text("content").notNull(),
+  toolName: text("tool_name"),
+  toolCallId: text("tool_call_id"),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
 });

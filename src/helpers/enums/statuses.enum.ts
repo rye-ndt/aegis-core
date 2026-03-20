@@ -1,8 +1,6 @@
-export enum MATERIAL_STATUSES {
+export enum CONVERSATION_STATUSES {
   ACTIVE = "active",
-  PUBLISHED = "published",
   ARCHIVED = "archived",
-  DELETED = "deleted",
 }
 
 export enum USER_STATUSES {
