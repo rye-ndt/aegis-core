@@ -1,6 +1,7 @@
 import * as http from "http";
 import { AssistantControllerConcrete } from "./assistant.controller";
 import { UserControllerConcrete } from "./user.controller";
+import { GoogleCalendarAuthController } from "./googleCalendarAuth.controller";
 
 type RouteHandler = (
   req: http.IncomingMessage,
@@ -75,6 +76,11 @@ export class HttpServer {
     this.addRoute("POST", "/api/users/verify-email", (req, res) =>
       userController.handleVerifyEmail(req, res)
     );
+  }
+
+  registerGoogleCalendarAuthController(ctl: GoogleCalendarAuthController): void {
+    this.addRoute("GET", "/api/auth/google/calendar", (req, res) => ctl.handleInitiate(req, res));
+    this.addRoute("GET", "/api/auth/google/calendar/callback", (req, res) => ctl.handleCallback(req, res));
   }
 
   private addRoute(method: string, path: string, handler: RouteHandler): void {

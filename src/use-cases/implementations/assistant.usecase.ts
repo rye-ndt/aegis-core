@@ -218,9 +218,12 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   }
 
   private async buildSystemPrompt(userId: string, basePrompt: string): Promise<string> {
+    const now = new Date();
+    const dateContext = `Current date and time: ${now.toISOString()} (${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}).`;
+
     const user = await this.userRepo.findById(userId);
     if (!user || (!user.personalities.length && !user.secondaryPersonalities.length)) {
-      return basePrompt;
+      return `${basePrompt}\n\n${dateContext}`;
     }
 
     const parts: string[] = [];
@@ -231,6 +234,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       parts.push(`secondary — ${user.secondaryPersonalities.join(", ")}`);
     }
 
-    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.`;
+    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.\n\n${dateContext}`;
   }
 }

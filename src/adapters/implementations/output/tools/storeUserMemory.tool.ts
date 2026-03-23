@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
@@ -14,6 +15,14 @@ import type {
   UserMemory,
 } from "../../../../use-cases/interface/output/repository/userMemory.repo";
 import type { ITextGenerator } from "../../../../use-cases/interface/output/textGenerator.interface";
+
+const InputSchema = z.object({
+  content: z.string().describe("The memory to store, as stated by or inferred from the user"),
+  category: z
+    .enum(["preference", "fact", "event", "goal"])
+    .optional()
+    .describe("Optional category for the memory"),
+});
 
 const DEDUP_SCORE_THRESHOLD = 0.92;
 
@@ -32,27 +41,12 @@ export class StoreUserMemoryTool implements ITool {
       description:
         "Persist a fact, preference, or event about the user to long-term memory. " +
         "Call this when the user shares something personal worth remembering across conversations.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          content: {
-            type: "string",
-            description: "The memory to store, as stated by or inferred from the user",
-          },
-          category: {
-            type: "string",
-            enum: ["preference", "fact", "event", "goal"],
-            description: "Optional category for the memory",
-          },
-        },
-        required: ["content"],
-      },
+      inputSchema: z.toJSONSchema(InputSchema),
     };
   }
 
   async execute(input: IToolInput): Promise<IToolOutput> {
-    const content = input["content"] as string;
-    const category = input["category"] as string | undefined;
+    const { content, category } = InputSchema.parse(input);
     const now = newCurrentUTCEpoch();
 
     // Step 1: contextual enrichment
