@@ -1,5 +1,4 @@
 import * as http from "http";
-import { GreetingControllerConcrete } from "./greeting.controller";
 import { AssistantControllerConcrete } from "./assistant.controller";
 import { UserControllerConcrete } from "./user.controller";
 
@@ -30,20 +29,6 @@ export class HttpServer {
   constructor(port: number = 3000) {
     this.port = port;
     this.server = http.createServer(this.handleRequest.bind(this));
-  }
-
-  registerController(greetingController: GreetingControllerConcrete): void {
-    this.addRoute("GET", "/api/greeting", (req, res) =>
-      greetingController.handleGetGreeting(req, res)
-    );
-
-    this.addRoute("GET", "/api/greeting/:name", (req, res, params) =>
-      greetingController.handleGetPersonalizedGreeting(
-        req,
-        res,
-        params?.name || ""
-      )
-    );
   }
 
   registerAssistantController(
