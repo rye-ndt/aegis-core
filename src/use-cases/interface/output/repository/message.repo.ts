@@ -10,6 +10,8 @@ export interface Message {
   toolName?: TOOL_TYPE;
   /** Links a tool result message to its originating tool call */
   toolCallId?: string;
+  /** Set when role is ASSISTANT_TOOL_CALL — JSON-serialised OpenAI tool_calls array */
+  toolCallsJson?: string;
   createdAtEpoch: number;
 }
 

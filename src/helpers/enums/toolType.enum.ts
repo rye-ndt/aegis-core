@@ -10,4 +10,6 @@ export enum TOOL_TYPE {
   FILE_READ = "file_read",
   FILE_WRITE = "file_write",
   HTTP_REQUEST = "http_request",
+  RETRIEVE_USER_MEMORY = "retrieve_user_memory",
+  STORE_USER_MEMORY = "store_user_memory",
 }

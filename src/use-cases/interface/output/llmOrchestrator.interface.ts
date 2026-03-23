@@ -8,6 +8,8 @@ export interface IOrchestratorMessage {
   toolName?: string;
   /** Links a tool result back to the original tool call */
   toolCallId?: string;
+  /** For ASSISTANT_TOOL_CALL role — JSON-serialised OpenAI tool_calls array */
+  toolCallsJson?: string;
 }
 
 export interface IToolCall {

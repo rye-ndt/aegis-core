@@ -19,6 +19,7 @@ export class DrizzleMessageRepo implements IMessageDB {
       content: message.content,
       toolName: message.toolName ?? null,
       toolCallId: message.toolCallId ?? null,
+      toolCallsJson: message.toolCallsJson ?? null,
       createdAtEpoch: message.createdAtEpoch,
     });
   }
@@ -34,6 +35,7 @@ export class DrizzleMessageRepo implements IMessageDB {
       role: r.role as MESSAGE_ROLE,
       toolName: r.toolName ? (r.toolName as TOOL_TYPE) : undefined,
       toolCallId: r.toolCallId ?? undefined,
+      toolCallsJson: r.toolCallsJson ?? undefined,
     }));
   }
 

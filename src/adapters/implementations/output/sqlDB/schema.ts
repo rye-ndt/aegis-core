@@ -38,11 +38,25 @@ export const messages = pgTable("messages", {
   content: text("content").notNull(),
   toolName: text("tool_name"),
   toolCallId: text("tool_call_id"),
+  toolCallsJson: text("tool_calls_json"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
 
 export const jarvisConfig = pgTable("jarvis_config", {
   id: text("id").primaryKey(),
   systemPrompt: text("system_prompt").notNull(),
+  maxToolRounds: integer("max_tool_rounds"),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const userMemories = pgTable("user_memories", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  content: text("content").notNull(),
+  enrichedContent: text("enriched_content"),
+  category: text("category"),
+  pineconeId: text("pinecone_id").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+  lastAccessedEpoch: integer("last_accessed_epoch").notNull(),
 });

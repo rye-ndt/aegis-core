@@ -47,7 +47,23 @@
 - Enums: statuses.enum NEED_VERIFICATION; verificationCode.enum (KEY_PREFIX, TTL 30 min, LENGTH 6); verificationEmail.enum (SUBJECT); unosend.enum (BASE_URL, EMAILS_PATH). Helper: `src/helpers/verificationCode.ts` (generateVerificationCode).
 - JWT token issuer: `JwtTokenIssuer` now stores bearer tokens in Redis with TTL derived from `TOKEN_EXPIRY.BEARER`, checks Redis presence on verify, and supports `revoke` to remove bearer tokens.
 
+## 2026-03-23
+
+- **DB repos fully implemented:** `DrizzleConversationRepo`, `DrizzleMessageRepo`, `DrizzleJarvisConfigRepo` all created in `src/adapters/implementations/output/sqlDB/repositories/`. `DrizzleSqlDB` facade exposes all four repos (users, conversations, messages, jarvisConfig).
+- **`jarvis_config` table added** to Drizzle schema — singleton-row pattern; upsert via `onConflictDoUpdate`. Enum `JARVIS_CONFIG_ROW_ID` is the fixed primary key.
+- **`CachedJarvisConfigRepo`** added (`src/adapters/implementations/output/jarvisConfig/cachedJarvisConfig.repo.ts`) — Redis decorator wrapping `DrizzleJarvisConfigRepo`. Cache key from `JARVIS_CONFIG_CACHE_KEY` enum. Cache is invalidated on `update()`.
+- **`ILLMProvider` interface** added (`src/use-cases/interface/output/llmProvider.interface.ts`) — lighter alternative to `ILLMOrchestrator` with `textReply()` and `toolCall()` methods. `toolCall()` accepts a `Map<toolName, ZodSchema>` and returns validated params.
+- **`OpenAILLMProvider`** implemented (`src/adapters/implementations/output/llmProvider/openai.llmProvider.ts`) — uses in-memory `Map<conversationId, ChatCompletionMessageParam[]>` for history. `textReply` reports context window usage percent. `toolCall` forces `tool_choice: "required"` and validates args against Zod schema via `z.toJSONSchema`.
+- **`consoleCli.ts`** (`npm run chat`) — working interactive REPL. Calls `OpenAILLMProvider.textReply()` directly, loads system prompt from `CachedJarvisConfigRepo` (DB/Redis). Shows `[context: X%]` after each reply.
+- **`jarvisCli.ts`** (`npm run jarvis`) — config CLI to view or set JARVIS system prompt. Supports multiline input (type `END` to finish). Invalidates Redis cache on update.
+- **`AssistantUseCaseImpl`** updated to load system prompt from `IJarvisConfigDB` on every chat call (falls back to hardcoded default if not set). Returns `messageId` in `IChatResponse`.
+- **`OpenAIOrchestrator`** is still a stub (`throw new Error("not yet implemented")`) — the HTTP API assistant path is not end-to-end functional yet.
+- **Pinecone dep installed** (`@pinecone-database/pinecone`) — not yet integrated anywhere.
+
 ## Next Steps
 
-- Implement the `store` use case fully.
-- Fix remaining build errors in `Agent` related files.
+- Implement `OpenAIOrchestrator.chat()` to make the HTTP API assistant path work end-to-end.
+- Implement multi-turn tool loop in `AssistantUseCaseImpl` (currently single pass — tool results are persisted but the orchestrator is not re-run with them).
+- Implement `WhisperSpeechToText.transcribe()`.
+- Implement stub tools: `WebSearchTool`, `CalendarTool`, `ReminderTool`.
+- Integrate Pinecone for memory/vector search.
