@@ -3,8 +3,6 @@ export enum TOOL_TYPE {
   SEND_EMAIL = "send_email",
   CALENDAR_READ = "calendar_read",
   CALENDAR_WRITE = "calendar_write",
-  REMINDER_SET = "reminder_set",
-  REMINDER_LIST = "reminder_list",
   WEATHER = "weather",
   CODE_EXECUTION = "code_execution",
   FILE_READ = "file_read",

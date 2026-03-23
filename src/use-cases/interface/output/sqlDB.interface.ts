@@ -1,6 +1,7 @@
 import type { IUserDB } from "./repository/user.repo";
 import type { IConversationDB } from "./repository/conversation.repo";
 import type { IMessageDB } from "./repository/message.repo";
+import type { IGoogleOAuthTokenDB } from "./repository/googleOAuthToken.repo";
 
 export interface IPostgresDB {
   close(): Promise<void>;
@@ -20,6 +21,7 @@ export interface ISqlDB extends IPostgresDB {
   users?: IUserDB;
   conversations?: IConversationDB;
   messages?: IMessageDB;
+  googleOAuthTokens?: IGoogleOAuthTokenDB;
   /** Starts a transaction. Pass callbacks to run(); then commit() or rollback(). */
   beginTransaction(): Promise<ITransaction>;
 }

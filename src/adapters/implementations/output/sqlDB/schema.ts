@@ -49,6 +49,16 @@ export const jarvisConfig = pgTable("jarvis_config", {
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
 
+export const googleOAuthTokens = pgTable("google_oauth_tokens", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull().unique(),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token").notNull(),
+  expiresAtEpoch: integer("expires_at_epoch").notNull(),
+  scope: text("scope").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
 export const userMemories = pgTable("user_memories", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id").notNull(),

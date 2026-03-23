@@ -2,8 +2,7 @@ import "dotenv/config";
 import * as readline from "readline";
 import { AssistantInject } from "./adapters/inject/assistant.di";
 
-// For the console CLI we use a fixed dev user — override with CLI_USER_ID env var
-const CLI_USER_ID = process.env.CLI_USER_ID ?? "00000000-0000-0000-0000-000000000001";
+const CLI_USER_ID = process.env.JARVIS_USER_ID ?? process.env.CLI_USER_ID ?? "00000000-0000-0000-0000-000000000001";
 
 async function main(): Promise<void> {
   const inject = new AssistantInject();

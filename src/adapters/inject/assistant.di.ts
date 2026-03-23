@@ -6,8 +6,9 @@ import { WhisperSpeechToText } from "../implementations/output/speechToText/whis
 import { OpenAIOrchestrator } from "../implementations/output/llmOrchestrator/openai.llmOrchestrator";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
 import { SendEmailTool } from "../implementations/output/tools/sendEmail.tool";
-import { CalendarTool } from "../implementations/output/tools/calendar.tool";
-import { ReminderTool } from "../implementations/output/tools/reminder.tool";
+import { CalendarReadTool } from "../implementations/output/tools/calendarRead.tool";
+import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite.tool";
+import { GoogleCalendarService } from "../implementations/output/calendarService/google.calendarService";
 import { RetrieveUserMemoryTool } from "../implementations/output/tools/retrieveUserMemory.tool";
 import { StoreUserMemoryTool } from "../implementations/output/tools/storeUserMemory.tool";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
@@ -28,11 +29,19 @@ export class AssistantInject {
       const apiKey = process.env.OPENAI_API_KEY ?? "";
 
       const speechToText = new WhisperSpeechToText(apiKey);
-      const orchestrator = new OpenAIOrchestrator(apiKey, process.env.OPENAI_MODEL ?? "gpt-4o");
+      const orchestrator = new OpenAIOrchestrator(
+        apiKey,
+        process.env.OPENAI_MODEL ?? "gpt-4o",
+      );
 
       const sqlDB = this.userInject.getSqlDB();
-      const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-      const jarvisConfigRepo = new CachedJarvisConfigRepo(sqlDB.jarvisConfig, redis);
+      const redis = new Redis(
+        process.env.REDIS_URL ?? "redis://localhost:6379",
+      );
+      const jarvisConfigRepo = new CachedJarvisConfigRepo(
+        sqlDB.jarvisConfig,
+        redis,
+      );
 
       // Singletons for RAG
       const embeddingService = new OpenAIEmbeddingService(apiKey);
@@ -42,19 +51,43 @@ export class AssistantInject {
         process.env.PINECONE_HOST,
       );
       const userMemoryRepo = sqlDB.userMemories;
-      const enrichmentGenerator = new OpenAITextGenerator(apiKey, "gpt-4o-mini");
+      const enrichmentGenerator = new OpenAITextGenerator(
+        apiKey,
+        "gpt-4o-mini",
+      );
       const emailSender = this.userInject.getEmailSender();
+
+      // Singleton calendar service — token repo resolved once, userId injected per-request
+      const calendarService = new GoogleCalendarService(
+        sqlDB.googleOAuthTokens,
+        process.env.GOOGLE_CLIENT_ID ?? "",
+        process.env.GOOGLE_CLIENT_SECRET ?? "",
+        process.env.GOOGLE_REDIRECT_URI ?? "",
+      );
 
       // Per-request registry factory — captures singletons via closure, injects userId at call time
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
         r.register(new WebSearchTool(process.env.WEB_SEARCH_API_KEY ?? ""));
         r.register(new SendEmailTool(emailSender));
-        r.register(new CalendarTool());
-        r.register(new ReminderTool());
-        r.register(new RetrieveUserMemoryTool(userId, embeddingService, vectorStore, userMemoryRepo));
+        r.register(new CalendarReadTool(userId, calendarService));
+        r.register(new CalendarWriteTool(userId, calendarService));
         r.register(
-          new StoreUserMemoryTool(userId, embeddingService, vectorStore, userMemoryRepo, enrichmentGenerator),
+          new RetrieveUserMemoryTool(
+            userId,
+            embeddingService,
+            vectorStore,
+            userMemoryRepo,
+          ),
+        );
+        r.register(
+          new StoreUserMemoryTool(
+            userId,
+            embeddingService,
+            vectorStore,
+            userMemoryRepo,
+            enrichmentGenerator,
+          ),
         );
         return r;
       };
