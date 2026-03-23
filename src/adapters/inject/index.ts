@@ -7,6 +7,10 @@ export class DepInject {
   private user: UserInject = new UserInject();
   private httpServer: HttpServer | null = null;
 
+  async runMigrations(migrationsFolder: string = "./drizzle"): Promise<void> {
+    await this.user.getSqlDB().runMigrations(migrationsFolder);
+  }
+
   getHttpServer(port: number = 3000): HttpServer {
     if (!this.httpServer) {
       this.httpServer = new HttpServer(port);

@@ -11,6 +11,9 @@ import type {
   UserInit,
   UserUpdate,
 } from "../../../../../use-cases/interface/output/repository/user.repo";
+import { PERSONALITIES } from "../../../../../helpers/enums/personalities.enum";
+import { USER_ROLES } from "../../../../../helpers/enums/userRole.enum";
+import { USER_STATUSES } from "../../../../../helpers/enums/statuses.enum";
 import { users } from "../schema";
 
 export class DrizzleUserRepo implements IUserDB {
@@ -27,7 +30,6 @@ export class DrizzleUserRepo implements IUserDB {
       role: user.role,
       status: user.status,
       personalities: [],
-      preferredCategories: [],
       secondaryPersonalities: [],
       createdAtEpoch: user.createdAtEpoch,
       updatedAtEpoch: user.updatedAtEpoch,
@@ -57,7 +59,8 @@ export class DrizzleUserRepo implements IUserDB {
       .where(eq(users.id, id))
       .limit(1);
 
-    return rows[0];
+    if (!rows[0]) return undefined;
+    return this.toIUser(rows[0]);
   }
 
   async findByUsernameOrEmail(
@@ -70,7 +73,17 @@ export class DrizzleUserRepo implements IUserDB {
       .where(or(eq(users.userName, username), eq(users.email, email)))
       .limit(1);
 
-    return rows[0] ?? null;
+    if (!rows[0]) return null;
+    return this.toIUser(rows[0]);
+  }
+
+  private toIUser(row: typeof users.$inferSelect): IUser {
+    return {
+      ...row,
+      role: row.role as USER_ROLES,
+      status: row.status as USER_STATUSES,
+      personalities: row.personalities as PERSONALITIES[],
+    };
   }
 
   async login(_data: ILoginUser): Promise<UseCaseUser> {

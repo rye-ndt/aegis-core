@@ -25,6 +25,10 @@ import type {
   IMessageDB,
   Message,
 } from "../interface/output/repository/message.repo";
+import type { IJarvisConfigDB } from "../interface/output/repository/jarvisConfig.repo";
+
+const DEFAULT_SYSTEM_PROMPT =
+  "You are JARVIS, a personal AI assistant. Be concise and helpful.";
 
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
@@ -33,6 +37,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     private readonly toolRegistry: IToolRegistry,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
+    private readonly jarvisConfigRepo: IJarvisConfigDB,
   ) {}
 
   async voiceChat(input: IVoiceChatInput): Promise<IChatResponse> {
@@ -80,10 +85,12 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       toolCallId: m.toolCallId,
     }));
 
+    const config = await this.jarvisConfigRepo.get();
+    const systemPrompt = config?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
     const tools = this.toolRegistry.getAll();
     const response = await this.orchestrator.chat({
-      systemPrompt:
-        "You are JARVIS, a personal AI assistant. Be concise and helpful.",
+      systemPrompt,
       conversationHistory: orchestratorHistory,
       availableTools: tools.map((t) => t.definition()),
     });

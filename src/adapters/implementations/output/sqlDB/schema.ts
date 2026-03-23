@@ -40,3 +40,9 @@ export const messages = pgTable("messages", {
   toolCallId: text("tool_call_id"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
+
+export const jarvisConfig = pgTable("jarvis_config", {
+  id: text("id").primaryKey(),
+  systemPrompt: text("system_prompt").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});

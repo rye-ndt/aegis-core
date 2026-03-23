@@ -1,3 +1,4 @@
+import Redis from "ioredis";
 import { AssistantControllerConcrete } from "../implementations/input/http/assistant.controller";
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
@@ -8,6 +9,7 @@ import { SendEmailTool } from "../implementations/output/tools/sendEmail.tool";
 import { CalendarTool } from "../implementations/output/tools/calendar.tool";
 import { ReminderTool } from "../implementations/output/tools/reminder.tool";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
+import { CachedJarvisConfigRepo } from "../implementations/output/jarvisConfig/cachedJarvisConfig.repo";
 import { UserInject } from "./user.di";
 
 export class AssistantInject {
@@ -34,17 +36,20 @@ export class AssistantInject {
       toolRegistry.register(new CalendarTool());
       toolRegistry.register(new ReminderTool());
 
-      // TODO: wire conversationRepo and messageRepo once DB repositories are implemented
-      // this.useCase = new AssistantUseCaseImpl(
-      //   speechToText,
-      //   orchestrator,
-      //   toolRegistry,
-      //   conversationRepo,
-      //   messageRepo,
-      // );
+      const sqlDB = this.userInject.getSqlDB();
+      const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+      const jarvisConfigRepo = new CachedJarvisConfigRepo(
+        sqlDB.jarvisConfig,
+        redis,
+      );
 
-      throw new Error(
-        "AssistantInject: conversationRepo and messageRepo not yet implemented. Wire them here.",
+      this.useCase = new AssistantUseCaseImpl(
+        speechToText,
+        orchestrator,
+        toolRegistry,
+        sqlDB.conversations,
+        sqlDB.messages,
+        jarvisConfigRepo,
       );
     }
     return this.useCase;

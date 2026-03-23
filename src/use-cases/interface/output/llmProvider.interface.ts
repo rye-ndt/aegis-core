@@ -3,6 +3,8 @@ import type { ZodTypeAny } from "zod";
 export interface ITextReplyInput {
   prompt: string;
   conversationId: string;
+  /** Injected as a system message on the first turn of a new conversation. */
+  systemPrompt?: string;
 }
 
 export interface ITextReplyResponse {

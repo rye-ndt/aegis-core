@@ -8,6 +8,7 @@
     "start": "node dist/main.js",
     "dev": "ts-node src/main.ts",
     "chat": "ts-node src/consoleCli.ts",
+    "jarvis": "ts-node src/jarvisCli.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

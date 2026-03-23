@@ -5,6 +5,7 @@ const main = async (): Promise<void> => {
   const port = parseInt(process.env.PORT || '3000', 10);
 
   try {
+    await depInjectConcrete.runMigrations();
     const server = depInjectConcrete.getHttpServer(port);
     await server.start();
   } catch (error) {

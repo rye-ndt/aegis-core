@@ -43,6 +43,9 @@ export class OpenAILLMProvider implements ILLMProvider {
 
   async textReply(input: ITextReplyInput): Promise<ITextReplyResponse> {
     const history = this.getHistory(input.conversationId);
+    if (history.length === 0 && input.systemPrompt) {
+      history.push({ role: "system", content: input.systemPrompt });
+    }
     history.push({ role: "user", content: input.prompt });
 
     const response = await this.client.chat.completions.create({

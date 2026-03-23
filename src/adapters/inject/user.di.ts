@@ -26,7 +26,7 @@ export class UserInject {
     if (!this.sqlDB) {
       this.sqlDB = new DrizzleSqlDB({
         connectionString:
-          process.env.DATABASE_URL ?? "postgres://localhost:5432/postgres",
+          process.env.DATABASE_URL ?? "postgres://localhost:5432/memora",
       });
     }
     return this.sqlDB;

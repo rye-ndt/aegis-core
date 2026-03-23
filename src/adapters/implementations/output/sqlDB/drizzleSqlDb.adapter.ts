@@ -3,9 +3,13 @@ import type {
   ITransaction,
 } from "../../../../use-cases/interface/output/sqlDB.interface";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 import { PostgresDB, type PostgresConfig } from "./drizzlePostgres.db";
 import { DrizzleUserRepo } from "./repositories/user.repo";
+import { DrizzleConversationRepo } from "./repositories/conversation.repo";
+import { DrizzleMessageRepo } from "./repositories/message.repo";
+import { DrizzleJarvisConfigRepo } from "./repositories/jarvisConfig.repo";
 
 /**
  * SQL adapter facade:
@@ -14,10 +18,20 @@ import { DrizzleUserRepo } from "./repositories/user.repo";
  */
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
+  readonly conversations: DrizzleConversationRepo;
+  readonly messages: DrizzleMessageRepo;
+  readonly jarvisConfig: DrizzleJarvisConfigRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
     this.users = new DrizzleUserRepo(this.db);
+    this.conversations = new DrizzleConversationRepo(this.db);
+    this.messages = new DrizzleMessageRepo(this.db);
+    this.jarvisConfig = new DrizzleJarvisConfigRepo(this.db);
+  }
+
+  async runMigrations(migrationsFolder: string): Promise<void> {
+    await migrate(this.db, { migrationsFolder });
   }
 
   async beginTransaction(): Promise<ITransaction> {
