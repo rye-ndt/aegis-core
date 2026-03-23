@@ -84,6 +84,8 @@ JARVIS follows **Hexagonal Architecture** (Ports & Adapters), also known as the 
 ```
 src/
 ├── main.ts                          # HTTP server entry point
+├── consoleCli.ts                    # Interactive chat REPL (npm run chat)
+├── jarvisCli.ts                     # Config CLI — view/set system prompt (npm run jarvis)
 ├── userCli.ts                       # CLI for user management
 │
 ├── core/
@@ -106,6 +108,7 @@ src/
 │       ├── output/                  # Outbound ports (what the use cases need)
 │       │   ├── speechToText.interface.ts    # ISpeechToText
 │       │   ├── llmOrchestrator.interface.ts # ILLMOrchestrator
+│       │   ├── llmProvider.interface.ts     # ILLMProvider (textReply + toolCall)
 │       │   ├── tool.interface.ts            # ITool, IToolRegistry, IToolDefinition
 │       │   ├── emailSender.interface.ts     # IEmailSender
 │       │   ├── passwordHasher.interface.ts  # IPasswordHasher
@@ -116,6 +119,7 @@ src/
 │       │   └── repository/
 │       │       ├── conversation.repo.ts     # IConversationDB, Conversation
 │       │       ├── message.repo.ts          # IMessageDB, Message
+│       │       ├── jarvisConfig.repo.ts     # IJarvisConfigDB, JarvisConfig
 │       │       └── user.repo.ts             # IUserDB, IUser, UserInit, UserUpdate
 │       │
 │       └── shared/
@@ -142,12 +146,16 @@ src/
 │           │   └── whisper.speechToText.ts   # [SKELETON] OpenAI Whisper
 │           ├── llmOrchestrator/
 │           │   └── openai.llmOrchestrator.ts # [SKELETON] OpenAI chat + tool_use
+│           ├── llmProvider/
+│           │   └── openai.llmProvider.ts     # OpenAILLMProvider — textReply + toolCall
 │           ├── tools/
 │           │   ├── webSearch.tool.ts   # [SKELETON] Web search API
-│           │   ├── sendEmail.tool.ts   # Delegates to IEmailSender (working shell)
+│           │   ├── sendEmail.tool.ts   # Delegates to IEmailSender (working)
 │           │   ├── calendar.tool.ts    # [SKELETON] Calendar API
 │           │   └── reminder.tool.ts    # [SKELETON] Reminder scheduling
 │           ├── toolRegistry.concrete.ts     # In-memory tool registry
+│           ├── jarvisConfig/
+│           │   └── cachedJarvisConfig.repo.ts  # Redis cache decorator for IJarvisConfigDB
 │           ├── emailSender/
 │           │   └── unosend.emailSender.ts
 │           ├── passwordHasher/
@@ -161,7 +169,10 @@ src/
 │           │   ├── drizzlePostgres.db.ts     # pg Pool setup
 │           │   ├── drizzleSqlDb.adapter.ts   # ISqlDB facade
 │           │   └── repositories/
-│           │       └── user.repo.ts          # DrizzleUserRepo
+│           │       ├── user.repo.ts          # DrizzleUserRepo
+│           │       ├── conversation.repo.ts  # DrizzleConversationRepo
+│           │       ├── message.repo.ts       # DrizzleMessageRepo
+│           │       └── jarvisConfig.repo.ts  # DrizzleJarvisConfigRepo
 │           └── greetingRepo.ts
 │
 └── helpers/
@@ -331,19 +342,22 @@ interface IMessageDB {
 
 ## Concrete adapters
 
-| Interface | Concrete class | File |
-|-----------|---------------|------|
-| `ISpeechToText` | `WhisperSpeechToText` | `output/speechToText/whisper.speechToText.ts` |
-| `ILLMOrchestrator` | `OpenAIOrchestrator` | `output/llmOrchestrator/openai.llmOrchestrator.ts` |
-| `IToolRegistry` | `ToolRegistryConcrete` | `output/toolRegistry.concrete.ts` |
-| `IEmailSender` | `UnosendEmailSender` | `output/emailSender/unosend.emailSender.ts` |
-| `IPasswordHasher` | `BcryptPasswordHasher` | `output/passwordHasher/bcrypt.passwordHasher.ts` |
-| `ITokenIssuer` | `JwtTokenIssuer` | `output/tokenIssuer/jwt.tokenIssuer.ts` |
-| `IVerificationCodeStore` | `RedisVerificationCodeStore` | `output/verificationCodeStore/redis.verificationCodeStore.ts` |
-| `ISqlDB` | `DrizzleSqlDB` | `output/sqlDB/drizzleSqlDb.adapter.ts` |
-| `IUserDB` | `DrizzleUserRepo` | `output/sqlDB/repositories/user.repo.ts` |
-
-> `IConversationDB` and `IMessageDB` concrete implementations are **not yet created**. Wire them in `assistant.di.ts` once built.
+| Interface | Concrete class | File | Status |
+|-----------|---------------|------|--------|
+| `ISpeechToText` | `WhisperSpeechToText` | `output/speechToText/whisper.speechToText.ts` | Skeleton |
+| `ILLMOrchestrator` | `OpenAIOrchestrator` | `output/llmOrchestrator/openai.llmOrchestrator.ts` | Skeleton |
+| `ILLMProvider` | `OpenAILLMProvider` | `output/llmProvider/openai.llmProvider.ts` | Working |
+| `IToolRegistry` | `ToolRegistryConcrete` | `output/toolRegistry.concrete.ts` | Working |
+| `IEmailSender` | `UnosendEmailSender` | `output/emailSender/unosend.emailSender.ts` | Working |
+| `IPasswordHasher` | `BcryptPasswordHasher` | `output/passwordHasher/bcrypt.passwordHasher.ts` | Working |
+| `ITokenIssuer` | `JwtTokenIssuer` | `output/tokenIssuer/jwt.tokenIssuer.ts` | Working |
+| `IVerificationCodeStore` | `RedisVerificationCodeStore` | `output/verificationCodeStore/redis.verificationCodeStore.ts` | Working |
+| `ISqlDB` | `DrizzleSqlDB` | `output/sqlDB/drizzleSqlDb.adapter.ts` | Working |
+| `IUserDB` | `DrizzleUserRepo` | `output/sqlDB/repositories/user.repo.ts` | Working |
+| `IConversationDB` | `DrizzleConversationRepo` | `output/sqlDB/repositories/conversation.repo.ts` | Working |
+| `IMessageDB` | `DrizzleMessageRepo` | `output/sqlDB/repositories/message.repo.ts` | Working |
+| `IJarvisConfigDB` | `DrizzleJarvisConfigRepo` | `output/sqlDB/repositories/jarvisConfig.repo.ts` | Working |
+| `IJarvisConfigDB` (cached) | `CachedJarvisConfigRepo` | `output/jarvisConfig/cachedJarvisConfig.repo.ts` | Working |
 
 ---
 
@@ -418,6 +432,13 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts` using Drizzle O
 | `tool_call_id` | text? | Links tool result to its call |
 | `created_at_epoch` | integer | |
 
+### `jarvis_config`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | text PK | Singleton — always `JARVIS_CONFIG_ROW_ID` |
+| `system_prompt` | text | System prompt injected into every conversation |
+| `updated_at_epoch` | integer | |
+
 ---
 
 ## Enums reference
@@ -482,6 +503,12 @@ npm run dev
 # Start (production)
 npm run build && npm start
 
+# Interactive chat REPL (uses OpenAILLMProvider directly)
+npm run chat
+
+# JARVIS config CLI — view or set the system prompt
+npm run jarvis
+
 # User management CLI
 ts-node src/userCli.ts
 ```
@@ -504,8 +531,10 @@ Implement `ILLMOrchestrator` with a different provider (Anthropic, Ollama, Mistr
 
 Implement `ISpeechToText` (e.g. local Whisper, AssemblyAI, Deepgram) and update `AssistantInject`.
 
-### Add conversation/message DB repositories
+### Configure the JARVIS system prompt
 
-1. Create `DrizzleConversationRepo` and `DrizzleMessageRepo` in `src/adapters/implementations/output/sqlDB/repositories/`.
-2. Expose them from `DrizzleSqlDB`.
-3. Wire them in `AssistantInject.getUseCase()`.
+Run `npm run jarvis` to view or update the system prompt stored in the `jarvis_config` table. The value is Redis-cached; the CLI invalidates the cache on update. If no prompt is configured, a built-in default is used.
+
+### Implement `OpenAIOrchestrator` (HTTP API path)
+
+`OpenAIOrchestrator.chat()` in `output/llmOrchestrator/openai.llmOrchestrator.ts` is still a stub. Implement it using the OpenAI chat completions API with `tool_choice: "auto"` to unblock the HTTP assistant endpoint.

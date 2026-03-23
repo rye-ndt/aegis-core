@@ -1,27 +1,13 @@
 import "dotenv/config";
 import * as readline from "readline";
-import Redis from "ioredis";
-import { OpenAILLMProvider } from "./adapters/implementations/output/llmProvider/openai.llmProvider";
-import { UserInject } from "./adapters/inject/user.di";
-import { CachedJarvisConfigRepo } from "./adapters/implementations/output/jarvisConfig/cachedJarvisConfig.repo";
+import { AssistantInject } from "./adapters/inject/assistant.di";
+
+// For the console CLI we use a fixed dev user — override with CLI_USER_ID env var
+const CLI_USER_ID = process.env.CLI_USER_ID ?? "00000000-0000-0000-0000-000000000001";
 
 async function main(): Promise<void> {
-  const userInject = new UserInject();
-  const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-  const jarvisConfigRepo = new CachedJarvisConfigRepo(
-    userInject.getSqlDB().jarvisConfig,
-    redis,
-  );
-
-  const config = await jarvisConfigRepo.get();
-  const systemPrompt = config?.systemPrompt;
-
-  const provider = new OpenAILLMProvider(
-    process.env.OPENAI_API_KEY!,
-    process.env.OPENAI_MODEL ?? "gpt-4o-mini",
-  );
-
-  const conversationId = `console-${Date.now()}`;
+  const inject = new AssistantInject();
+  const useCase = inject.getUseCase();
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -30,26 +16,33 @@ async function main(): Promise<void> {
 
   console.log('JARVIS Console — type "exit" to quit\n');
 
+  let conversationId: string | undefined;
+
   const prompt = (): void => {
     rl.question("You: ", async (line) => {
       const text = line.trim();
 
       if (!text || text === "exit") {
         console.log("Goodbye.");
-        redis.disconnect();
         rl.close();
         return;
       }
 
       try {
-        const { message, contextUsagePercent } = await provider.textReply({
-          prompt: text,
+        const response = await useCase.chat({
+          userId: CLI_USER_ID,
           conversationId,
-          systemPrompt,
+          message: text,
         });
 
-        console.log(`\nJARVIS: ${message}`);
-        console.log(`[context: ${contextUsagePercent}%]\n`);
+        // Keep the same conversationId for the whole session
+        conversationId = response.conversationId;
+
+        console.log(`\nJARVIS: ${response.reply}`);
+        if (response.toolsUsed.length > 0) {
+          console.log(`[tools: ${response.toolsUsed.join(", ")}]`);
+        }
+        console.log();
       } catch (err) {
         console.error("Error:", err);
       }

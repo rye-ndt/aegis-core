@@ -10,6 +10,7 @@ import { DrizzleUserRepo } from "./repositories/user.repo";
 import { DrizzleConversationRepo } from "./repositories/conversation.repo";
 import { DrizzleMessageRepo } from "./repositories/message.repo";
 import { DrizzleJarvisConfigRepo } from "./repositories/jarvisConfig.repo";
+import { DrizzleUserMemoryRepo } from "./repositories/userMemory.repo";
 
 /**
  * SQL adapter facade:
@@ -21,6 +22,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly conversations: DrizzleConversationRepo;
   readonly messages: DrizzleMessageRepo;
   readonly jarvisConfig: DrizzleJarvisConfigRepo;
+  readonly userMemories: DrizzleUserMemoryRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -28,6 +30,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.conversations = new DrizzleConversationRepo(this.db);
     this.messages = new DrizzleMessageRepo(this.db);
     this.jarvisConfig = new DrizzleJarvisConfigRepo(this.db);
+    this.userMemories = new DrizzleUserMemoryRepo(this.db);
   }
 
   async runMigrations(migrationsFolder: string): Promise<void> {

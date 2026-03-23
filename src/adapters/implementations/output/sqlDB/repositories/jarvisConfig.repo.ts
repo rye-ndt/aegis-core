@@ -19,7 +19,10 @@ export class DrizzleJarvisConfigRepo implements IJarvisConfigDB {
       .limit(1);
 
     if (!rows[0]) return null;
-    return { systemPrompt: rows[0].systemPrompt };
+    return {
+      systemPrompt: rows[0].systemPrompt,
+      maxToolRounds: rows[0].maxToolRounds ?? undefined,
+    };
   }
 
   async update(systemPrompt: string): Promise<void> {

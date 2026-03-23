@@ -26,18 +26,25 @@ import type {
   Message,
 } from "../interface/output/repository/message.repo";
 import type { IJarvisConfigDB } from "../interface/output/repository/jarvisConfig.repo";
+import type { IUserDB } from "../interface/output/repository/user.repo";
 
 const DEFAULT_SYSTEM_PROMPT =
   "You are JARVIS, a personal AI assistant. Be concise and helpful.";
+const DEFAULT_MAX_TOOL_ROUNDS = 10;
 
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly speechToText: ISpeechToText,
     private readonly orchestrator: ILLMOrchestrator,
-    private readonly toolRegistry: IToolRegistry,
+    /**
+     * Factory that builds a per-request IToolRegistry keyed to a specific userId.
+     * Keeps concrete adapter imports out of this use-case layer.
+     */
+    private readonly registryFactory: (userId: string) => IToolRegistry,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
     private readonly jarvisConfigRepo: IJarvisConfigDB,
+    private readonly userRepo: IUserDB,
   ) {}
 
   async voiceChat(input: IVoiceChatInput): Promise<IChatResponse> {
@@ -57,6 +64,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const now = newCurrentUTCEpoch();
     const conversationId = input.conversationId ?? newUuid();
 
+    // Create a new conversation record if this is the first message
     if (!input.conversationId) {
       const conversation: Conversation = {
         id: conversationId,
@@ -69,6 +77,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       await this.conversationRepo.create(conversation);
     }
 
+    // Persist the user message
     await this.messageRepo.create({
       id: newUuid(),
       conversationId,
@@ -77,70 +86,151 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       createdAtEpoch: now,
     });
 
-    const history = await this.messageRepo.findByConversationId(conversationId);
-    const orchestratorHistory: IOrchestratorMessage[] = history.map((m) => ({
-      role: m.role,
-      content: m.content,
-      toolName: m.toolName,
-      toolCallId: m.toolCallId,
-    }));
+    // Load full history once before the tool loop
+    const dbHistory = await this.messageRepo.findByConversationId(conversationId);
+    const history: IOrchestratorMessage[] = this.buildOrchestratorHistory(dbHistory);
 
+    // Build system prompt (with personality context)
     const config = await this.jarvisConfigRepo.get();
-    const systemPrompt = config?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+    const basePrompt = config?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+    const systemPrompt = await this.buildSystemPrompt(input.userId, basePrompt);
 
-    const tools = this.toolRegistry.getAll();
-    const response = await this.orchestrator.chat({
-      systemPrompt,
-      conversationHistory: orchestratorHistory,
-      availableTools: tools.map((t) => t.definition()),
-    });
+    const maxRounds =
+      config?.maxToolRounds ?? parseInt(process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS));
 
+    const toolRegistry = this.registryFactory(input.userId);
+    const availableTools = toolRegistry.getAll().map((t) => t.definition());
     const toolsUsed: string[] = [];
 
-    if (response.toolCalls && response.toolCalls.length > 0) {
+    console.log("[assistant] systemPrompt:", systemPrompt);
+    console.log("[assistant] availableTools:", availableTools.map((t) => t.name));
+    console.log("[assistant] historyLength:", history.length);
+
+    // Multi-turn agentic tool loop
+    for (let round = 0; round < maxRounds; round++) {
+      console.log(`[assistant] round ${round}: calling orchestrator`);
+      const response = await this.orchestrator.chat({
+        systemPrompt,
+        conversationHistory: history,
+        availableTools,
+      });
+
+      console.log(`[assistant] round ${round}: toolCalls=${JSON.stringify(response.toolCalls ?? null)}, hasText=${!!response.text}`);
+
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        // Final text reply — persist and return
+        const reply = response.text ?? "";
+        const replyMessageId = newUuid();
+        await this.messageRepo.create({
+          id: replyMessageId,
+          conversationId,
+          role: MESSAGE_ROLE.ASSISTANT,
+          content: reply,
+          createdAtEpoch: newCurrentUTCEpoch(),
+        });
+        return { conversationId, messageId: replyMessageId, reply, toolsUsed };
+      }
+
+      // Store the abstract IToolCall[] — the orchestrator adapter converts to its own wire format on read-back
+      const toolCallsJson = JSON.stringify(response.toolCalls);
+
+      // Persist ASSISTANT_TOOL_CALL message
+      await this.messageRepo.create({
+        id: newUuid(),
+        conversationId,
+        role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
+        content: "",
+        toolCallsJson,
+        createdAtEpoch: newCurrentUTCEpoch(),
+      });
+
+      // Append to in-memory history so the next orchestrator call sees it
+      history.push({
+        role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
+        content: "",
+        toolCallsJson,
+      });
+
+      // Execute each tool call and append results to in-memory history
       for (const call of response.toolCalls) {
-        const tool = this.toolRegistry.getByName(call.toolName as TOOL_TYPE);
-        if (!tool) continue;
+        console.log(`[assistant] executing tool: ${call.toolName}`, call.input);
+        const tool = toolRegistry.getByName(call.toolName as TOOL_TYPE);
+        if (!tool) {
+          console.log(`[assistant] tool NOT FOUND in registry: ${call.toolName}`);
+          continue;
+        }
 
         const result = await tool.execute(call.input);
+        console.log(`[assistant] tool result:`, result);
         toolsUsed.push(call.toolName);
 
+        const toolResultContent = JSON.stringify(result.data ?? result.error);
         await this.messageRepo.create({
           id: newUuid(),
           conversationId,
           role: MESSAGE_ROLE.TOOL,
-          content: JSON.stringify(result.data ?? result.error),
+          content: toolResultContent,
           toolName: call.toolName as TOOL_TYPE,
           toolCallId: call.id,
           createdAtEpoch: newCurrentUTCEpoch(),
         });
-      }
 
-      // Re-run orchestrator with tool results to generate final text reply
-      // TODO: implement multi-turn tool loop
+        history.push({
+          role: MESSAGE_ROLE.TOOL,
+          content: toolResultContent,
+          toolName: call.toolName,
+          toolCallId: call.id,
+        });
+      }
+      // Loop: history now contains tool results; next iteration re-runs the orchestrator
     }
 
-    const reply = response.text ?? "";
-    const replyMessageId = newUuid();
-
+    // Fallback when max tool rounds are exhausted without a final text reply
+    const fallbackReply =
+      "I've reached the maximum number of tool-use rounds. Please try rephrasing your request.";
+    const fallbackId = newUuid();
     await this.messageRepo.create({
-      id: replyMessageId,
+      id: fallbackId,
       conversationId,
       role: MESSAGE_ROLE.ASSISTANT,
-      content: reply,
+      content: fallbackReply,
       createdAtEpoch: newCurrentUTCEpoch(),
     });
-
-    return { conversationId, messageId: replyMessageId, reply, toolsUsed };
+    return { conversationId, messageId: fallbackId, reply: fallbackReply, toolsUsed };
   }
 
-  async listConversations(
-    input: IListConversationsInput,
-  ): Promise<Conversation[]> {
+  async listConversations(input: IListConversationsInput): Promise<Conversation[]> {
     return this.conversationRepo.findByUserId(input.userId);
   }
 
   async getConversation(input: IGetConversationInput): Promise<Message[]> {
     return this.messageRepo.findByConversationId(input.conversationId);
+  }
+
+  private buildOrchestratorHistory(messages: Message[]): IOrchestratorMessage[] {
+    return messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+      toolName: m.toolName,
+      toolCallId: m.toolCallId,
+      toolCallsJson: m.toolCallsJson,
+    }));
+  }
+
+  private async buildSystemPrompt(userId: string, basePrompt: string): Promise<string> {
+    const user = await this.userRepo.findById(userId);
+    if (!user || (!user.personalities.length && !user.secondaryPersonalities.length)) {
+      return basePrompt;
+    }
+
+    const parts: string[] = [];
+    if (user.personalities.length) {
+      parts.push(`primary — ${user.personalities.join(", ")}`);
+    }
+    if (user.secondaryPersonalities.length) {
+      parts.push(`secondary — ${user.secondaryPersonalities.join(", ")}`);
+    }
+
+    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.`;
   }
 }
