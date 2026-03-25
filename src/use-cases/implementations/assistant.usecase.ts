@@ -261,7 +261,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
     const user = await this.userRepo.findById(userId);
     if (!user || (!user.personalities.length && !user.secondaryPersonalities.length)) {
-      return `${basePrompt}\n\n${dateContext}\n\n${TOOL_GUIDANCE}`;
+      return `${basePrompt}\n\n${dateContext}`;
     }
 
     const parts: string[] = [];
@@ -272,15 +272,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       parts.push(`secondary — ${user.secondaryPersonalities.join(", ")}`);
     }
 
-    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.\n\n${dateContext}\n\n${TOOL_GUIDANCE}`;
+    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.\n\n${dateContext}`;
   }
 }
-
-const TOOL_GUIDANCE = `\
-## Email drafting rules (STRICT — follow every time)
-When the user asks to reply to or draft an email:
-1. If the recipient's email address is not explicitly stated, STOP and ask: "What is <name>'s email address?" Do NOT call any tool until you have the address.
-2. Only after you have the email address, call gmail_search_emails with a query like "from:<email> <topic keywords>".
-3. Once you have the search results, call gmail_create_draft. Always include threadId for replies.
-4. NEVER call gmail_create_draft without first calling gmail_search_emails unless the user is composing a completely new email (not a reply).
-5. After creating the draft, tell the user it is saved in Gmail Drafts and has NOT been sent.`;
