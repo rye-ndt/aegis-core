@@ -1,4 +1,5 @@
-import { google, type calendar_v3 } from "googleapis";
+import { calendar, type calendar_v3 } from "@googleapis/calendar";
+import { OAuth2Client } from "google-auth-library";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import { CalendarNotConnectedError } from "../../../../helpers/errors/calendarNotConnected.error";
@@ -20,7 +21,7 @@ export class GoogleCalendarService implements ICalendarService {
     const stored = await this.tokenRepo.findByUserId(userId);
     if (!stored) throw new CalendarNotConnectedError(userId);
 
-    const oauth2Client = new google.auth.OAuth2(
+    const oauth2Client = new OAuth2Client(
       this.clientId,
       this.clientSecret,
       this.redirectUri,
@@ -96,9 +97,9 @@ export class GoogleCalendarService implements ICalendarService {
     },
   ): Promise<ICalendarEvent[]> {
     const auth = await this.buildClient(userId);
-    const calendar = google.calendar({ version: "v3", auth });
+    const cal = calendar({ version: "v3", auth });
 
-    const response = await calendar.events.list({
+    const response = await cal.events.list({
       calendarId: params.calendarId ?? "primary",
       timeMin: params.startDateTime,
       timeMax: params.endDateTime,
@@ -116,9 +117,9 @@ export class GoogleCalendarService implements ICalendarService {
     event: ICalendarEvent,
   ): Promise<{ id: string; htmlLink: string }> {
     const auth = await this.buildClient(userId);
-    const calendar = google.calendar({ version: "v3", auth });
+    const cal = calendar({ version: "v3", auth });
 
-    const response = await calendar.events.insert({
+    const response = await cal.events.insert({
       calendarId: "primary",
       requestBody: this.toApiEvent(event),
     });
@@ -135,7 +136,7 @@ export class GoogleCalendarService implements ICalendarService {
     patch: Partial<ICalendarEvent>,
   ): Promise<void> {
     const auth = await this.buildClient(userId);
-    const calendar = google.calendar({ version: "v3", auth });
+    const cal = calendar({ version: "v3", auth });
 
     const patchBody: calendar_v3.Schema$Event = {};
     if (patch.summary !== undefined) patchBody.summary = patch.summary;
@@ -158,7 +159,7 @@ export class GoogleCalendarService implements ICalendarService {
       patchBody.attendees = patch.attendees.map((email) => ({ email }));
     }
 
-    await calendar.events.patch({
+    await cal.events.patch({
       calendarId: "primary",
       eventId,
       requestBody: patchBody,
@@ -171,8 +172,8 @@ export class GoogleCalendarService implements ICalendarService {
     calendarId = "primary",
   ): Promise<void> {
     const auth = await this.buildClient(userId);
-    const calendar = google.calendar({ version: "v3", auth });
+    const cal = calendar({ version: "v3", auth });
 
-    await calendar.events.delete({ calendarId, eventId });
+    await cal.events.delete({ calendarId, eventId });
   }
 }

@@ -1,0 +1,32 @@
+services:
+  jarvis:
+    build: .
+    image: jarvis-v0.0.1
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+    depends_on:
+      - redis
+      - postgres
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: jarvis
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:

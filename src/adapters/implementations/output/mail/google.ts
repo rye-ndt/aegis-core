@@ -1,4 +1,5 @@
-import { google } from "googleapis";
+import { gmail } from "@googleapis/gmail";
+import { OAuth2Client } from "google-auth-library";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { GmailNotConnectedError } from "../../../../helpers/errors/gmailNotConnected.error";
 import type {
@@ -20,7 +21,7 @@ export class GoogleGmailService implements IGmailService {
     const stored = await this.tokenRepo.findByUserId(userId);
     if (!stored) throw new GmailNotConnectedError(userId);
 
-    const oauth2Client = new google.auth.OAuth2(
+    const oauth2Client = new OAuth2Client(
       this.clientId,
       this.clientSecret,
       this.redirectUri,
@@ -54,9 +55,9 @@ export class GoogleGmailService implements IGmailService {
     params: { query: string; maxResults: number },
   ): Promise<IGmailEmailSummary[]> {
     const auth = await this.buildClient(userId);
-    const gmail = google.gmail({ version: "v1", auth });
+    const gmailClient = gmail({ version: "v1", auth });
 
-    const listRes = await gmail.users.messages.list({
+    const listRes = await gmailClient.users.messages.list({
       userId: "me",
       q: params.query,
       maxResults: params.maxResults,
@@ -70,7 +71,7 @@ export class GoogleGmailService implements IGmailService {
     for (const msg of messages) {
       if (!msg.id) continue;
 
-      const msgRes = await gmail.users.messages.get({
+      const msgRes = await gmailClient.users.messages.get({
         userId: "me",
         id: msg.id,
         format: "metadata",
@@ -110,7 +111,7 @@ export class GoogleGmailService implements IGmailService {
     draft: IGmailDraftInput,
   ): Promise<{ draftId: string }> {
     const auth = await this.buildClient(userId);
-    const gmail = google.gmail({ version: "v1", auth });
+    const gmailClient = gmail({ version: "v1", auth });
 
     const lines: string[] = [
       `To: ${draft.to.join(", ")}`,
@@ -129,7 +130,7 @@ export class GoogleGmailService implements IGmailService {
     const rawMessage = lines.join("\r\n");
     const encodedRaw = Buffer.from(rawMessage).toString("base64url");
 
-    const res = await gmail.users.drafts.create({
+    const res = await gmailClient.users.drafts.create({
       userId: "me",
       requestBody: {
         message: {
