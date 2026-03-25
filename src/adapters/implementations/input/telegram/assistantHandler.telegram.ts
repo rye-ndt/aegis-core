@@ -6,17 +6,14 @@ import type { Context } from "grammy";
 const TELEGRAM_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 export class TelegramAssistantHandler {
-  // In-memory conversation state per chat — same pattern as consoleCli.ts
   private conversations = new Map<number, string>();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
-    /** If set, all chats share this userId (single-user personal bot mode) */
     private readonly fixedUserId?: string,
   ) {}
 
   register(bot: Bot): void {
-    // Global error handler — prevents crashes on Telegram API or handler errors
     bot.catch((err) => {
       console.error("Bot error:", err.message);
     });
@@ -70,7 +67,6 @@ export class TelegramAssistantHandler {
     });
   }
 
-  /** Try Markdown first; fall back to plain text if Telegram rejects the formatting. */
   private async safeSend(ctx: Context, text: string): Promise<void> {
     try {
       await ctx.reply(text, { parse_mode: "Markdown" });

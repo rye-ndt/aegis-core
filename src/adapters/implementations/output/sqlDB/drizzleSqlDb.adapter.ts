@@ -13,11 +13,6 @@ import { DrizzleJarvisConfigRepo } from "./repositories/jarvisConfig.repo";
 import { DrizzleUserMemoryRepo } from "./repositories/userMemory.repo";
 import { DrizzleGoogleOAuthTokenRepo } from "./repositories/googleOAuthToken.repo";
 
-/**
- * SQL adapter facade:
- * - owns a single Pool/Drizzle instance
- * - exposes per-table repositories (each with its own signatures)
- */
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
   readonly conversations: DrizzleConversationRepo;

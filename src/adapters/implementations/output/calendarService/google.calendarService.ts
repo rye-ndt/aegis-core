@@ -13,8 +13,6 @@ export class GoogleCalendarService implements ICalendarService {
     private readonly redirectUri: string,
   ) {}
 
-  // ─── private helpers ────────────────────────────────────────────────────────
-
   private async buildClient(userId: string) {
     const stored = await this.tokenRepo.findByUserId(userId);
     if (!stored) throw new CalendarNotConnectedError(userId);
@@ -26,7 +24,6 @@ export class GoogleCalendarService implements ICalendarService {
       expiry_date: stored.expiresAtEpoch * 1000, // googleapis uses milliseconds
     });
 
-    // Persist silently-refreshed tokens back to DB
     oauth2Client.on("tokens", async (tokens) => {
       const now = newCurrentUTCEpoch();
       await this.tokenRepo.upsert({
@@ -75,8 +72,6 @@ export class GoogleCalendarService implements ICalendarService {
       attendees: item.attendees?.map((a) => a.email ?? "").filter(Boolean),
     };
   }
-
-  // ─── ICalendarService ────────────────────────────────────────────────────────
 
   async listEvents(
     userId: string,

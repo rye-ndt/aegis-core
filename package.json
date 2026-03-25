@@ -6,7 +6,6 @@
   "scripts": {
     "build": "tsc",
     "dev": "ts-node src/telegramCli.ts",
-    "jarvis": "ts-node src/jarvisCli.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

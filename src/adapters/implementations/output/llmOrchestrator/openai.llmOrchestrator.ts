@@ -73,7 +73,6 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     return { text: message.content ?? "" };
   }
 
-  /** Converts a stored ASSISTANT_TOOL_CALL message (abstract IToolCall[]) to OpenAI wire format. */
   private toOpenAiToolCallMessage(msg: IOrchestratorMessage): ChatCompletionMessageParam {
     const toolCalls: IToolCall[] = JSON.parse(msg.toolCallsJson!);
     return {

@@ -37,10 +37,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly speechToText: ISpeechToText,
     private readonly orchestrator: ILLMOrchestrator,
-    /**
-     * Factory that builds a per-request IToolRegistry keyed to a specific userId.
-     * Keeps concrete adapter imports out of this use-case layer.
-     */
     private readonly registryFactory: (userId: string) => IToolRegistry,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
@@ -130,10 +126,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   async getConversation(input: IGetConversationInput): Promise<Message[]> {
     return this.messageRepo.findByConversationId(input.conversationId);
   }
-
-  // ---------------------------------------------------------------------------
-  // chat() helpers — each owns exactly one step of the flow
-  // ---------------------------------------------------------------------------
 
   private async initConversation(input: IChatInput): Promise<string> {
     const now = newCurrentUTCEpoch();
@@ -271,21 +263,16 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // History sanitization
-  // ---------------------------------------------------------------------------
-
   private buildOrchestratorHistory(
     messages: Message[],
   ): IOrchestratorMessage[] {
-    // Collect all tool_call_ids that have a persisted TOOL response
     const resolvedIds = new Set<string>(
       messages
         .filter((m) => m.role === MESSAGE_ROLE.TOOL && m.toolCallId)
         .map((m) => m.toolCallId!),
     );
 
-    // Drop ASSISTANT_TOOL_CALL messages where any call_id is missing a TOOL response
+    // Drop ASSISTANT_TOOL_CALL messages where a call_id has no TOOL response
     // (can happen if a previous request crashed mid-execution)
     const keptToolCallIds = new Set<string>();
     const sanitized = messages.filter((m) => {
@@ -297,7 +284,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       return complete;
     });
 
-    // Also drop orphaned TOOL messages whose ASSISTANT_TOOL_CALL was filtered out
     return sanitized
       .filter(
         (m) =>
@@ -311,10 +297,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
         toolCallsJson: m.toolCallsJson,
       }));
   }
-
-  // ---------------------------------------------------------------------------
-  // System prompt assembly
-  // ---------------------------------------------------------------------------
 
   private async buildSystemPrompt(
     userId: string,

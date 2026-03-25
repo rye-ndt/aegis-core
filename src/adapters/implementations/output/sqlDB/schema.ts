@@ -1,7 +1,3 @@
-/**
- * Drizzle schema for Postgres. Add table definitions here or in separate files
- * under this folder and re-export. Used by drizzle-kit for migrations.
- */
 import { integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
