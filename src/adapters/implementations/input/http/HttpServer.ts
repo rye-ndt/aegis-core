@@ -1,6 +1,5 @@
 import * as http from "http";
 import { AssistantControllerConcrete } from "./assistant.controller";
-import { UserControllerConcrete } from "./user.controller";
 import { GoogleCalendarAuthController } from "./googleCalendarAuth.controller";
 
 type RouteHandler = (
@@ -53,28 +52,6 @@ export class HttpServer {
           res,
           params?.conversationId || ""
         )
-    );
-  }
-
-  registerUserController(userController: UserControllerConcrete): void {
-    this.addRoute("POST", "/api/users/register", (req, res) =>
-      userController.handleRegister(req, res)
-    );
-
-    this.addRoute("POST", "/api/users/login", (req, res) =>
-      userController.handleLogin(req, res)
-    );
-
-    this.addRoute("POST", "/api/users/logout", (req, res) =>
-      userController.handleLogout(req, res)
-    );
-
-    this.addRoute("POST", "/api/users/refresh", (req, res) =>
-      userController.handleRefresh(req, res)
-    );
-
-    this.addRoute("POST", "/api/users/verify-email", (req, res) =>
-      userController.handleVerifyEmail(req, res)
     );
   }
 

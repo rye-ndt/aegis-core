@@ -4,7 +4,6 @@ import type { IAssistantUseCase } from "../../use-cases/interface/input/assistan
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
 import { WhisperSpeechToText } from "../implementations/output/speechToText/whisper.speechToText";
 import { OpenAIOrchestrator } from "../implementations/output/llmOrchestrator/openai.llmOrchestrator";
-import { SendEmailTool } from "../implementations/output/tools/sendEmail.tool";
 import { CalendarReadTool } from "../implementations/output/tools/calendarRead.tool";
 import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite.tool";
 import { GoogleCalendarService } from "../implementations/output/calendarService/google.calendarService";
@@ -19,16 +18,26 @@ import { OpenAIEmbeddingService } from "../implementations/output/embeddingServi
 import { PineconeVectorStore } from "../implementations/output/vectorStore/pinecone.vectorStore";
 import { OpenAITextGenerator } from "../implementations/output/textGenerator/openai.textGenerator";
 import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
-import { UserInject } from "./user.di";
+import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
 
 export class AssistantInject {
+  private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private ctl: AssistantControllerConcrete | null = null;
-  private userInject: UserInject = new UserInject();
+
+  getSqlDB(): DrizzleSqlDB {
+    if (!this.sqlDB) {
+      this.sqlDB = new DrizzleSqlDB({
+        connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/memora",
+      });
+    }
+    return this.sqlDB;
+  }
 
   getUseCase(): IAssistantUseCase {
     if (!this.useCase) {
       const apiKey = process.env.OPENAI_API_KEY ?? "";
+      const sqlDB = this.getSqlDB();
 
       const speechToText = new WhisperSpeechToText(apiKey);
       const orchestrator = new OpenAIOrchestrator(
@@ -36,30 +45,17 @@ export class AssistantInject {
         process.env.OPENAI_MODEL ?? "gpt-4o",
       );
 
-      const sqlDB = this.userInject.getSqlDB();
-      const redis = new Redis(
-        process.env.REDIS_URL ?? "redis://localhost:6379",
-      );
-      const jarvisConfigRepo = new CachedJarvisConfigRepo(
-        sqlDB.jarvisConfig,
-        redis,
-      );
+      const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+      const jarvisConfigRepo = new CachedJarvisConfigRepo(sqlDB.jarvisConfig, redis);
 
-      // Singletons for RAG
       const embeddingService = new OpenAIEmbeddingService(apiKey);
       const vectorStore = new PineconeVectorStore(
         process.env.PINECONE_API_KEY ?? "",
         process.env.PINECONE_INDEX_NAME ?? "memora-user-memories",
         process.env.PINECONE_HOST,
       );
-      const userMemoryRepo = sqlDB.userMemories;
-      const enrichmentGenerator = new OpenAITextGenerator(
-        apiKey,
-        "gpt-4o-mini",
-      );
-      const emailSender = this.userInject.getEmailSender();
+      const enrichmentGenerator = new OpenAITextGenerator(apiKey, "gpt-4o-mini");
 
-      // Singleton calendar service — token repo resolved once, userId injected per-request
       const calendarService = new GoogleCalendarService(
         sqlDB.googleOAuthTokens,
         process.env.GOOGLE_CLIENT_ID ?? "",
@@ -67,7 +63,6 @@ export class AssistantInject {
         process.env.GOOGLE_REDIRECT_URI ?? "",
       );
 
-      // Singleton Gmail service — same token store as Calendar
       const gmailService = new GoogleGmailService(
         sqlDB.googleOAuthTokens,
         process.env.GOOGLE_CLIENT_ID ?? "",
@@ -75,28 +70,21 @@ export class AssistantInject {
         process.env.GOOGLE_REDIRECT_URI ?? "",
       );
 
-      // Per-request registry factory — captures singletons via closure, injects userId at call time
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
-        r.register(new SendEmailTool(emailSender));
         r.register(new CalendarReadTool(userId, calendarService));
         r.register(new CalendarWriteTool(userId, calendarService));
         r.register(new GmailSearchEmailsTool(userId, gmailService));
         r.register(new GmailCreateDraftTool(userId, gmailService));
         r.register(
-          new RetrieveUserMemoryTool(
-            userId,
-            embeddingService,
-            vectorStore,
-            userMemoryRepo,
-          ),
+          new RetrieveUserMemoryTool(userId, embeddingService, vectorStore, sqlDB.userMemories),
         );
         r.register(
           new StoreUserMemoryTool(
             userId,
             embeddingService,
             vectorStore,
-            userMemoryRepo,
+            sqlDB.userMemories,
             enrichmentGenerator,
           ),
         );
@@ -118,7 +106,8 @@ export class AssistantInject {
 
   getCtl(): AssistantControllerConcrete {
     if (!this.ctl) {
-      this.ctl = new AssistantControllerConcrete(this.getUseCase());
+      const userId = process.env.JARVIS_USER_ID ?? "";
+      this.ctl = new AssistantControllerConcrete(this.getUseCase(), userId);
     }
     return this.ctl;
   }

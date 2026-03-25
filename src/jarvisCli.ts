@@ -1,7 +1,7 @@
 import "dotenv/config";
 import readline from "readline";
 import Redis from "ioredis";
-import { UserInject } from "./adapters/inject/user.di";
+import { DrizzleSqlDB } from "./adapters/implementations/output/sqlDB/drizzleSqlDb.adapter";
 import { CachedJarvisConfigRepo } from "./adapters/implementations/output/jarvisConfig/cachedJarvisConfig.repo";
 import type { IJarvisConfigDB } from "./use-cases/interface/output/repository/jarvisConfig.repo";
 
@@ -50,9 +50,11 @@ async function handleSet(repo: IJarvisConfigDB): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const userInject = new UserInject();
+  const sqlDB = new DrizzleSqlDB({
+    connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/memora",
+  });
   const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-  const repo = new CachedJarvisConfigRepo(userInject.getSqlDB().jarvisConfig, redis);
+  const repo = new CachedJarvisConfigRepo(sqlDB.jarvisConfig, redis);
 
   console.log("=== JARVIS Config CLI ===");
   console.log("1) View current system prompt");
