@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-03-25 12:19
+> Last updated: 2026-03-25 13:45
 
 ---
 
@@ -46,8 +46,8 @@ src/
 │       └── output/                 # Outbound ports: ISpeechToText, ILLMOrchestrator,
 │                                   # ITool, IToolRegistry, IConversationDB,
 │                                   # IMessageDB, IUserDB, IJarvisConfigDB, IUserMemoryDB,
-│                                   # ICalendarService, IGmailService, IEmbeddingService,
-│                                   # IVectorStore, ITextGenerator
+│                                   # ITodoItemDB, ICalendarService, IGmailService,
+│                                   # IEmbeddingService, IVectorStore, ITextGenerator
 │
 ├── adapters/
 │   ├── inject/
@@ -71,7 +71,9 @@ src/
 │           │   ├── gmailSearchEmails.tool.ts  # [working]
 │           │   ├── gmailCreateDraft.tool.ts   # [working]
 │           │   ├── storeUserMemory.tool.ts    # [working]
-│           │   └── retrieveUserMemory.tool.ts # [working]
+│           │   ├── retrieveUserMemory.tool.ts # [working]
+│           │   ├── createTodoItem.ts          # [working]
+│           │   └── retrieveTodoItems.ts       # [working]
 │           ├── toolRegistry.concrete.ts       # [working]
 │           ├── jarvisConfig/      # CachedJarvisConfigRepo (Redis + DB) [working]
 │           └── sqlDB/             # DrizzleSqlDB + all repos [working]
@@ -136,6 +138,7 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | `jarvis_config`       | Singleton — stores system prompt and max tool rounds                |
 | `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
 | `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
+| `todo_items`          | To-do list — title, description, deadline (epoch), priority, status |
 
 ---
 

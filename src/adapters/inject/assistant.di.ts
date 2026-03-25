@@ -20,10 +20,12 @@ import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone
 import { OpenAITextGenerator } from "../implementations/output/textGenerator/openai";
 import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
 import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
+import { GoogleOAuthService } from "../implementations/output/googleOAuth/googleOAuth.service";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
+  private _googleOAuthService: GoogleOAuthService | null = null;
 
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
@@ -107,6 +109,13 @@ export class AssistantInject {
         return r;
       };
 
+      this._googleOAuthService = new GoogleOAuthService(
+        process.env.GOOGLE_CLIENT_ID ?? "",
+        process.env.GOOGLE_CLIENT_SECRET ?? "",
+        process.env.GOOGLE_REDIRECT_URI ?? "",
+        sqlDB.googleOAuthTokens,
+      );
+
       this.useCase = new AssistantUseCaseImpl(
         speechToText,
         orchestrator,
@@ -118,5 +127,10 @@ export class AssistantInject {
       );
     }
     return this.useCase;
+  }
+
+  getGoogleOAuthService(): GoogleOAuthService {
+    if (!this._googleOAuthService) this.getUseCase();
+    return this._googleOAuthService!;
   }
 }

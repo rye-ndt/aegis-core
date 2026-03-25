@@ -13,6 +13,7 @@ import { DrizzleJarvisConfigRepo } from "./repositories/jarvisConfig.repo";
 import { DrizzleUserMemoryRepo } from "./repositories/userMemory.repo";
 import { DrizzleGoogleOAuthTokenRepo } from "./repositories/googleOAuthToken.repo";
 import { DrizzleTodoItemRepo } from "./repositories/todoItem.repo";
+import { DrizzleUserProfileRepo } from "./repositories/userProfile.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -22,6 +23,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly userMemories: DrizzleUserMemoryRepo;
   readonly googleOAuthTokens: DrizzleGoogleOAuthTokenRepo;
   readonly todoItems: DrizzleTodoItemRepo;
+  readonly userProfiles: DrizzleUserProfileRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -32,6 +34,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.userMemories = new DrizzleUserMemoryRepo(this.db);
     this.googleOAuthTokens = new DrizzleGoogleOAuthTokenRepo(this.db);
     this.todoItems = new DrizzleTodoItemRepo(this.db);
+    this.userProfiles = new DrizzleUserProfileRepo(this.db);
   }
 
   async runMigrations(migrationsFolder: string): Promise<void> {

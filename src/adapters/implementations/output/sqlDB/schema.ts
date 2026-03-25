@@ -66,6 +66,15 @@ export const userMemories = pgTable("user_memories", {
   lastAccessedEpoch: integer("last_accessed_epoch").notNull(),
 });
 
+export const userProfiles = pgTable("user_profiles", {
+  userId: uuid("user_id").primaryKey(),
+  displayName: text("display_name"),
+  personalities: text("personalities").array().notNull().default([]),
+  wakeUpHour: integer("wake_up_hour"),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
 export const todoItems = pgTable("todo_items", {
   id: uuid("id").primaryKey(),
   userId: uuid("user_id").notNull(),
