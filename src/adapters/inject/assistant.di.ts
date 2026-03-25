@@ -1,5 +1,4 @@
 import Redis from "ioredis";
-import { AssistantControllerConcrete } from "../implementations/input/http/assistant.controller";
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
 import { WhisperSpeechToText } from "../implementations/output/speechToText/whisper.speechToText";
@@ -23,7 +22,6 @@ import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapt
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
-  private ctl: AssistantControllerConcrete | null = null;
 
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
@@ -102,13 +100,5 @@ export class AssistantInject {
       );
     }
     return this.useCase;
-  }
-
-  getCtl(): AssistantControllerConcrete {
-    if (!this.ctl) {
-      const userId = process.env.JARVIS_USER_ID ?? "";
-      this.ctl = new AssistantControllerConcrete(this.getUseCase(), userId);
-    }
-    return this.ctl;
   }
 }
