@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 import { CalendarNotConnectedError } from "../../../../helpers/errors/calendarNotConnected.error";
-import type { ICalendarService } from "../../../../use-cases/interface/output/calendarService.interface";
+import type { ICalendarService } from "../../../../use-cases/interface/output/calendar.interface";
 import type {
   ITool,
   IToolDefinition,
@@ -10,11 +10,24 @@ import type {
 } from "../../../../use-cases/interface/output/tool.interface";
 
 const InputSchema = z.object({
-  startDateTime: z.string().describe("RFC3339 start datetime, e.g. 2026-03-25T00:00:00Z"),
-  endDateTime: z.string().describe("RFC3339 end datetime, e.g. 2026-03-26T00:00:00Z"),
-  query: z.string().optional().describe("Optional free-text search query to filter events"),
-  maxResults: z.number().optional().describe("Maximum number of events to return (default 20)"),
-  calendarId: z.string().optional().describe("Calendar ID to query (default: primary)"),
+  startDateTime: z
+    .string()
+    .describe("RFC3339 start datetime, e.g. 2026-03-25T00:00:00Z"),
+  endDateTime: z
+    .string()
+    .describe("RFC3339 end datetime, e.g. 2026-03-26T00:00:00Z"),
+  query: z
+    .string()
+    .optional()
+    .describe("Optional free-text search query to filter events"),
+  maxResults: z
+    .number()
+    .optional()
+    .describe("Maximum number of events to return (default 20)"),
+  calendarId: z
+    .string()
+    .optional()
+    .describe("Calendar ID to query (default: primary)"),
 });
 
 export class CalendarReadTool implements ITool {
@@ -26,14 +39,16 @@ export class CalendarReadTool implements ITool {
   definition(): IToolDefinition {
     return {
       name: TOOL_TYPE.CALENDAR_READ,
-      description: "Read events from the user's Google Calendar within a date range.",
+      description:
+        "Read events from the user's Google Calendar within a date range.",
       inputSchema: z.toJSONSchema(InputSchema),
     };
   }
 
   async execute(input: IToolInput): Promise<IToolOutput> {
     try {
-      const { startDateTime, endDateTime, query, maxResults, calendarId } = InputSchema.parse(input);
+      const { startDateTime, endDateTime, query, maxResults, calendarId } =
+        InputSchema.parse(input);
       const events = await this.calendarService.listEvents(this.userId, {
         startDateTime,
         endDateTime,
@@ -43,7 +58,10 @@ export class CalendarReadTool implements ITool {
       });
 
       if (events.length === 0) {
-        return { success: true, data: "No events found in the specified range." };
+        return {
+          success: true,
+          data: "No events found in the specified range.",
+        };
       }
 
       const formatted = events

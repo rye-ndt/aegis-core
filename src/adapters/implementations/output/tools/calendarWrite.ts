@@ -4,7 +4,7 @@ import { CalendarNotConnectedError } from "../../../../helpers/errors/calendarNo
 import type {
   ICalendarEvent,
   ICalendarService,
-} from "../../../../use-cases/interface/output/calendarService.interface";
+} from "../../../../use-cases/interface/output/calendar.interface";
 import type {
   ITool,
   IToolDefinition,

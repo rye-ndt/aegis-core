@@ -2,7 +2,7 @@ import type {
   ISpeechToText,
   ISpeechToTextInput,
   ISpeechToTextResult,
-} from "../../../../use-cases/interface/output/speechToText.interface";
+} from "../../../../use-cases/interface/output/stt.interface";
 
 // TODO: implement using OpenAI Whisper API or a local Whisper model
 export class WhisperSpeechToText implements ISpeechToText {

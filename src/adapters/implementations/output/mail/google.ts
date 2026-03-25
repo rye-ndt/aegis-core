@@ -5,7 +5,7 @@ import type {
   IGmailDraftInput,
   IGmailEmailSummary,
   IGmailService,
-} from "../../../../use-cases/interface/output/gmailService.interface";
+} from "../../../../use-cases/interface/output/mail.interface";
 import type { IGoogleOAuthTokenDB } from "../../../../use-cases/interface/output/repository/googleOAuthToken.repo";
 
 export class GoogleGmailService implements IGmailService {
@@ -84,7 +84,10 @@ export class GoogleGmailService implements IGmailService {
 
       const toHeader = getHeader("To");
       const toAddresses = toHeader
-        ? toHeader.split(",").map((s) => s.trim()).filter(Boolean)
+        ? toHeader
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
         : [];
 
       summaries.push({

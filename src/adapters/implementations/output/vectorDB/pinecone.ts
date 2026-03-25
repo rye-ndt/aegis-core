@@ -3,7 +3,7 @@ import type {
   IVectorStore,
   IVectorStoreRecord,
   IVectorQueryResult,
-} from "../../../../use-cases/interface/output/vectorStore.interface";
+} from "../../../../use-cases/interface/output/vectorDB.interface";
 
 export class PineconeVectorStore implements IVectorStore {
   private readonly index;

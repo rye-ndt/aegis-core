@@ -11,12 +11,12 @@ import type {
   IListConversationsInput,
   IVoiceChatInput,
 } from "../interface/input/assistant.interface";
-import type { ISpeechToText } from "../interface/output/speechToText.interface";
+import type { ISpeechToText } from "../interface/output/stt.interface";
 import type {
   ILLMOrchestrator,
   IOrchestratorMessage,
   IToolCall,
-} from "../interface/output/llmOrchestrator.interface";
+} from "../interface/output/orchestrator.interface";
 import type { IToolRegistry } from "../interface/output/tool.interface";
 import type {
   Conversation,

@@ -7,13 +7,18 @@ import type {
   IToolInput,
   IToolOutput,
 } from "../../../../use-cases/interface/output/tool.interface";
-import type { IEmbeddingService } from "../../../../use-cases/interface/output/embeddingService.interface";
-import type { IVectorStore } from "../../../../use-cases/interface/output/vectorStore.interface";
+import type { IEmbeddingService } from "../../../../use-cases/interface/output/embedding.interface";
+import type { IVectorStore } from "../../../../use-cases/interface/output/vectorDB.interface";
 import type { IUserMemoryDB } from "../../../../use-cases/interface/output/repository/userMemory.repo";
 
 const InputSchema = z.object({
-  query: z.string().describe("Natural language query describing what to retrieve"),
-  topK: z.number().optional().describe("Maximum number of memories to return (default 5)"),
+  query: z
+    .string()
+    .describe("Natural language query describing what to retrieve"),
+  topK: z
+    .number()
+    .optional()
+    .describe("Maximum number of memories to return (default 5)"),
 });
 
 export class RetrieveUserMemoryTool implements ITool {
@@ -39,7 +44,9 @@ export class RetrieveUserMemoryTool implements ITool {
     const { query, topK = 5 } = InputSchema.parse(input);
 
     const { vector } = await this.embeddingService.embed({ text: query });
-    const results = await this.vectorStore.query(vector, topK, { userId: this.userId });
+    const results = await this.vectorStore.query(vector, topK, {
+      userId: this.userId,
+    });
 
     if (results.length === 0) {
       return { success: true, data: "No relevant memories found." };
@@ -57,7 +64,10 @@ export class RetrieveUserMemoryTool implements ITool {
     );
 
     const formatted = results
-      .map((r, i) => `${i + 1}. ${r.metadata["content"] ?? r.id} (score: ${r.score.toFixed(3)})`)
+      .map(
+        (r, i) =>
+          `${i + 1}. ${r.metadata["content"] ?? r.id} (score: ${r.score.toFixed(3)})`,
+      )
       .join("\n");
 
     return { success: true, data: formatted };

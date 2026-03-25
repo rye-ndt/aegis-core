@@ -1,5 +1,8 @@
 import OpenAI from "openai";
-import type { ChatCompletionMessageParam, ChatCompletionTool } from "openai/resources/chat/completions";
+import type {
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources/chat/completions";
 import { MESSAGE_ROLE } from "../../../../helpers/enums/messageRole.enum";
 import type {
   ILLMOrchestrator,
@@ -7,7 +10,7 @@ import type {
   IOrchestratorResponse,
   IToolCall,
   IOrchestratorMessage,
-} from "../../../../use-cases/interface/output/llmOrchestrator.interface";
+} from "../../../../use-cases/interface/output/orchestrator.interface";
 
 export class OpenAIOrchestrator implements ILLMOrchestrator {
   private readonly client: OpenAI;
@@ -23,7 +26,10 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     const messages: ChatCompletionMessageParam[] = [
       { role: "system", content: input.systemPrompt },
       ...input.conversationHistory.map((msg): ChatCompletionMessageParam => {
-        if (msg.role === MESSAGE_ROLE.ASSISTANT_TOOL_CALL && msg.toolCallsJson) {
+        if (
+          msg.role === MESSAGE_ROLE.ASSISTANT_TOOL_CALL &&
+          msg.toolCallsJson
+        ) {
           return this.toOpenAiToolCallMessage(msg);
         }
         if (msg.role === MESSAGE_ROLE.TOOL) {
@@ -65,7 +71,10 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
         .map((tc) => ({
           id: tc.id as string,
           toolName: tc.function.name as string,
-          input: JSON.parse(tc.function.arguments as string) as Record<string, unknown>,
+          input: JSON.parse(tc.function.arguments as string) as Record<
+            string,
+            unknown
+          >,
         }));
       return { toolCalls };
     }
@@ -73,7 +82,9 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     return { text: message.content ?? "" };
   }
 
-  private toOpenAiToolCallMessage(msg: IOrchestratorMessage): ChatCompletionMessageParam {
+  private toOpenAiToolCallMessage(
+    msg: IOrchestratorMessage,
+  ): ChatCompletionMessageParam {
     const toolCalls: IToolCall[] = JSON.parse(msg.toolCallsJson!);
     return {
       role: "assistant",

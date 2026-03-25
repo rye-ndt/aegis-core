@@ -1,21 +1,21 @@
 import Redis from "ioredis";
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
-import { WhisperSpeechToText } from "../implementations/output/speechToText/whisper.speechToText";
-import { OpenAIOrchestrator } from "../implementations/output/llmOrchestrator/openai.llmOrchestrator";
-import { CalendarReadTool } from "../implementations/output/tools/calendarRead.tool";
-import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite.tool";
-import { GoogleCalendarService } from "../implementations/output/calendarService/google.calendarService";
-import { GoogleGmailService } from "../implementations/output/gmailService/google.gmailService";
-import { GmailSearchEmailsTool } from "../implementations/output/tools/gmailSearchEmails.tool";
-import { GmailCreateDraftTool } from "../implementations/output/tools/gmailCreateDraft.tool";
-import { RetrieveUserMemoryTool } from "../implementations/output/tools/retrieveUserMemory.tool";
-import { StoreUserMemoryTool } from "../implementations/output/tools/storeUserMemory.tool";
+import { WhisperSpeechToText } from "../implementations/output/stt/whisper.";
+import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
+import { CalendarReadTool } from "../implementations/output/tools/calendarRead";
+import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite";
+import { GoogleCalendarService } from "../implementations/output/calendar/google";
+import { GoogleGmailService } from "../implementations/output/mail/google";
+import { GmailSearchEmailsTool } from "../implementations/output/tools/gmailSearchEmails";
+import { GmailCreateDraftTool } from "../implementations/output/tools/gmailCreateDraft";
+import { RetrieveUserMemoryTool } from "../implementations/output/tools/retrieveUserMemory";
+import { StoreUserMemoryTool } from "../implementations/output/tools/storeUserMemory";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
-import { CachedJarvisConfigRepo } from "../implementations/output/jarvisConfig/cachedJarvisConfig.repo";
-import { OpenAIEmbeddingService } from "../implementations/output/embeddingService/openai.embeddingService";
-import { PineconeVectorStore } from "../implementations/output/vectorStore/pinecone.vectorStore";
-import { OpenAITextGenerator } from "../implementations/output/textGenerator/openai.textGenerator";
+import { CachedJarvisConfigRepo } from "../implementations/output/jarvisConfig/cache";
+import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
+import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
+import { OpenAITextGenerator } from "../implementations/output/textGenerator/openai";
 import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
 import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
 
@@ -26,7 +26,8 @@ export class AssistantInject {
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
       this.sqlDB = new DrizzleSqlDB({
-        connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/memora",
+        connectionString:
+          process.env.DATABASE_URL ?? "postgres://localhost:5432/memora",
       });
     }
     return this.sqlDB;
@@ -43,8 +44,13 @@ export class AssistantInject {
         process.env.OPENAI_MODEL ?? "gpt-4o",
       );
 
-      const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-      const jarvisConfigRepo = new CachedJarvisConfigRepo(sqlDB.jarvisConfig, redis);
+      const redis = new Redis(
+        process.env.REDIS_URL ?? "redis://localhost:6379",
+      );
+      const jarvisConfigRepo = new CachedJarvisConfigRepo(
+        sqlDB.jarvisConfig,
+        redis,
+      );
 
       const embeddingService = new OpenAIEmbeddingService(apiKey);
       const vectorStore = new PineconeVectorStore(
@@ -52,7 +58,10 @@ export class AssistantInject {
         process.env.PINECONE_INDEX_NAME ?? "memora-user-memories",
         process.env.PINECONE_HOST,
       );
-      const enrichmentGenerator = new OpenAITextGenerator(apiKey, "gpt-4o-mini");
+      const enrichmentGenerator = new OpenAITextGenerator(
+        apiKey,
+        "gpt-4o-mini",
+      );
 
       const calendarService = new GoogleCalendarService(
         sqlDB.googleOAuthTokens,
@@ -75,7 +84,12 @@ export class AssistantInject {
         r.register(new GmailSearchEmailsTool(userId, gmailService));
         r.register(new GmailCreateDraftTool(userId, gmailService));
         r.register(
-          new RetrieveUserMemoryTool(userId, embeddingService, vectorStore, sqlDB.userMemories),
+          new RetrieveUserMemoryTool(
+            userId,
+            embeddingService,
+            vectorStore,
+            sqlDB.userMemories,
+          ),
         );
         r.register(
           new StoreUserMemoryTool(

@@ -8,8 +8,8 @@ import type {
   IToolInput,
   IToolOutput,
 } from "../../../../use-cases/interface/output/tool.interface";
-import type { IEmbeddingService } from "../../../../use-cases/interface/output/embeddingService.interface";
-import type { IVectorStore } from "../../../../use-cases/interface/output/vectorStore.interface";
+import type { IEmbeddingService } from "../../../../use-cases/interface/output/embedding.interface";
+import type { IVectorStore } from "../../../../use-cases/interface/output/vectorDB.interface";
 import type {
   IUserMemoryDB,
   UserMemory,
@@ -17,7 +17,9 @@ import type {
 import type { ITextGenerator } from "../../../../use-cases/interface/output/textGenerator.interface";
 
 const InputSchema = z.object({
-  content: z.string().describe("The memory to store, as stated by or inferred from the user"),
+  content: z
+    .string()
+    .describe("The memory to store, as stated by or inferred from the user"),
   category: z
     .enum(["preference", "fact", "event", "goal"])
     .optional()
@@ -53,12 +55,18 @@ export class StoreUserMemoryTool implements ITool {
     const enrichedContent = await this.enrich(content);
 
     // Step 2: embed the enriched content
-    const { vector } = await this.embeddingService.embed({ text: enrichedContent });
+    const { vector } = await this.embeddingService.embed({
+      text: enrichedContent,
+    });
 
     // Step 3: deduplication check
-    const dupes = await this.vectorStore.query(vector, 1, { userId: this.userId });
+    const dupes = await this.vectorStore.query(vector, 1, {
+      userId: this.userId,
+    });
     if (dupes.length > 0 && dupes[0].score >= DEDUP_SCORE_THRESHOLD) {
-      const existingMemory = await this.userMemoryRepo.findByPineconeId(dupes[0].id);
+      const existingMemory = await this.userMemoryRepo.findByPineconeId(
+        dupes[0].id,
+      );
       if (existingMemory) {
         const updated: UserMemory = {
           ...existingMemory,

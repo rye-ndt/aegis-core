@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { IEmbeddingService } from "../../../../use-cases/interface/output/embeddingService.interface";
+import type { IEmbeddingService } from "../../../../use-cases/interface/output/embedding.interface";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIMENSIONS = 1536;
@@ -11,7 +11,9 @@ export class OpenAIEmbeddingService implements IEmbeddingService {
     this.client = new OpenAI({ apiKey });
   }
 
-  async embed(input: { text: string }): Promise<{ vector: number[]; tokenCount: number }> {
+  async embed(input: {
+    text: string;
+  }): Promise<{ vector: number[]; tokenCount: number }> {
     const response = await this.client.embeddings.create({
       model: EMBEDDING_MODEL,
       input: input.text,

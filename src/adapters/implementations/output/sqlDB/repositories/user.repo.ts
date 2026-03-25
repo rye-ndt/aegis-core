@@ -2,17 +2,12 @@ import { eq, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import type {
-  ILoginUser,
-  IUser as UseCaseUser,
-} from "../../../../../use-cases/interface/input/user.interface";
-import type {
   IUser,
   IUserDB,
   UserInit,
   UserUpdate,
 } from "../../../../../use-cases/interface/output/repository/user.repo";
 import { PERSONALITIES } from "../../../../../helpers/enums/personalities.enum";
-import { USER_ROLES } from "../../../../../helpers/enums/userRole.enum";
 import { USER_STATUSES } from "../../../../../helpers/enums/statuses.enum";
 import { users } from "../schema";
 
@@ -27,7 +22,6 @@ export class DrizzleUserRepo implements IUserDB {
       hashedPassword: user.hashedPassword,
       email: user.email,
       dob: user.dob,
-      role: user.role,
       status: user.status,
       personalities: [],
       secondaryPersonalities: [],
@@ -45,7 +39,6 @@ export class DrizzleUserRepo implements IUserDB {
         hashedPassword: user.hashedPassword,
         email: user.email,
         dob: user.dob,
-        role: user.role,
         status: user.status,
         updatedAtEpoch: user.updatedAtEpoch,
       })
@@ -80,22 +73,8 @@ export class DrizzleUserRepo implements IUserDB {
   private toIUser(row: typeof users.$inferSelect): IUser {
     return {
       ...row,
-      role: row.role as USER_ROLES,
       status: row.status as USER_STATUSES,
       personalities: row.personalities as PERSONALITIES[],
     };
   }
-
-  async login(_data: ILoginUser): Promise<UseCaseUser> {
-    throw new Error("DrizzleUserRepo.login is not implemented.");
-  }
-
-  async logout(_accessToken: string): Promise<void> {
-    throw new Error("DrizzleUserRepo.logout is not implemented.");
-  }
-
-  async refresh(_refreshToken: string): Promise<UseCaseUser> {
-    throw new Error("DrizzleUserRepo.refresh is not implemented.");
-  }
 }
-

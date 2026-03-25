@@ -1,5 +1,5 @@
 import { Bot } from "grammy";
-import type { TelegramAssistantHandler } from "./assistantHandler.telegram";
+import type { TelegramAssistantHandler } from "./handler";
 
 export class TelegramBot {
   private bot: Bot;

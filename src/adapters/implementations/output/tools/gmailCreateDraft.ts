@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 import { GmailNotConnectedError } from "../../../../helpers/errors/gmailNotConnected.error";
-import type { IGmailService } from "../../../../use-cases/interface/output/gmailService.interface";
+import type { IGmailService } from "../../../../use-cases/interface/output/mail.interface";
 import type {
   ITool,
   IToolDefinition,

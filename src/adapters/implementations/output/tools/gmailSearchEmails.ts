@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 import { GmailNotConnectedError } from "../../../../helpers/errors/gmailNotConnected.error";
-import type { IGmailService } from "../../../../use-cases/interface/output/gmailService.interface";
+import type { IGmailService } from "../../../../use-cases/interface/output/mail.interface";
 import type {
   ITool,
   IToolDefinition,
@@ -57,7 +57,7 @@ export class GmailSearchEmailsTool implements ITool {
           error:
             "Cannot search without an email address. " +
             "Ask the user: \"What is the sender's (or recipient's) email address?\" " +
-            "Then retry with a query like \"from:<email> <topic keywords>\".",
+            'Then retry with a query like "from:<email> <topic keywords>".',
         };
       }
       const emails = await this.gmailService.searchEmails(this.userId, {

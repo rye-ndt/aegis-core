@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { AssistantInject } from "./adapters/inject/assistant.di";
-import { TelegramBot } from "./adapters/implementations/input/telegram/TelegramBot";
-import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/assistantHandler.telegram";
+import { TelegramBot } from "./adapters/implementations/input/telegram/bot";
+import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/handler";
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 if (!token) {

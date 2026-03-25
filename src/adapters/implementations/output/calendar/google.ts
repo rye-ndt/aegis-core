@@ -2,7 +2,10 @@ import { google, type calendar_v3 } from "googleapis";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import { CalendarNotConnectedError } from "../../../../helpers/errors/calendarNotConnected.error";
-import type { ICalendarEvent, ICalendarService } from "../../../../use-cases/interface/output/calendarService.interface";
+import type {
+  ICalendarEvent,
+  ICalendarService,
+} from "../../../../use-cases/interface/output/calendar.interface";
 import type { IGoogleOAuthTokenDB } from "../../../../use-cases/interface/output/repository/googleOAuthToken.repo";
 
 export class GoogleCalendarService implements ICalendarService {
@@ -17,7 +20,11 @@ export class GoogleCalendarService implements ICalendarService {
     const stored = await this.tokenRepo.findByUserId(userId);
     if (!stored) throw new CalendarNotConnectedError(userId);
 
-    const oauth2Client = new google.auth.OAuth2(this.clientId, this.clientSecret, this.redirectUri);
+    const oauth2Client = new google.auth.OAuth2(
+      this.clientId,
+      this.clientSecret,
+      this.redirectUri,
+    );
     oauth2Client.setCredentials({
       access_token: stored.accessToken,
       refresh_token: stored.refreshToken,
@@ -31,7 +38,9 @@ export class GoogleCalendarService implements ICalendarService {
         userId,
         accessToken: tokens.access_token ?? stored.accessToken,
         refreshToken: tokens.refresh_token ?? stored.refreshToken,
-        expiresAtEpoch: tokens.expiry_date ? Math.floor(tokens.expiry_date / 1000) : stored.expiresAtEpoch,
+        expiresAtEpoch: tokens.expiry_date
+          ? Math.floor(tokens.expiry_date / 1000)
+          : stored.expiresAtEpoch,
         scope: tokens.scope ?? stored.scope,
         updatedAtEpoch: now,
       });
@@ -43,7 +52,10 @@ export class GoogleCalendarService implements ICalendarService {
   private toApiEvent(event: ICalendarEvent): calendar_v3.Schema$Event {
     const resource: calendar_v3.Schema$Event = {
       summary: event.summary,
-      start: { dateTime: event.startDateTime, timeZone: event.timeZone ?? "UTC" },
+      start: {
+        dateTime: event.startDateTime,
+        timeZone: event.timeZone ?? "UTC",
+      },
       end: { dateTime: event.endDateTime, timeZone: event.timeZone ?? "UTC" },
     };
     if (event.description) resource.description = event.description;
@@ -99,7 +111,10 @@ export class GoogleCalendarService implements ICalendarService {
     return (response.data.items ?? []).map((item) => this.fromApiEvent(item));
   }
 
-  async createEvent(userId: string, event: ICalendarEvent): Promise<{ id: string; htmlLink: string }> {
+  async createEvent(
+    userId: string,
+    event: ICalendarEvent,
+  ): Promise<{ id: string; htmlLink: string }> {
     const auth = await this.buildClient(userId);
     const calendar = google.calendar({ version: "v3", auth });
 
@@ -114,19 +129,30 @@ export class GoogleCalendarService implements ICalendarService {
     };
   }
 
-  async updateEvent(userId: string, eventId: string, patch: Partial<ICalendarEvent>): Promise<void> {
+  async updateEvent(
+    userId: string,
+    eventId: string,
+    patch: Partial<ICalendarEvent>,
+  ): Promise<void> {
     const auth = await this.buildClient(userId);
     const calendar = google.calendar({ version: "v3", auth });
 
     const patchBody: calendar_v3.Schema$Event = {};
     if (patch.summary !== undefined) patchBody.summary = patch.summary;
-    if (patch.description !== undefined) patchBody.description = patch.description;
+    if (patch.description !== undefined)
+      patchBody.description = patch.description;
     if (patch.location !== undefined) patchBody.location = patch.location;
     if (patch.startDateTime !== undefined) {
-      patchBody.start = { dateTime: patch.startDateTime, timeZone: patch.timeZone ?? "UTC" };
+      patchBody.start = {
+        dateTime: patch.startDateTime,
+        timeZone: patch.timeZone ?? "UTC",
+      };
     }
     if (patch.endDateTime !== undefined) {
-      patchBody.end = { dateTime: patch.endDateTime, timeZone: patch.timeZone ?? "UTC" };
+      patchBody.end = {
+        dateTime: patch.endDateTime,
+        timeZone: patch.timeZone ?? "UTC",
+      };
     }
     if (patch.attendees !== undefined) {
       patchBody.attendees = patch.attendees.map((email) => ({ email }));
@@ -139,7 +165,11 @@ export class GoogleCalendarService implements ICalendarService {
     });
   }
 
-  async deleteEvent(userId: string, eventId: string, calendarId = "primary"): Promise<void> {
+  async deleteEvent(
+    userId: string,
+    eventId: string,
+    calendarId = "primary",
+  ): Promise<void> {
     const auth = await this.buildClient(userId);
     const calendar = google.calendar({ version: "v3", auth });
 
