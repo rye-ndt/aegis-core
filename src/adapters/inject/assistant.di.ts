@@ -4,7 +4,6 @@ import type { IAssistantUseCase } from "../../use-cases/interface/input/assistan
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
 import { WhisperSpeechToText } from "../implementations/output/speechToText/whisper.speechToText";
 import { OpenAIOrchestrator } from "../implementations/output/llmOrchestrator/openai.llmOrchestrator";
-import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
 import { SendEmailTool } from "../implementations/output/tools/sendEmail.tool";
 import { CalendarReadTool } from "../implementations/output/tools/calendarRead.tool";
 import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite.tool";
@@ -68,7 +67,6 @@ export class AssistantInject {
       // Per-request registry factory — captures singletons via closure, injects userId at call time
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
-        r.register(new WebSearchTool(process.env.WEB_SEARCH_API_KEY ?? ""));
         r.register(new SendEmailTool(emailSender));
         r.register(new CalendarReadTool(userId, calendarService));
         r.register(new CalendarWriteTool(userId, calendarService));
