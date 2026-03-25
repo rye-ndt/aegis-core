@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-03-25
+> Last updated: 2026-03-25 12:19
 
 ---
 
@@ -12,17 +12,17 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 
 ## Tech stack
 
-| Layer | Choice |
-|---|---|
-| Language | TypeScript 5.3, Node.js, strict mode |
-| Interface | Telegram (`grammy`) |
-| ORM | Drizzle ORM + PostgreSQL (`pg` driver) |
-| Config cache | Redis (`ioredis`) — JarvisConfig system prompt |
-| LLM | OpenAI chat completions + tool use (`gpt-4o`) |
-| Speech-to-text | OpenAI Whisper (stub — not implemented) |
-| Validation | Zod 4.3.6 |
-| DI | Manual container in `src/adapters/inject/` |
-| Vector DB | Pinecone (`@pinecone-database/pinecone`) |
+| Layer          | Choice                                         |
+| -------------- | ---------------------------------------------- |
+| Language       | TypeScript 5.3, Node.js, strict mode           |
+| Interface      | Telegram (`grammy`)                            |
+| ORM            | Drizzle ORM + PostgreSQL (`pg` driver)         |
+| Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
+| LLM            | OpenAI chat completions + tool use (`gpt-4o`)  |
+| Speech-to-text | OpenAI Whisper (stub — not implemented)        |
+| Validation     | Zod 4.3.6                                      |
+| DI             | Manual container in `src/adapters/inject/`     |
+| Vector DB      | Pinecone (`@pinecone-database/pinecone`)       |
 
 ---
 
@@ -118,8 +118,8 @@ AssistantUseCaseImpl.chat()
 
 ## Stubs
 
-| Adapter | Blocks |
-|---|---|
+| Adapter               | Blocks                                       |
+| --------------------- | -------------------------------------------- |
 | `WhisperSpeechToText` | `voiceChat()` — not called from Telegram yet |
 
 ---
@@ -128,14 +128,14 @@ AssistantUseCaseImpl.chat()
 
 Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run db:generate && npm run db:migrate` after changes.
 
-| Table | Purpose |
-|---|---|
-| `users` | User record — personalities used to personalise system prompt |
-| `conversations` | Per-user conversation threads |
-| `messages` | All messages (user/assistant/tool) within a conversation |
-| `jarvis_config` | Singleton — stores system prompt and max tool rounds |
-| `user_memories` | RAG memory store — content, enriched content, category, Pinecone ID |
-| `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail |
+| Table                 | Purpose                                                             |
+| --------------------- | ------------------------------------------------------------------- |
+| `users`               | User record — personalities used to personalise system prompt       |
+| `conversations`       | Per-user conversation threads                                       |
+| `messages`            | All messages (user/assistant/tool) within a conversation            |
+| `jarvis_config`       | Singleton — stores system prompt and max tool rounds                |
+| `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
+| `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
 
 ---
 
@@ -188,17 +188,22 @@ npm run db:studio
 ## Coding conventions
 
 ### IDs and timestamps
+
 Never use `crypto.randomUUID()` or `Date.now()` directly — always use the project helpers:
+
 ```typescript
 import { newUuid } from "../../helpers/uuid";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 ```
+
 All `*_at_epoch` columns store seconds, not milliseconds.
 
 ### Comments
+
 Only add a comment when the code cannot explain itself: unit conversion mismatches, non-obvious performance decisions, crash-recovery edge cases. No JSDoc, no section dividers, no explanatory prose.
 
 ### DB facade — concrete vs interface
+
 `assistant.di.ts` holds a `DrizzleSqlDB` concrete instance. Repos are properties on the concrete class. When adding a new repo, add it to `DrizzleSqlDB` — no need to touch `ISqlDB`.
 
 ---
@@ -206,11 +211,13 @@ Only add a comment when the code cannot explain itself: unit conversion mismatch
 ## Patterns
 
 ### Adding a new tool
+
 1. Add a value to `TOOL_TYPE` in `src/helpers/enums/toolType.enum.ts`.
 2. Create `src/adapters/implementations/output/tools/myTool.tool.ts` implementing `ITool`.
 3. Register it inside the `registryFactory` closure in `AssistantInject.getUseCase()`.
 
 **`ITool` interface:**
+
 ```typescript
 interface ITool {
   definition(): IToolDefinition;
