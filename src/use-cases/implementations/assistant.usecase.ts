@@ -62,23 +62,94 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   }
 
   async chat(input: IChatInput): Promise<IChatResponse> {
+    const conversationId = await this.initConversation(input);
+    const conversationHistory = await this.loadHistory(conversationId);
+    const { systemPrompt, maxRounds } = await this.loadChatConfig(input.userId);
+    const toolRegistry = this.registryFactory(input.userId);
+    const availableTools = toolRegistry.getAll().map((t) => t.definition());
+    const toolsUsed: string[] = [];
+
+    console.log("[assistant] systemPrompt:", systemPrompt);
+    console.log(
+      "[assistant] availableTools:",
+      availableTools.map((t) => t.name),
+    );
+    console.log("[assistant] historyLength:", conversationHistory.length);
+
+    for (let round = 0; round < maxRounds; round++) {
+      console.log(`[assistant] round ${round}: calling orchestrator`);
+
+      const response = await this.orchestrator.chat({
+        systemPrompt,
+        conversationHistory,
+        availableTools,
+      });
+
+      console.log(
+        `[assistant] round ${round}: toolCalls=${JSON.stringify(response.toolCalls ?? null)}, hasText=${!!response.text}`,
+      );
+
+      if (!response.toolCalls?.length) {
+        return this.persistFinalReply(
+          conversationId,
+          response.text ?? "",
+          toolsUsed,
+        );
+      }
+
+      await this.persistToolCallBatch(
+        conversationId,
+        response.toolCalls,
+        conversationHistory,
+      );
+
+      for (const call of response.toolCalls) {
+        await this.executeToolCall(
+          call,
+          toolRegistry,
+          conversationId,
+          conversationHistory,
+          toolsUsed,
+        );
+      }
+    }
+
+    return this.persistFinalReply(
+      conversationId,
+      "I've reached the maximum number of tool-use rounds. Please try rephrasing your request.",
+      toolsUsed,
+    );
+  }
+
+  async listConversations(
+    input: IListConversationsInput,
+  ): Promise<Conversation[]> {
+    return this.conversationRepo.findByUserId(input.userId);
+  }
+
+  async getConversation(input: IGetConversationInput): Promise<Message[]> {
+    return this.messageRepo.findByConversationId(input.conversationId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // chat() helpers — each owns exactly one step of the flow
+  // ---------------------------------------------------------------------------
+
+  private async initConversation(input: IChatInput): Promise<string> {
     const now = newCurrentUTCEpoch();
     const conversationId = input.conversationId ?? newUuid();
 
-    // Create a new conversation record if this is the first message
     if (!input.conversationId) {
-      const conversation: Conversation = {
+      await this.conversationRepo.create({
         id: conversationId,
         userId: input.userId,
         title: input.message.slice(0, 60),
         status: CONVERSATION_STATUSES.ACTIVE,
         createdAtEpoch: now,
         updatedAtEpoch: now,
-      };
-      await this.conversationRepo.create(conversation);
+      });
     }
 
-    // Persist the user message
     await this.messageRepo.create({
       id: newUuid(),
       conversationId,
@@ -87,144 +158,126 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       createdAtEpoch: now,
     });
 
-    // Load full history once before the tool loop
-    const dbHistory = await this.messageRepo.findByConversationId(conversationId);
-    const history: IOrchestratorMessage[] = this.buildOrchestratorHistory(dbHistory);
+    return conversationId;
+  }
 
-    // Build system prompt (with personality context)
+  private async loadHistory(
+    conversationId: string,
+  ): Promise<IOrchestratorMessage[]> {
+    const messages =
+      await this.messageRepo.findByConversationId(conversationId);
+    return this.buildOrchestratorHistory(messages);
+  }
+
+  private async loadChatConfig(
+    userId: string,
+  ): Promise<{ systemPrompt: string; maxRounds: number }> {
     const config = await this.jarvisConfigRepo.get();
     const basePrompt = config?.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
-    const systemPrompt = await this.buildSystemPrompt(input.userId, basePrompt);
-
+    const systemPrompt = await this.buildSystemPrompt(userId, basePrompt);
     const maxRounds =
-      config?.maxToolRounds ?? parseInt(process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS));
+      config?.maxToolRounds ??
+      parseInt(process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS));
+    return { systemPrompt, maxRounds };
+  }
 
-    const toolRegistry = this.registryFactory(input.userId);
-    const availableTools = toolRegistry.getAll().map((t) => t.definition());
-    const toolsUsed: string[] = [];
-
-    console.log("[assistant] systemPrompt:", systemPrompt);
-    console.log("[assistant] availableTools:", availableTools.map((t) => t.name));
-    console.log("[assistant] historyLength:", history.length);
-
-    // Multi-turn agentic tool loop
-    for (let round = 0; round < maxRounds; round++) {
-      console.log(`[assistant] round ${round}: calling orchestrator`);
-      const response = await this.orchestrator.chat({
-        systemPrompt,
-        conversationHistory: history,
-        availableTools,
-      });
-
-      console.log(`[assistant] round ${round}: toolCalls=${JSON.stringify(response.toolCalls ?? null)}, hasText=${!!response.text}`);
-
-      if (!response.toolCalls || response.toolCalls.length === 0) {
-        // Final text reply — persist and return
-        const reply = response.text ?? "";
-        const replyMessageId = newUuid();
-        await this.messageRepo.create({
-          id: replyMessageId,
-          conversationId,
-          role: MESSAGE_ROLE.ASSISTANT,
-          content: reply,
-          createdAtEpoch: newCurrentUTCEpoch(),
-        });
-        return { conversationId, messageId: replyMessageId, reply, toolsUsed };
-      }
-
-      // Store the abstract IToolCall[] — the orchestrator adapter converts to its own wire format on read-back
-      const toolCallsJson = JSON.stringify(response.toolCalls);
-
-      // Persist ASSISTANT_TOOL_CALL message
-      await this.messageRepo.create({
-        id: newUuid(),
-        conversationId,
-        role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
-        content: "",
-        toolCallsJson,
-        createdAtEpoch: newCurrentUTCEpoch(),
-      });
-
-      // Append to in-memory history so the next orchestrator call sees it
-      history.push({
-        role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
-        content: "",
-        toolCallsJson,
-      });
-
-      // Execute each tool call and append results to in-memory history
-      for (const call of response.toolCalls) {
-        console.log(`[assistant] executing tool: ${call.toolName}`, call.input);
-        const tool = toolRegistry.getByName(call.toolName as TOOL_TYPE);
-        if (!tool) {
-          console.log(`[assistant] tool NOT FOUND in registry: ${call.toolName}`);
-          const errorContent = JSON.stringify(`Tool "${call.toolName}" is not available.`);
-          await this.messageRepo.create({
-            id: newUuid(),
-            conversationId,
-            role: MESSAGE_ROLE.TOOL,
-            content: errorContent,
-            toolName: call.toolName as TOOL_TYPE,
-            toolCallId: call.id,
-            createdAtEpoch: newCurrentUTCEpoch(),
-          });
-          history.push({
-            role: MESSAGE_ROLE.TOOL,
-            content: errorContent,
-            toolName: call.toolName,
-            toolCallId: call.id,
-          });
-          continue;
-        }
-
-        const result = await tool.execute(call.input);
-        console.log(`[assistant] tool result:`, result);
-        toolsUsed.push(call.toolName);
-
-        const toolResultContent = JSON.stringify(result.data ?? result.error);
-        await this.messageRepo.create({
-          id: newUuid(),
-          conversationId,
-          role: MESSAGE_ROLE.TOOL,
-          content: toolResultContent,
-          toolName: call.toolName as TOOL_TYPE,
-          toolCallId: call.id,
-          createdAtEpoch: newCurrentUTCEpoch(),
-        });
-
-        history.push({
-          role: MESSAGE_ROLE.TOOL,
-          content: toolResultContent,
-          toolName: call.toolName,
-          toolCallId: call.id,
-        });
-      }
-      // Loop: history now contains tool results; next iteration re-runs the orchestrator
-    }
-
-    // Fallback when max tool rounds are exhausted without a final text reply
-    const fallbackReply =
-      "I've reached the maximum number of tool-use rounds. Please try rephrasing your request.";
-    const fallbackId = newUuid();
+  private async persistFinalReply(
+    conversationId: string,
+    reply: string,
+    toolsUsed: string[],
+  ): Promise<IChatResponse> {
+    const messageId = newUuid();
     await this.messageRepo.create({
-      id: fallbackId,
+      id: messageId,
       conversationId,
       role: MESSAGE_ROLE.ASSISTANT,
-      content: fallbackReply,
+      content: reply,
       createdAtEpoch: newCurrentUTCEpoch(),
     });
-    return { conversationId, messageId: fallbackId, reply: fallbackReply, toolsUsed };
+    return { conversationId, messageId, reply, toolsUsed };
   }
 
-  async listConversations(input: IListConversationsInput): Promise<Conversation[]> {
-    return this.conversationRepo.findByUserId(input.userId);
+  private async persistToolCallBatch(
+    conversationId: string,
+    toolCalls: IToolCall[],
+    history: IOrchestratorMessage[],
+  ): Promise<void> {
+    const toolCallsJson = JSON.stringify(toolCalls);
+    await this.messageRepo.create({
+      id: newUuid(),
+      conversationId,
+      role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
+      content: "",
+      toolCallsJson,
+      createdAtEpoch: newCurrentUTCEpoch(),
+    });
+    history.push({
+      role: MESSAGE_ROLE.ASSISTANT_TOOL_CALL,
+      content: "",
+      toolCallsJson,
+    });
   }
 
-  async getConversation(input: IGetConversationInput): Promise<Message[]> {
-    return this.messageRepo.findByConversationId(input.conversationId);
+  private async executeToolCall(
+    call: IToolCall,
+    toolRegistry: IToolRegistry,
+    conversationId: string,
+    history: IOrchestratorMessage[],
+    toolsUsed: string[],
+  ): Promise<void> {
+    console.log(`[assistant] executing tool: ${call.toolName}`, call.input);
+
+    const tool = toolRegistry.getByName(call.toolName as TOOL_TYPE);
+    if (!tool) {
+      console.log(`[assistant] tool NOT FOUND in registry: ${call.toolName}`);
+      const content = JSON.stringify(
+        `Tool "${call.toolName}" is not available.`,
+      );
+      await this.persistToolResult(conversationId, call, content, history);
+      return;
+    }
+
+    const result = await tool.execute(call.input);
+    console.log(`[assistant] tool result:`, result);
+    toolsUsed.push(call.toolName);
+    await this.persistToolResult(
+      conversationId,
+      call,
+      JSON.stringify(result.data ?? result.error),
+      history,
+    );
   }
 
-  private buildOrchestratorHistory(messages: Message[]): IOrchestratorMessage[] {
+  private async persistToolResult(
+    conversationId: string,
+    call: IToolCall,
+    content: string,
+    history: IOrchestratorMessage[],
+  ): Promise<void> {
+    await this.messageRepo.create({
+      id: newUuid(),
+      conversationId,
+      role: MESSAGE_ROLE.TOOL,
+      content,
+      toolName: call.toolName as TOOL_TYPE,
+      toolCallId: call.id,
+      createdAtEpoch: newCurrentUTCEpoch(),
+    });
+    history.push({
+      role: MESSAGE_ROLE.TOOL,
+      content,
+      toolName: call.toolName,
+      toolCallId: call.id,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // History sanitization
+  // ---------------------------------------------------------------------------
+
+  private buildOrchestratorHistory(
+    messages: Message[],
+  ): IOrchestratorMessage[] {
     // Collect all tool_call_ids that have a persisted TOOL response
     const resolvedIds = new Set<string>(
       messages
@@ -236,7 +289,8 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     // (can happen if a previous request crashed mid-execution)
     const keptToolCallIds = new Set<string>();
     const sanitized = messages.filter((m) => {
-      if (m.role !== MESSAGE_ROLE.ASSISTANT_TOOL_CALL || !m.toolCallsJson) return true;
+      if (m.role !== MESSAGE_ROLE.ASSISTANT_TOOL_CALL || !m.toolCallsJson)
+        return true;
       const calls: IToolCall[] = JSON.parse(m.toolCallsJson);
       const complete = calls.every((c) => resolvedIds.has(c.id));
       if (complete) calls.forEach((c) => keptToolCallIds.add(c.id));
@@ -245,7 +299,10 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
     // Also drop orphaned TOOL messages whose ASSISTANT_TOOL_CALL was filtered out
     return sanitized
-      .filter((m) => m.role !== MESSAGE_ROLE.TOOL || keptToolCallIds.has(m.toolCallId!))
+      .filter(
+        (m) =>
+          m.role !== MESSAGE_ROLE.TOOL || keptToolCallIds.has(m.toolCallId!),
+      )
       .map((m) => ({
         role: m.role,
         content: m.content,
@@ -255,12 +312,22 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       }));
   }
 
-  private async buildSystemPrompt(userId: string, basePrompt: string): Promise<string> {
+  // ---------------------------------------------------------------------------
+  // System prompt assembly
+  // ---------------------------------------------------------------------------
+
+  private async buildSystemPrompt(
+    userId: string,
+    basePrompt: string,
+  ): Promise<string> {
     const now = new Date();
     const dateContext = `Current date and time: ${now.toISOString()} (${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}).`;
 
     const user = await this.userRepo.findById(userId);
-    if (!user || (!user.personalities.length && !user.secondaryPersonalities.length)) {
+    if (
+      !user ||
+      (!user.personalities.length && !user.secondaryPersonalities.length)
+    ) {
       return `${basePrompt}\n\n${dateContext}`;
     }
 
