@@ -15,6 +15,7 @@ import type { ISpeechToText } from "../interface/output/speechToText.interface";
 import type {
   ILLMOrchestrator,
   IOrchestratorMessage,
+  IToolCall,
 } from "../interface/output/llmOrchestrator.interface";
 import type { IToolRegistry } from "../interface/output/tool.interface";
 import type {
@@ -157,6 +158,22 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
         const tool = toolRegistry.getByName(call.toolName as TOOL_TYPE);
         if (!tool) {
           console.log(`[assistant] tool NOT FOUND in registry: ${call.toolName}`);
+          const errorContent = JSON.stringify(`Tool "${call.toolName}" is not available.`);
+          await this.messageRepo.create({
+            id: newUuid(),
+            conversationId,
+            role: MESSAGE_ROLE.TOOL,
+            content: errorContent,
+            toolName: call.toolName as TOOL_TYPE,
+            toolCallId: call.id,
+            createdAtEpoch: newCurrentUTCEpoch(),
+          });
+          history.push({
+            role: MESSAGE_ROLE.TOOL,
+            content: errorContent,
+            toolName: call.toolName,
+            toolCallId: call.id,
+          });
           continue;
         }
 
@@ -208,13 +225,34 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   }
 
   private buildOrchestratorHistory(messages: Message[]): IOrchestratorMessage[] {
-    return messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-      toolName: m.toolName,
-      toolCallId: m.toolCallId,
-      toolCallsJson: m.toolCallsJson,
-    }));
+    // Collect all tool_call_ids that have a persisted TOOL response
+    const resolvedIds = new Set<string>(
+      messages
+        .filter((m) => m.role === MESSAGE_ROLE.TOOL && m.toolCallId)
+        .map((m) => m.toolCallId!),
+    );
+
+    // Drop ASSISTANT_TOOL_CALL messages where any call_id is missing a TOOL response
+    // (can happen if a previous request crashed mid-execution)
+    const keptToolCallIds = new Set<string>();
+    const sanitized = messages.filter((m) => {
+      if (m.role !== MESSAGE_ROLE.ASSISTANT_TOOL_CALL || !m.toolCallsJson) return true;
+      const calls: IToolCall[] = JSON.parse(m.toolCallsJson);
+      const complete = calls.every((c) => resolvedIds.has(c.id));
+      if (complete) calls.forEach((c) => keptToolCallIds.add(c.id));
+      return complete;
+    });
+
+    // Also drop orphaned TOOL messages whose ASSISTANT_TOOL_CALL was filtered out
+    return sanitized
+      .filter((m) => m.role !== MESSAGE_ROLE.TOOL || keptToolCallIds.has(m.toolCallId!))
+      .map((m) => ({
+        role: m.role,
+        content: m.content,
+        toolName: m.toolName,
+        toolCallId: m.toolCallId,
+        toolCallsJson: m.toolCallsJson,
+      }));
   }
 
   private async buildSystemPrompt(userId: string, basePrompt: string): Promise<string> {
@@ -223,7 +261,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
     const user = await this.userRepo.findById(userId);
     if (!user || (!user.personalities.length && !user.secondaryPersonalities.length)) {
-      return `${basePrompt}\n\n${dateContext}`;
+      return `${basePrompt}\n\n${dateContext}\n\n${TOOL_GUIDANCE}`;
     }
 
     const parts: string[] = [];
@@ -234,6 +272,15 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       parts.push(`secondary — ${user.secondaryPersonalities.join(", ")}`);
     }
 
-    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.\n\n${dateContext}`;
+    return `${basePrompt}\n\nPersonality: ${parts.join(". ")}.\n\n${dateContext}\n\n${TOOL_GUIDANCE}`;
   }
 }
+
+const TOOL_GUIDANCE = `\
+## Email drafting rules (STRICT — follow every time)
+When the user asks to reply to or draft an email:
+1. If the recipient's email address is not explicitly stated, STOP and ask: "What is <name>'s email address?" Do NOT call any tool until you have the address.
+2. Only after you have the email address, call gmail_search_emails with a query like "from:<email> <topic keywords>".
+3. Once you have the search results, call gmail_create_draft. Always include threadId for replies.
+4. NEVER call gmail_create_draft without first calling gmail_search_emails unless the user is composing a completely new email (not a reply).
+5. After creating the draft, tell the user it is saved in Gmail Drafts and has NOT been sent.`;

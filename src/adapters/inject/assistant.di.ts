@@ -8,6 +8,9 @@ import { SendEmailTool } from "../implementations/output/tools/sendEmail.tool";
 import { CalendarReadTool } from "../implementations/output/tools/calendarRead.tool";
 import { CalendarWriteTool } from "../implementations/output/tools/calendarWrite.tool";
 import { GoogleCalendarService } from "../implementations/output/calendarService/google.calendarService";
+import { GoogleGmailService } from "../implementations/output/gmailService/google.gmailService";
+import { GmailSearchEmailsTool } from "../implementations/output/tools/gmailSearchEmails.tool";
+import { GmailCreateDraftTool } from "../implementations/output/tools/gmailCreateDraft.tool";
 import { RetrieveUserMemoryTool } from "../implementations/output/tools/retrieveUserMemory.tool";
 import { StoreUserMemoryTool } from "../implementations/output/tools/storeUserMemory.tool";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
@@ -64,12 +67,22 @@ export class AssistantInject {
         process.env.GOOGLE_REDIRECT_URI ?? "",
       );
 
+      // Singleton Gmail service — same token store as Calendar
+      const gmailService = new GoogleGmailService(
+        sqlDB.googleOAuthTokens,
+        process.env.GOOGLE_CLIENT_ID ?? "",
+        process.env.GOOGLE_CLIENT_SECRET ?? "",
+        process.env.GOOGLE_REDIRECT_URI ?? "",
+      );
+
       // Per-request registry factory — captures singletons via closure, injects userId at call time
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
         r.register(new SendEmailTool(emailSender));
         r.register(new CalendarReadTool(userId, calendarService));
         r.register(new CalendarWriteTool(userId, calendarService));
+        r.register(new GmailSearchEmailsTool(userId, gmailService));
+        r.register(new GmailCreateDraftTool(userId, gmailService));
         r.register(
           new RetrieveUserMemoryTool(
             userId,
