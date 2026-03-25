@@ -25,6 +25,11 @@ const InputSchema = z.object({
     .describe("Maximum number of emails to return. Hard-capped at 10."),
 });
 
+/** Returns true if the query string contains at least one email address. */
+function containsEmailAddress(query: string): boolean {
+  return /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/.test(query);
+}
+
 export class GmailSearchEmailsTool implements ITool {
   constructor(
     private readonly userId: string,
@@ -45,6 +50,16 @@ export class GmailSearchEmailsTool implements ITool {
   async execute(input: IToolInput): Promise<IToolOutput> {
     try {
       const { query, maxResults } = InputSchema.parse(input);
+
+      if (!containsEmailAddress(query)) {
+        return {
+          success: false,
+          error:
+            "Cannot search without an email address. " +
+            "Ask the user: \"What is the sender's (or recipient's) email address?\" " +
+            "Then retry with a query like \"from:<email> <topic keywords>\".",
+        };
+      }
       const emails = await this.gmailService.searchEmails(this.userId, {
         query,
         maxResults,
