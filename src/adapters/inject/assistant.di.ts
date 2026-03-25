@@ -11,6 +11,8 @@ import { GmailSearchEmailsTool } from "../implementations/output/tools/gmailSear
 import { GmailCreateDraftTool } from "../implementations/output/tools/gmailCreateDraft";
 import { RetrieveUserMemoryTool } from "../implementations/output/tools/retrieveUserMemory";
 import { StoreUserMemoryTool } from "../implementations/output/tools/storeUserMemory";
+import { CreateTodoItemTool } from "../implementations/output/tools/createTodoItem";
+import { RetrieveTodoItemsTool } from "../implementations/output/tools/retrieveTodoItems";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
 import { CachedJarvisConfigRepo } from "../implementations/output/jarvisConfig/cache";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
@@ -100,6 +102,8 @@ export class AssistantInject {
             enrichmentGenerator,
           ),
         );
+        r.register(new CreateTodoItemTool(userId, sqlDB.todoItems));
+        r.register(new RetrieveTodoItemsTool(userId, sqlDB.todoItems));
         return r;
       };
 
