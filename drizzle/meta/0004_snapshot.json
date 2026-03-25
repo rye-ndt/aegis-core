@@ -1,6 +1,6 @@
 {
-  "id": "00fa2e0a-477c-4aa3-ac45-f5f1541835dc",
-  "prevId": "71258436-b9b1-42bf-9e75-1a7ae45cda4a",
+  "id": "829bb35f-78ce-4ce3-a97f-511b288f8919",
+  "prevId": "00fa2e0a-477c-4aa3-ac45-f5f1541835dc",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -201,6 +201,73 @@
         },
         "created_at_epoch": {
           "name": "created_at_epoch",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.todo_items": {
+      "name": "todo_items",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "title": {
+          "name": "title",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "deadline_epoch": {
+          "name": "deadline_epoch",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "priority": {
+          "name": "priority",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_at_epoch": {
+          "name": "created_at_epoch",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at_epoch": {
+          "name": "updated_at_epoch",
           "type": "integer",
           "primaryKey": false,
           "notNull": true

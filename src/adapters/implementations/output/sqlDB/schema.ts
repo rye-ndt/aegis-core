@@ -65,3 +65,15 @@ export const userMemories = pgTable("user_memories", {
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
   lastAccessedEpoch: integer("last_accessed_epoch").notNull(),
 });
+
+export const todoItems = pgTable("todo_items", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  title: text("title").notNull(),
+  description: text("description"),
+  deadlineEpoch: integer("deadline_epoch").notNull(),
+  priority: text("priority").notNull(),
+  status: text("status").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
