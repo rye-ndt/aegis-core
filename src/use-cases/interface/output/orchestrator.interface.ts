@@ -10,6 +10,8 @@ export interface IOrchestratorMessage {
   toolCallId?: string;
   /** For ASSISTANT_TOOL_CALL role — JSON-serialised OpenAI tool_calls array */
   toolCallsJson?: string;
+  /** Base64 data URL — present only on USER messages that include an image */
+  imageBase64Url?: string;
 }
 
 export interface IToolCall {

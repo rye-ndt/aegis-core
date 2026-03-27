@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-03-25 13:45
+> Last updated: 2026-03-27
 
 ---
 
@@ -20,6 +20,7 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 | Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
 | LLM            | OpenAI chat completions + tool use (`gpt-4o`)  |
 | Speech-to-text | OpenAI Whisper (stub — not implemented)        |
+| Vision         | OpenAI gpt-4o vision (base64 data URL)         |
 | Validation     | Zod 4.3.6                                      |
 | DI             | Manual container in `src/adapters/inject/`     |
 | Vector DB      | Pinecone (`@pinecone-database/pinecone`)       |
@@ -48,6 +49,7 @@ src/
 │                                   # IMessageDB, IUserDB, IJarvisConfigDB, IUserMemoryDB,
 │                                   # ITodoItemDB, ICalendarService, IGmailService,
 │                                   # IEmbeddingService, IVectorStore, ITextGenerator
+│                                   # (IOrchestratorMessage now carries imageBase64Url)
 │
 ├── adapters/
 │   ├── inject/
@@ -56,9 +58,10 @@ src/
 │   └── implementations/
 │       ├── input/
 │       │   └── telegram/          # TelegramBot, TelegramAssistantHandler
+│       │                          # handles text + photo messages
 │       │
 │       └── output/
-│           ├── llmOrchestrator/   # OpenAIOrchestrator [working]
+│           ├── llmOrchestrator/   # OpenAIOrchestrator [working] — vision-capable
 │           ├── speechToText/      # WhisperSpeechToText [STUB]
 │           ├── calendarService/   # GoogleCalendarService [working]
 │           ├── gmailService/      # GoogleGmailService [working]
@@ -97,23 +100,25 @@ src/
 ## Conversation flow
 
 ```
-Telegram message
+Telegram message (text or photo)
       │
       ▼
-TelegramAssistantHandler.on("message:text")
+TelegramAssistantHandler.on("message:text" | "message:photo")
+  photo path: download highest-res PhotoSize → base64 data URL
       │
       ▼
 AssistantUseCaseImpl.chat()
   1. Load or create conversation → IConversationDB
-  2. Persist user message → IMessageDB
-  3. Load config from CachedJarvisConfigRepo (Redis → DB) for system prompt
-  4. Build tool registry for this userId (registryFactory)
-  5. Loop up to maxRounds:
+  2. Persist user message (caption or "[image]") → IMessageDB
+  3. If image present: inject imageBase64Url into last history entry (in-memory only)
+  4. Load config from CachedJarvisConfigRepo (Redis → DB) for system prompt
+  5. Build tool registry for this userId (registryFactory)
+  6. Loop up to maxRounds:
        a. Call ILLMOrchestrator with history + tool definitions
        b. If no tool calls → persist assistant reply, return
        c. Persist ASSISTANT_TOOL_CALL message
        d. Execute each tool via IToolRegistry → persist TOOL result
-  6. Return IChatResponse { conversationId, messageId, reply, toolsUsed }
+  7. Return IChatResponse { conversationId, messageId, reply, toolsUsed }
 ```
 
 ---
@@ -123,6 +128,13 @@ AssistantUseCaseImpl.chat()
 | Adapter               | Blocks                                       |
 | --------------------- | -------------------------------------------- |
 | `WhisperSpeechToText` | `voiceChat()` — not called from Telegram yet |
+
+## Not implemented / known limitations
+
+| Item | Note |
+| ---- | ---- |
+| Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
+| Voice messages | `WhisperSpeechToText` stub — `voiceChat()` not wired to Telegram yet |
 
 ---
 

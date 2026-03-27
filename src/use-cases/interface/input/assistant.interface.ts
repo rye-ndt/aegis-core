@@ -7,6 +7,8 @@ export interface IChatInput {
   conversationId?: string;
   /** Already-transcribed text from the user */
   message: string;
+  /** Base64 data URL of an attached image, e.g. "data:image/jpeg;base64,..." */
+  imageBase64Url?: string;
 }
 
 export interface IChatResponse {
