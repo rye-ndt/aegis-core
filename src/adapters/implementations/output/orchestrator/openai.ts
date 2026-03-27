@@ -39,6 +39,15 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
             content: msg.content,
           };
         }
+        if (msg.role === MESSAGE_ROLE.USER && msg.imageBase64Url) {
+          return {
+            role: "user",
+            content: [
+              { type: "text" as const, text: msg.content || "What's in this image?" },
+              { type: "image_url" as const, image_url: { url: msg.imageBase64Url } },
+            ],
+          };
+        }
         return {
           role: msg.role as "user" | "assistant" | "system",
           content: msg.content,

@@ -60,6 +60,14 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   async chat(input: IChatInput): Promise<IChatResponse> {
     const conversationId = await this.initConversation(input);
     const conversationHistory = await this.loadHistory(conversationId);
+
+    if (input.imageBase64Url) {
+      const last = conversationHistory[conversationHistory.length - 1];
+      if (last?.role === MESSAGE_ROLE.USER) {
+        last.imageBase64Url = input.imageBase64Url;
+      }
+    }
+
     const { systemPrompt, maxRounds } = await this.loadChatConfig(input.userId);
     const toolRegistry = this.registryFactory(input.userId);
     const availableTools = toolRegistry.getAll().map((t) => t.definition());

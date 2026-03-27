@@ -67,6 +67,7 @@ export class TelegramAssistantHandler {
     private readonly userProfileRepo: IUserProfileDB,
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly fixedUserId?: string,
+    private readonly botToken?: string,
   ) {}
 
   register(bot: Bot): void {
@@ -130,6 +131,39 @@ export class TelegramAssistantHandler {
         await ctx.reply(
           "Authorization failed. The code may be expired — run /setup again to get a fresh link.",
         );
+      }
+    });
+
+    bot.on("message:photo", async (ctx) => {
+      if (this.setupSessions.has(ctx.chat.id)) return;
+
+      const userId = this.resolveUserId(ctx.chat.id);
+      const conversationId = this.conversations.get(ctx.chat.id);
+
+      await ctx.replyWithChatAction("typing");
+
+      try {
+        const imageBase64Url = await this.downloadPhotoAsBase64(ctx);
+        const caption = ctx.message.caption?.trim() || "[image]";
+
+        const response = await this.assistantUseCase.chat({
+          userId,
+          conversationId,
+          message: caption,
+          imageBase64Url,
+        });
+
+        this.conversations.set(ctx.chat.id, response.conversationId);
+
+        let reply = response.reply;
+        if (response.toolsUsed.length > 0) {
+          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+        }
+
+        await this.safeSend(ctx, reply);
+      } catch (err) {
+        console.error("Error handling photo:", err);
+        await ctx.reply("Sorry, I couldn't process that image. Please try again.");
       }
     });
 
@@ -234,6 +268,20 @@ export class TelegramAssistantHandler {
     } catch {
       await ctx.reply(text);
     }
+  }
+
+  private async downloadPhotoAsBase64(ctx: Context): Promise<string> {
+    const photos = (ctx.message as { photo?: { file_id: string }[] }).photo!;
+    const fileId = photos[photos.length - 1].file_id;
+
+    const file = await ctx.api.getFile(fileId);
+    const token = this.botToken ?? process.env.TELEGRAM_BOT_TOKEN ?? "";
+    const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+
+    const response = await fetch(url);
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return `data:image/jpeg;base64,${base64}`;
   }
 
   private resolveUserId(chatId: number): string {

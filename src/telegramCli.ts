@@ -22,6 +22,7 @@ const handler = new TelegramAssistantHandler(
   sqlDB.userProfiles,
   googleOAuthService,
   fixedUserId,
+  token,
 );
 const bot = new TelegramBot(token, handler);
 
