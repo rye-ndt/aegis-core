@@ -23,6 +23,8 @@ import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapt
 import { GoogleOAuthService } from "../implementations/output/googleOAuth/googleOAuth.service";
 import { OpenAITTS } from "../implementations/output/textToSpeech/openai";
 import type { ITextToSpeech } from "../../use-cases/interface/output/tts.interface";
+import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
+import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -84,6 +86,10 @@ export class AssistantInject {
         process.env.GOOGLE_REDIRECT_URI ?? "",
       );
 
+      const webSearchService = new TavilyWebSearchService(
+        process.env.TAVILY_API_KEY ?? "",
+      );
+
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
         r.register(new CalendarReadTool(userId, calendarService));
@@ -109,6 +115,7 @@ export class AssistantInject {
         );
         r.register(new CreateTodoItemTool(userId, sqlDB.todoItems));
         r.register(new RetrieveTodoItemsTool(userId, sqlDB.todoItems));
+        r.register(new WebSearchTool(webSearchService));
         return r;
       };
 

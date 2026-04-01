@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-03-27
+> Last updated: 2026-04-01
 
 ---
 
@@ -19,6 +19,7 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 | ORM            | Drizzle ORM + PostgreSQL (`pg` driver)         |
 | Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
 | LLM            | OpenAI chat completions + tool use (`gpt-4o`)  |
+| Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format            |
 | Speech-to-text | OpenAI Whisper (stub — not implemented)        |
 | Vision         | OpenAI gpt-4o vision (base64 data URL)         |
 | Validation     | Zod 4.3.6                                      |
@@ -61,13 +62,15 @@ src/
 │       │                          # handles text + photo messages
 │       │
 │       └── output/
-│           ├── llmOrchestrator/   # OpenAIOrchestrator [working] — vision-capable
-│           ├── speechToText/      # WhisperSpeechToText [STUB]
-│           ├── calendarService/   # GoogleCalendarService [working]
-│           ├── gmailService/      # GoogleGmailService [working]
-│           ├── embeddingService/  # OpenAIEmbeddingService [working]
-│           ├── vectorStore/       # PineconeVectorStore [working]
+│           ├── orchestrator/      # OpenAIOrchestrator [working] — vision-capable
+│           ├── stt/               # WhisperSpeechToText [STUB]
+│           ├── textToSpeech/      # OpenAITTS [working] — tts-1, opus/ogg
+│           ├── calendar/          # GoogleCalendarService [working]
+│           ├── mail/              # GoogleGmailService [working]
+│           ├── embedding/         # OpenAIEmbeddingService [working]
+│           ├── vectorDB/          # PineconeVectorStore [working]
 │           ├── textGenerator/     # OpenAITextGenerator [working]
+│           ├── googleOAuth/       # GoogleOAuthService [working]
 │           ├── tools/
 │           │   ├── calendarRead.tool.ts       # [working]
 │           │   ├── calendarWrite.tool.ts      # [working]
@@ -99,6 +102,19 @@ src/
 
 ## Conversation flow
 
+### Commands
+
+| Command    | Behavior |
+| ---------- | -------- |
+| `/start`   | Welcome message, hints at `/setup` |
+| `/new`     | Clears active conversation ID (starts fresh) |
+| `/history` | Replies with last 10 messages of the current conversation |
+| `/setup`   | Launches 6-question personality quiz (a/b inline), then asks wake-up hour, saves `user_profiles`, presents Google OAuth link via InlineKeyboard |
+| `/code <auth_code>` | Exchanges a Google OAuth authorization code for tokens, stored in `google_oauth_tokens` |
+| `/speech <message>` | Sends message through `chat()`, synthesizes the reply via `OpenAITTS`, returns an OGG voice message; falls back to text if TTS fails |
+
+### Normal message flow
+
 ```
 Telegram message (text or photo)
       │
@@ -112,6 +128,7 @@ AssistantUseCaseImpl.chat()
   2. Persist user message (caption or "[image]") → IMessageDB
   3. If image present: inject imageBase64Url into last history entry (in-memory only)
   4. Load config from CachedJarvisConfigRepo (Redis → DB) for system prompt
+     + append personality traits (from user_profiles) and current ISO date/time
   5. Build tool registry for this userId (registryFactory)
   6. Loop up to maxRounds:
        a. Call ILLMOrchestrator with history + tool definitions
@@ -125,16 +142,20 @@ AssistantUseCaseImpl.chat()
 
 ## Stubs
 
-| Adapter               | Blocks                                       |
-| --------------------- | -------------------------------------------- |
-| `WhisperSpeechToText` | `voiceChat()` — not called from Telegram yet |
+| Adapter               | Blocks                                                    |
+| --------------------- | --------------------------------------------------------- |
+| `WhisperSpeechToText` | `voiceChat()` — wired in use case but throws on any call  |
 
 ## Not implemented / known limitations
 
 | Item | Note |
 | ---- | ---- |
 | Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
-| Voice messages | `WhisperSpeechToText` stub — `voiceChat()` not wired to Telegram yet |
+| Incoming voice messages | Telegram `message:voice` not handled — `/speech` does text-in/voice-out only |
+| **dream** | End-of-day job that sweeps the day's conversation history, extracts and consolidates personal facts, and upserts them into the user memory store — building a richer personal profile over time without requiring the user to explicitly say "remember this" |
+| **search** | Web search tool that fetches and scrapes live pages so the agent can answer questions about current events, prices, or anything beyond its training cutoff |
+| **hear** | STT middleware layer that accepts audio input from Telegram voice messages (and future CLIs), transcribes via Whisper, and hands the text to the core `chat()` — unblocking `voiceChat()` which is already wired but currently throws |
+| **evaluate** | Feedback loop: after the agent proposes a plan or response, the user can rate or correct it; each interaction (context, response, feedback) is logged to a dedicated table to form a dataset for future reinforcement learning / fine-tuning |
 
 ---
 
@@ -151,12 +172,19 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
 | `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
 | `todo_items`          | To-do list — title, description, deadline (epoch), priority, status |
+| `user_profiles`       | Per-user personality traits and wake-up hour (set via `/setup`) |
 
 ---
 
 ## Google OAuth setup
 
-There is no HTTP server to handle OAuth callbacks. To connect Google Calendar or Gmail, manually insert a token row into `google_oauth_tokens` or run the OAuth flow via a temporary script using the Google OAuth2 client and the `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI` env vars. Until a token is present, the calendar and Gmail tools return a `CalendarNotConnectedError` / `GmailNotConnectedError`.
+There is no HTTP server to handle OAuth callbacks. The recommended flow is:
+
+1. Run `/setup` in Telegram — after the personality quiz it presents a "Connect Google" button that opens the OAuth consent URL.
+2. After authorizing, copy the `code` query parameter from the redirect URL.
+3. Send `/code <value>` in Telegram — the bot exchanges it for tokens and stores them in `google_oauth_tokens`.
+
+Alternatively, manually insert a token row or run a temporary script using the Google OAuth2 client with `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI`. Until a token is present, calendar and Gmail tools return `CalendarNotConnectedError` / `GmailNotConnectedError`.
 
 ---
 

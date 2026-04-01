@@ -7,4 +7,5 @@ export enum TOOL_TYPE {
   GMAIL_CREATE_DRAFT = "gmail_create_draft",
   CREATE_TODO_ITEM = "create_todo_item",
   RETRIEVE_TODO_ITEMS = "retrieve_todo_items",
+  WEB_SEARCH = "web_search",
 }
