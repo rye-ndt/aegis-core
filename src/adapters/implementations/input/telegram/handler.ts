@@ -1,8 +1,10 @@
 import type { Bot } from "grammy";
+import { InputFile } from "grammy";
 import { v5 as uuidV5 } from "uuid";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
+import type { ITextToSpeech } from "../../../../use-cases/interface/output/tts.interface";
 import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
 import type { Context } from "grammy";
 import { InlineKeyboard } from "grammy";
@@ -66,6 +68,7 @@ export class TelegramAssistantHandler {
     private readonly assistantUseCase: IAssistantUseCase,
     private readonly userProfileRepo: IUserProfileDB,
     private readonly googleOAuthService: GoogleOAuthService,
+    private readonly tts: ITextToSpeech,
     private readonly fixedUserId?: string,
     private readonly botToken?: string,
   ) {}
@@ -77,7 +80,9 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("start", (ctx) =>
-      ctx.reply("JARVIS online. Send me a message.\n\nRun /setup to personalize your experience."),
+      ctx.reply(
+        "JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.",
+      ),
     );
 
     bot.command("new", (ctx) => {
@@ -134,6 +139,48 @@ export class TelegramAssistantHandler {
       }
     });
 
+    bot.command("speech", async (ctx) => {
+      const message = ctx.match?.trim();
+      if (!message) {
+        return ctx.reply("Usage: /speech <your message>");
+      }
+
+      const userId = this.resolveUserId(ctx.chat.id);
+      const conversationId = this.conversations.get(ctx.chat.id);
+
+      await ctx.replyWithChatAction("record_voice");
+
+      try {
+        const response = await this.assistantUseCase.chat({
+          userId,
+          conversationId,
+          message,
+        });
+
+        this.conversations.set(ctx.chat.id, response.conversationId);
+
+        try {
+          const { audioBuffer } = await this.tts.synthesize({
+            text: response.reply,
+          });
+          await ctx.replyWithVoice(new InputFile(audioBuffer, "reply.ogg"));
+          if (response.toolsUsed.length > 0) {
+            await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
+          }
+        } catch (ttsErr) {
+          console.error("TTS synthesis failed:", ttsErr);
+          let reply = response.reply;
+          if (response.toolsUsed.length > 0) {
+            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+          }
+          await this.safeSend(ctx, reply + "\n\n_(voice unavailable)_");
+        }
+      } catch (err) {
+        console.error("Error handling /speech:", err);
+        await ctx.reply("Sorry, something went wrong. Please try again.");
+      }
+    });
+
     bot.on("message:photo", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
 
@@ -163,7 +210,9 @@ export class TelegramAssistantHandler {
         await this.safeSend(ctx, reply);
       } catch (err) {
         console.error("Error handling photo:", err);
-        await ctx.reply("Sorry, I couldn't process that image. Please try again.");
+        await ctx.reply(
+          "Sorry, I couldn't process that image. Please try again.",
+        );
       }
     });
 
@@ -210,7 +259,10 @@ export class TelegramAssistantHandler {
       const question = TRAIT_QUESTIONS[questionIndex];
 
       if (text !== "a" && text !== "b") {
-        await this.safeSend(ctx, "Please reply with *a* or *b*.\n\n" + question.text);
+        await this.safeSend(
+          ctx,
+          "Please reply with *a* or *b*.\n\n" + question.text,
+        );
         return;
       }
 
@@ -281,6 +333,7 @@ export class TelegramAssistantHandler {
     const response = await fetch(url);
     const buffer = await response.arrayBuffer();
     const base64 = Buffer.from(buffer).toString("base64");
+
     return `data:image/jpeg;base64,${base64}`;
   }
 

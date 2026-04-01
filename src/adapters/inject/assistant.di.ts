@@ -21,11 +21,14 @@ import { OpenAITextGenerator } from "../implementations/output/textGenerator/ope
 import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
 import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
 import { GoogleOAuthService } from "../implementations/output/googleOAuth/googleOAuth.service";
+import { OpenAITTS } from "../implementations/output/textToSpeech/openai";
+import type { ITextToSpeech } from "../../use-cases/interface/output/tts.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private _googleOAuthService: GoogleOAuthService | null = null;
+  private tts: ITextToSpeech | null = null;
 
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
@@ -132,5 +135,12 @@ export class AssistantInject {
   getGoogleOAuthService(): GoogleOAuthService {
     if (!this._googleOAuthService) this.getUseCase();
     return this._googleOAuthService!;
+  }
+
+  getTTS(): ITextToSpeech {
+    if (!this.tts) {
+      this.tts = new OpenAITTS(process.env.OPENAI_API_KEY ?? "");
+    }
+    return this.tts;
   }
 }

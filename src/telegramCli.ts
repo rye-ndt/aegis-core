@@ -15,18 +15,21 @@ const inject = new AssistantInject();
 const useCase = inject.getUseCase();
 const sqlDB = inject.getSqlDB();
 const googleOAuthService = inject.getGoogleOAuthService();
+const tts = inject.getTTS();
 
 const fixedUserId = process.env.JARVIS_USER_ID ?? process.env.CLI_USER_ID;
 const handler = new TelegramAssistantHandler(
   useCase,
   sqlDB.userProfiles,
   googleOAuthService,
+  tts,
   fixedUserId,
   token,
 );
 const bot = new TelegramBot(token, handler);
 
 const oauthPort = parseInt(process.env.OAUTH_CALLBACK_PORT ?? "3000", 10);
+
 const oauthServer = http.createServer(async (req, res) => {
   const base = `http://localhost:${oauthPort}`;
   const url = new URL(req.url ?? "/", base);
@@ -50,7 +53,12 @@ const oauthServer = http.createServer(async (req, res) => {
     await googleOAuthService.handleCallback(code, userId);
     res.writeHead(200, { "Content-Type": "text/html" });
     res.end(
-      "<html><body><h2>Authorization complete.</h2><p>Return to Telegram — you're all set.</p></body></html>",
+      `<html>
+        <body>
+          <h2>Authorization complete.</h2>
+          <p>Return to Telegram — you're all set.</p>
+        </body>
+      </html>`,
     );
   } catch (err) {
     console.error("OAuth callback error:", err);
@@ -63,7 +71,7 @@ oauthServer.listen(oauthPort, () => {
   console.log(`OAuth callback server listening on port ${oauthPort}`);
 });
 
-console.log("JARVIS Telegram bot starting…");
+console.log("JARVIS Telegram is up and running.");
 
 process.on("SIGINT", async () => {
   console.log("\nShutting down…");
