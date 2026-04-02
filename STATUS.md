@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-01
+> Last updated: 2026-04-02
 
 ---
 
@@ -25,6 +25,7 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 | Validation     | Zod 4.3.6                                      |
 | DI             | Manual container in `src/adapters/inject/`     |
 | Vector DB      | Pinecone (`@pinecone-database/pinecone`)       |
+| Web search     | Tavily (`@tavily/core`)                        |
 
 ---
 
@@ -79,7 +80,8 @@ src/
 │           │   ├── storeUserMemory.tool.ts    # [working]
 │           │   ├── retrieveUserMemory.tool.ts # [working]
 │           │   ├── createTodoItem.ts          # [working]
-│           │   └── retrieveTodoItems.ts       # [working]
+│           │   ├── retrieveTodoItems.ts       # [working]
+│           │   └── webSearch.tool.ts          # [working] — Tavily
 │           ├── toolRegistry.concrete.ts       # [working]
 │           ├── jarvisConfig/      # CachedJarvisConfigRepo (Redis + DB) [working]
 │           └── sqlDB/             # DrizzleSqlDB + all repos [working]
@@ -153,7 +155,6 @@ AssistantUseCaseImpl.chat()
 | Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
 | Incoming voice messages | Telegram `message:voice` not handled — `/speech` does text-in/voice-out only |
 | **dream** | End-of-day job that sweeps the day's conversation history, extracts and consolidates personal facts, and upserts them into the user memory store — building a richer personal profile over time without requiring the user to explicitly say "remember this" |
-| **search** | Web search tool that fetches and scrapes live pages so the agent can answer questions about current events, prices, or anything beyond its training cutoff |
 | **hear** | STT middleware layer that accepts audio input from Telegram voice messages (and future CLIs), transcribes via Whisper, and hands the text to the core `chat()` — unblocking `voiceChat()` which is already wired but currently throws |
 | **evaluate** | Feedback loop: after the agent proposes a plan or response, the user can rate or correct it; each interaction (context, response, feedback) is logged to a dedicated table to form a dataset for future reinforcement learning / fine-tuning |
 

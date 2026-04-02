@@ -181,6 +181,50 @@ export class TelegramAssistantHandler {
       }
     });
 
+    bot.on("message:voice", async (ctx) => {
+      if (this.setupSessions.has(ctx.chat.id)) return;
+
+      const userId = this.resolveUserId(ctx.chat.id);
+      const conversationId = this.conversations.get(ctx.chat.id);
+
+      await ctx.replyWithChatAction("record_voice");
+
+      try {
+        const audioBuffer = await this.downloadVoiceAsBuffer(ctx);
+
+        const response = await this.assistantUseCase.voiceChat({
+          userId,
+          conversationId,
+          audioBuffer,
+          mimeType: "audio/ogg",
+        });
+
+        this.conversations.set(ctx.chat.id, response.conversationId);
+
+        try {
+          const { audioBuffer: replyAudio } = await this.tts.synthesize({
+            text: response.reply,
+          });
+          await ctx.replyWithVoice(new InputFile(replyAudio, "reply.ogg"));
+          if (response.toolsUsed.length > 0) {
+            await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
+          }
+        } catch (ttsErr) {
+          console.error("TTS failed for voice reply:", ttsErr);
+          let reply = response.reply;
+          if (response.toolsUsed.length > 0) {
+            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+          }
+          await this.safeSend(ctx, reply + "\n\n_(voice reply unavailable)_");
+        }
+      } catch (err) {
+        console.error("Error handling voice message:", err);
+        await ctx.reply(
+          "Sorry, I couldn't process that voice message. Please try again.",
+        );
+      }
+    });
+
     bot.on("message:photo", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
 
@@ -320,6 +364,15 @@ export class TelegramAssistantHandler {
     } catch {
       await ctx.reply(text);
     }
+  }
+
+  private async downloadVoiceAsBuffer(ctx: Context): Promise<Buffer> {
+    const voice = (ctx.message as { voice?: { file_id: string } }).voice!;
+    const file = await ctx.api.getFile(voice.file_id);
+    const token = this.botToken ?? process.env.TELEGRAM_BOT_TOKEN ?? "";
+    const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
+    const response = await fetch(url);
+    return Buffer.from(await response.arrayBuffer());
   }
 
   private async downloadPhotoAsBase64(ctx: Context): Promise<string> {
