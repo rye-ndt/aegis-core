@@ -1,14 +1,27 @@
+import OpenAI, { toFile } from "openai";
 import type {
   ISpeechToText,
   ISpeechToTextInput,
   ISpeechToTextResult,
 } from "../../../../use-cases/interface/output/stt.interface";
 
-// TODO: implement using OpenAI Whisper API or a local Whisper model
 export class WhisperSpeechToText implements ISpeechToText {
-  constructor(private readonly apiKey: string) {}
+  private readonly client: OpenAI;
 
-  async transcribe(_input: ISpeechToTextInput): Promise<ISpeechToTextResult> {
-    throw new Error("WhisperSpeechToText.transcribe() not yet implemented");
+  constructor(apiKey: string) {
+    this.client = new OpenAI({ apiKey });
+  }
+
+  async transcribe(input: ISpeechToTextInput): Promise<ISpeechToTextResult> {
+    const file = await toFile(input.audioBuffer, "audio.ogg", {
+      type: input.mimeType,
+    });
+
+    const transcription = await this.client.audio.transcriptions.create({
+      model: "whisper-1",
+      file,
+    });
+
+    return { text: transcription.text };
   }
 }
