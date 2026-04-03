@@ -133,7 +133,12 @@ export class AssistantInject {
         sqlDB.conversations,
         sqlDB.messages,
         jarvisConfigRepo,
-        sqlDB.users,
+        sqlDB.userProfiles,
+        embeddingService,
+        vectorStore,
+        enrichmentGenerator,
+        sqlDB.evaluationLogs,
+        sqlDB.userMemories,
       );
     }
     return this.useCase;

@@ -16,6 +16,7 @@ export class DrizzleConversationRepo implements IConversationDB {
       userId: conversation.userId,
       title: conversation.title,
       status: conversation.status,
+      flaggedForCompression: conversation.flaggedForCompression,
       createdAtEpoch: conversation.createdAtEpoch,
       updatedAtEpoch: conversation.updatedAtEpoch,
     });
@@ -40,7 +41,13 @@ export class DrizzleConversationRepo implements IConversationDB {
       .limit(1);
 
     if (!rows[0]) return null;
-    return { ...rows[0], status: rows[0].status as CONVERSATION_STATUSES };
+    return {
+      ...rows[0],
+      status: rows[0].status as CONVERSATION_STATUSES,
+      summary: rows[0].summary ?? null,
+      intent: rows[0].intent ?? null,
+      flaggedForCompression: rows[0].flaggedForCompression,
+    };
   }
 
   async findByUserId(userId: string): Promise<Conversation[]> {
@@ -49,10 +56,37 @@ export class DrizzleConversationRepo implements IConversationDB {
       .from(conversations)
       .where(eq(conversations.userId, userId));
 
-    return rows.map((r) => ({ ...r, status: r.status as CONVERSATION_STATUSES }));
+    return rows.map((r) => ({
+      ...r,
+      status: r.status as CONVERSATION_STATUSES,
+      summary: r.summary ?? null,
+      intent: r.intent ?? null,
+      flaggedForCompression: r.flaggedForCompression,
+    }));
   }
 
   async delete(id: string): Promise<void> {
     await this.db.delete(conversations).where(eq(conversations.id, id));
+  }
+
+  async upsertSummary(id: string, summary: string): Promise<void> {
+    await this.db
+      .update(conversations)
+      .set({ summary })
+      .where(eq(conversations.id, id));
+  }
+
+  async updateIntent(id: string, intent: string): Promise<void> {
+    await this.db
+      .update(conversations)
+      .set({ intent })
+      .where(eq(conversations.id, id));
+  }
+
+  async flagForCompression(id: string): Promise<void> {
+    await this.db
+      .update(conversations)
+      .set({ flaggedForCompression: true })
+      .where(eq(conversations.id, id));
   }
 }

@@ -73,6 +73,13 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     const choice = response.choices[0];
     const message = choice.message;
 
+    const usage = response.usage
+      ? {
+          promptTokens: response.usage.prompt_tokens,
+          completionTokens: response.usage.completion_tokens,
+        }
+      : undefined;
+
     if (message.tool_calls && message.tool_calls.length > 0) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const toolCalls: IToolCall[] = (message.tool_calls as any[])
@@ -85,10 +92,10 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
             unknown
           >,
         }));
-      return { toolCalls };
+      return { toolCalls, usage };
     }
 
-    return { text: message.content ?? "" };
+    return { text: message.content ?? "", usage };
   }
 
   private toOpenAiToolCallMessage(

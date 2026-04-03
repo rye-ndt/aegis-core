@@ -1,4 +1,4 @@
-import { integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { boolean, integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -22,6 +22,9 @@ export const conversations = pgTable("conversations", {
   userId: uuid("user_id").notNull(),
   title: text("title").notNull(),
   status: text("status").notNull(),
+  summary: text("summary"),
+  intent: text("intent"),
+  flaggedForCompression: boolean("flagged_for_compression").notNull().default(false),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
@@ -34,6 +37,7 @@ export const messages = pgTable("messages", {
   toolName: text("tool_name"),
   toolCallId: text("tool_call_id"),
   toolCallsJson: text("tool_calls_json"),
+  compressedAtEpoch: integer("compressed_at_epoch"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
 
@@ -85,4 +89,22 @@ export const todoItems = pgTable("todo_items", {
   status: text("status").notNull(),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const evaluationLogs = pgTable("evaluation_logs", {
+  id: uuid("id").primaryKey(),
+  conversationId: uuid("conversation_id").notNull(),
+  messageId: uuid("message_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  systemPromptHash: text("system_prompt_hash").notNull(),
+  memoriesInjected: text("memories_injected").notNull().default("[]"),
+  toolCalls: text("tool_calls").notNull().default("[]"),
+  reasoningTrace: text("reasoning_trace"),
+  response: text("response").notNull(),
+  promptTokens: integer("prompt_tokens"),
+  completionTokens: integer("completion_tokens"),
+  implicitSignal: text("implicit_signal"),
+  explicitRating: integer("explicit_rating"),
+  outcomeConfirmed: boolean("outcome_confirmed"),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
 });

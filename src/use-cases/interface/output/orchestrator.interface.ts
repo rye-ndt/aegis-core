@@ -25,6 +25,7 @@ export interface IOrchestratorResponse {
   text?: string;
   /** Tool calls the LLM wants to make. Present when the LLM delegates to tools. */
   toolCalls?: IToolCall[];
+  usage?: { promptTokens: number; completionTokens: number };
 }
 
 export interface IOrchestratorInput {
