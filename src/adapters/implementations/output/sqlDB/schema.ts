@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -108,3 +108,25 @@ export const evaluationLogs = pgTable("evaluation_logs", {
   outcomeConfirmed: boolean("outcome_confirmed"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
+
+export const scheduledNotifications = pgTable(
+  "scheduled_notifications",
+  {
+    id: uuid("id").primaryKey(),
+    userId: uuid("user_id").notNull(),
+    title: text("title").notNull(),
+    body: text("body").notNull(),
+    fireAtEpoch: integer("fire_at_epoch").notNull(),
+    status: text("status").notNull(),
+    sourceType: text("source_type").notNull(),
+    sourceId: text("source_id").notNull(),
+    createdAtEpoch: integer("created_at_epoch").notNull(),
+    updatedAtEpoch: integer("updated_at_epoch").notNull(),
+  },
+  (table) => ({
+    statusFireIdx: index("idx_scheduled_notifications_status_fire").on(
+      table.status,
+      table.fireAtEpoch,
+    ),
+  }),
+);

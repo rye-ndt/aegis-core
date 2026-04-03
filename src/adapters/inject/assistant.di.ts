@@ -25,11 +25,16 @@ import { OpenAITTS } from "../implementations/output/textToSpeech/openai";
 import type { ITextToSpeech } from "../../use-cases/interface/output/tts.interface";
 import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
+import { NotificationRunner } from "../implementations/output/reminder/notificationRunner";
+import { CalendarCrawler } from "../implementations/output/reminder/calendarCrawler";
+import { DailySummaryCrawler } from "../implementations/output/reminder/dailySummaryCrawler";
+import type { INotificationSender } from "../../use-cases/interface/output/notificationSender.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private _googleOAuthService: GoogleOAuthService | null = null;
+  private _calendarService: GoogleCalendarService | null = null;
   private tts: ITextToSpeech | null = null;
 
   getSqlDB(): DrizzleSqlDB {
@@ -40,6 +45,19 @@ export class AssistantInject {
       });
     }
     return this.sqlDB;
+  }
+
+  private getCalendarService(): GoogleCalendarService {
+    if (!this._calendarService) {
+      const sqlDB = this.getSqlDB();
+      this._calendarService = new GoogleCalendarService(
+        sqlDB.googleOAuthTokens,
+        process.env.GOOGLE_CLIENT_ID ?? "",
+        process.env.GOOGLE_CLIENT_SECRET ?? "",
+        process.env.GOOGLE_REDIRECT_URI ?? "",
+      );
+    }
+    return this._calendarService;
   }
 
   getUseCase(): IAssistantUseCase {
@@ -72,12 +90,7 @@ export class AssistantInject {
         "gpt-4o-mini",
       );
 
-      const calendarService = new GoogleCalendarService(
-        sqlDB.googleOAuthTokens,
-        process.env.GOOGLE_CLIENT_ID ?? "",
-        process.env.GOOGLE_CLIENT_SECRET ?? "",
-        process.env.GOOGLE_REDIRECT_URI ?? "",
-      );
+      const calendarService = this.getCalendarService();
 
       const gmailService = new GoogleGmailService(
         sqlDB.googleOAuthTokens,
@@ -89,6 +102,9 @@ export class AssistantInject {
       const webSearchService = new TavilyWebSearchService(
         process.env.TAVILY_API_KEY ?? "",
       );
+
+      const todoReminderOffsetSecs =
+        parseInt(process.env.TODO_REMINDER_OFFSET_HOURS ?? "24", 10) * 3600;
 
       const registryFactory = (userId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
@@ -113,7 +129,14 @@ export class AssistantInject {
             enrichmentGenerator,
           ),
         );
-        r.register(new CreateTodoItemTool(userId, sqlDB.todoItems));
+        r.register(
+          new CreateTodoItemTool(
+            userId,
+            sqlDB.todoItems,
+            sqlDB.scheduledNotifications,
+            todoReminderOffsetSecs,
+          ),
+        );
         r.register(new RetrieveTodoItemsTool(userId, sqlDB.todoItems));
         r.register(new WebSearchTool(webSearchService));
         return r;
@@ -154,5 +177,45 @@ export class AssistantInject {
       this.tts = new OpenAITTS(process.env.OPENAI_API_KEY ?? "");
     }
     return this.tts;
+  }
+
+  async resolveUserId(): Promise<string | undefined> {
+    const fromEnv = process.env.JARVIS_USER_ID ?? process.env.CLI_USER_ID;
+    if (fromEnv) return fromEnv;
+    const profile = await this.getSqlDB().userProfiles.findFirst();
+    return profile?.userId;
+  }
+
+  getNotificationRunner(sender: INotificationSender): NotificationRunner {
+    return new NotificationRunner(
+      this.getSqlDB().scheduledNotifications,
+      sender,
+    );
+  }
+
+  getCalendarCrawler(userId: string): CalendarCrawler {
+    const offsetMins = parseInt(
+      process.env.CALENDAR_REMINDER_OFFSET_MINS ?? "30",
+      10,
+    );
+    return new CalendarCrawler(
+      this.getCalendarService(),
+      this.getSqlDB().scheduledNotifications,
+      userId,
+      offsetMins * 60,
+    );
+  }
+
+  getDailySummaryCrawler(
+    userId: string,
+    sender: INotificationSender,
+  ): DailySummaryCrawler {
+    return new DailySummaryCrawler(
+      this.getCalendarService(),
+      this.getSqlDB().scheduledNotifications,
+      this.getSqlDB().userProfiles,
+      sender,
+      userId,
+    );
   }
 }

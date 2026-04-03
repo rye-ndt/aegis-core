@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-03
+> Last updated: 2026-04-03 (synced from codebase)
 
 ---
 
@@ -20,7 +20,7 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 | Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
 | LLM            | OpenAI chat completions + tool use (`gpt-4o`) — usage tokens surfaced |
 | Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format            |
-| Speech-to-text | OpenAI Whisper (stub — not implemented)        |
+| Speech-to-text | OpenAI Whisper `whisper-1` [working]            |
 | Vision         | OpenAI gpt-4o vision (base64 data URL)         |
 | Validation     | Zod 4.3.6                                      |
 | DI             | Manual container in `src/adapters/inject/`     |
@@ -65,7 +65,7 @@ src/
 │       │
 │       └── output/
 │           ├── orchestrator/      # OpenAIOrchestrator [working] — vision-capable
-│           ├── stt/               # WhisperSpeechToText [STUB]
+│           ├── stt/               # WhisperSpeechToText [working] — whisper-1, ogg input
 │           ├── textToSpeech/      # OpenAITTS [working] — tts-1, opus/ogg
 │           ├── calendar/          # GoogleCalendarService [working]
 │           ├── mail/              # GoogleGmailService [working]
@@ -115,6 +115,7 @@ src/
 | `/setup`   | Launches 6-question personality quiz (a/b inline), then asks wake-up hour, saves `user_profiles`, presents Google OAuth link via InlineKeyboard |
 | `/code <auth_code>` | Exchanges a Google OAuth authorization code for tokens, stored in `google_oauth_tokens` |
 | `/speech <message>` | Sends message through `chat()`, synthesizes the reply via `OpenAITTS`, returns an OGG voice message; falls back to text if TTS fails |
+| _(voice message)_ | Download OGG from Telegram → Whisper transcription → `voiceChat()` → TTS reply as voice; falls back to text if TTS fails |
 
 ### Normal message flow
 
@@ -160,21 +161,13 @@ AssistantUseCaseImpl.chat()
 
 ---
 
-## Stubs
-
-| Adapter               | Blocks                                                    |
-| --------------------- | --------------------------------------------------------- |
-| `WhisperSpeechToText` | `voiceChat()` — wired in use case but throws on any call  |
-
 ## Not implemented / known limitations
 
 | Item | Note |
 | ---- | ---- |
 | Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
-| Incoming voice messages | Telegram `message:voice` not handled — `/speech` does text-in/voice-out only |
 | **dream** | End-of-day job that sweeps the day's conversation history, extracts and consolidates personal facts, and upserts them into the user memory store — building a richer personal profile over time without requiring the user to explicitly say "remember this" |
-| **hear** | STT middleware layer that accepts audio input from Telegram voice messages (and future CLIs), transcribes via Whisper, and hands the text to the core `chat()` — unblocking `voiceChat()` which is already wired but currently throws |
-| **evaluate** | Per-turn `evaluation_logs` rows are written (system prompt hash, memories injected, tool calls, token usage, implicit signal detection). Explicit feedback — user rating or correction via a bot command — is not yet implemented |
+| **evaluate** (explicit feedback) | Per-turn `evaluation_logs` rows are written (system prompt hash, memories injected, tool calls, token usage, implicit signal detection). Explicit feedback — user rating or correction via a bot command — is not yet implemented |
 
 ---
 

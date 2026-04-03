@@ -17,4 +17,5 @@ export interface UserProfileUpsert {
 export interface IUserProfileDB {
   upsert(profile: UserProfileUpsert): Promise<void>;
   findByUserId(userId: string): Promise<IUserProfile | null>;
+  findFirst(): Promise<IUserProfile | null>;
 }

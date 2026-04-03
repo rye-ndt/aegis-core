@@ -1,13 +1,11 @@
-import type { Bot } from "grammy";
-import { InputFile } from "grammy";
+import type { Bot, Context } from "grammy";
+import { InlineKeyboard, InputFile } from "grammy";
 import { v5 as uuidV5 } from "uuid";
+import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
 import type { ITextToSpeech } from "../../../../use-cases/interface/output/tts.interface";
-import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
-import type { Context } from "grammy";
-import { InlineKeyboard } from "grammy";
+import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
 
 const TELEGRAM_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
@@ -173,7 +171,7 @@ export class TelegramAssistantHandler {
           if (response.toolsUsed.length > 0) {
             reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           }
-          await this.safeSend(ctx, reply + "\n\n_(voice unavailable)_");
+          await this.safeSend(ctx, `${reply}\n\n_(voice unavailable)_`);
         }
       } catch (err) {
         console.error("Error handling /speech:", err);
@@ -215,7 +213,7 @@ export class TelegramAssistantHandler {
           if (response.toolsUsed.length > 0) {
             reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           }
-          await this.safeSend(ctx, reply + "\n\n_(voice reply unavailable)_");
+          await this.safeSend(ctx, `${reply}\n\n_(voice reply unavailable)_`);
         }
       } catch (err) {
         console.error("Error handling voice message:", err);
@@ -294,8 +292,10 @@ export class TelegramAssistantHandler {
   }
 
   private async handleSetupReply(ctx: Context): Promise<void> {
-    const chatId = ctx.chat!.id;
-    const session = this.setupSessions.get(chatId)!;
+    const chatId = ctx.chat?.id;
+    if (chatId === undefined) return;
+    const session = this.setupSessions.get(chatId);
+    if (!session) return;
     const text = (ctx.message as { text?: string }).text?.trim().toLowerCase();
 
     if (session.phase.name === "traits") {
@@ -305,7 +305,7 @@ export class TelegramAssistantHandler {
       if (text !== "a" && text !== "b") {
         await this.safeSend(
           ctx,
-          "Please reply with *a* or *b*.\n\n" + question.text,
+          `Please reply with *a* or *b*.\n\n${question.text}`,
         );
         return;
       }
@@ -329,7 +329,7 @@ export class TelegramAssistantHandler {
 
     if (session.phase.name === "wakeup") {
       const hour = parseInt(text ?? "", 10);
-      if (isNaN(hour) || hour < 0 || hour > 23) {
+      if (Number.isNaN(hour) || hour < 0 || hour > 23) {
         await ctx.reply(
           "Please enter a number between 0 and 23 (e.g. *7* for 7 AM, *22* for 10 PM).",
           { parse_mode: "Markdown" },
@@ -367,7 +367,8 @@ export class TelegramAssistantHandler {
   }
 
   private async downloadVoiceAsBuffer(ctx: Context): Promise<Buffer> {
-    const voice = (ctx.message as { voice?: { file_id: string } }).voice!;
+    const voice = (ctx.message as { voice?: { file_id: string } }).voice;
+    if (!voice) throw new Error("Voice message missing voice field");
     const file = await ctx.api.getFile(voice.file_id);
     const token = this.botToken ?? process.env.TELEGRAM_BOT_TOKEN ?? "";
     const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
@@ -376,7 +377,8 @@ export class TelegramAssistantHandler {
   }
 
   private async downloadPhotoAsBase64(ctx: Context): Promise<string> {
-    const photos = (ctx.message as { photo?: { file_id: string }[] }).photo!;
+    const photos = (ctx.message as { photo?: { file_id: string }[] }).photo;
+    if (!photos) throw new Error("Photo message missing photo field");
     const fileId = photos[photos.length - 1].file_id;
 
     const file = await ctx.api.getFile(fileId);

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   IUserProfile,
@@ -39,6 +39,24 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       .select()
       .from(userProfiles)
       .where(eq(userProfiles.userId, userId))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    return {
+      userId: rows[0].userId,
+      displayName: rows[0].displayName,
+      personalities: rows[0].personalities,
+      wakeUpHour: rows[0].wakeUpHour,
+      createdAtEpoch: rows[0].createdAtEpoch,
+      updatedAtEpoch: rows[0].updatedAtEpoch,
+    };
+  }
+
+  async findFirst(): Promise<IUserProfile | null> {
+    const rows = await this.db
+      .select()
+      .from(userProfiles)
+      .orderBy(asc(userProfiles.createdAtEpoch))
       .limit(1);
 
     if (!rows[0]) return null;

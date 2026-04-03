@@ -60,7 +60,10 @@ function hashString(s: string): string {
 function buildReasoningTrace(toolsUsed: IToolResult[]): string | null {
   if (toolsUsed.length === 0) return null;
   return toolsUsed
-    .map((t, i) => `step ${i + 1}: ${t.toolName} → ${t.result.success ? "ok" : "error"}`)
+    .map(
+      (t, i) =>
+        `step ${i + 1}: ${t.toolName} → ${t.result.success ? "ok" : "error"}`,
+    )
     .join("\n");
 }
 
@@ -75,24 +78,42 @@ function detectImplicitSignal(
   const msg = currentMessage.toLowerCase();
 
   const correctionKeywords = [
-    "actually,", "that's wrong", "that is wrong", "no,", "incorrect",
-    "you said", "wait,", "not quite", "wrong,",
+    "actually,",
+    "that's wrong",
+    "that is wrong",
+    "no,",
+    "incorrect",
+    "you said",
+    "wait,",
+    "not quite",
+    "wrong,",
   ];
   const repeatKeywords = [
-    "as i asked", "again,", "still need", "i already asked",
-    "why didn't you", "you didn't",
+    "as i asked",
+    "again,",
+    "still need",
+    "i already asked",
+    "why didn't you",
+    "you didn't",
   ];
   const clarificationKeywords = [
-    "what do you mean", "can you explain", "i meant", "i was asking about", "clarify",
+    "what do you mean",
+    "can you explain",
+    "i meant",
+    "i was asking about",
+    "clarify",
   ];
 
   if (correctionKeywords.some((k) => msg.includes(k))) return "correction";
   if (repeatKeywords.some((k) => msg.includes(k))) return "repeat";
-  if (clarificationKeywords.some((k) => msg.includes(k))) return "clarification";
+  if (clarificationKeywords.some((k) => msg.includes(k)))
+    return "clarification";
   return null;
 }
 
-function formatMessagesForPrompt(messages: Pick<Message, "role" | "content">[]): string {
+function formatMessagesForPrompt(
+  messages: Pick<Message, "role" | "content">[],
+): string {
   return messages.map((m) => `[${m.role}]: ${m.content}`).join("\n");
 }
 
@@ -220,7 +241,9 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const availableTools = toolRegistry.getAll().map((t) => t.definition());
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";
-    let lastUsage: { promptTokens: number; completionTokens: number } | undefined;
+    let lastUsage:
+      | { promptTokens: number; completionTokens: number }
+      | undefined;
 
     for (let round = 0; round < maxRounds; round++) {
       const llmResponse = await this.orchestrator.chat({
@@ -405,7 +428,10 @@ Never skip the Thought step.`,
         toolCallId: call.id,
         toolName: call.toolName,
         params: call.input,
-        result: { success: false, error: `Tool "${call.toolName}" is not available.` },
+        result: {
+          success: false,
+          error: `Tool "${call.toolName}" is not available.`,
+        },
         latencyMs: Date.now() - start,
       };
     }
@@ -506,7 +532,9 @@ Never skip the Thought step.`,
           await Promise.all(
             facts.map(async (f) => {
               const pineconeId = newUuid();
-              const { vector } = await this.embeddingService.embed({ text: f.content });
+              const { vector } = await this.embeddingService.embed({
+                text: f.content,
+              });
               const now = newCurrentUTCEpoch();
               await Promise.all([
                 this.vectorStore.upsert({

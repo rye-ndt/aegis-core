@@ -9,6 +9,7 @@ import type {
   IToolOutput,
 } from "../../../../use-cases/interface/output/tool.interface";
 import type { ITodoItemDB } from "../../../../use-cases/interface/output/repository/todoItem.repo";
+import type { IScheduledNotificationDB } from "../../../../use-cases/interface/output/repository/scheduledNotification.repo";
 
 const InputSchema = z.object({
   title: z.string().min(1).describe("Short description of the task"),
@@ -34,6 +35,8 @@ export class CreateTodoItemTool implements ITool {
   constructor(
     private readonly userId: string,
     private readonly todoItemRepo: ITodoItemDB,
+    private readonly notificationRepo: IScheduledNotificationDB,
+    private readonly reminderOffsetSeconds: number,
   ) {}
 
   definition(): IToolDefinition {
@@ -85,6 +88,26 @@ export class CreateTodoItemTool implements ITool {
     });
 
     const deadlineStr = new Date(parsed.deadlineEpoch * 1000).toUTCString();
+    const fireAtEpoch =
+      parsed.deadlineEpoch - this.reminderOffsetSeconds > now
+        ? parsed.deadlineEpoch - this.reminderOffsetSeconds
+        : now + 60;
+
+    if (fireAtEpoch < parsed.deadlineEpoch) {
+      await this.notificationRepo.create({
+        id: newUuid(),
+        userId: this.userId,
+        title: parsed.title,
+        body: `Deadline: ${deadlineStr}`,
+        fireAtEpoch,
+        status: "pending",
+        sourceType: "todo",
+        sourceId: id,
+        createdAtEpoch: now,
+        updatedAtEpoch: now,
+      });
+    }
+
     return {
       success: true,
       data:

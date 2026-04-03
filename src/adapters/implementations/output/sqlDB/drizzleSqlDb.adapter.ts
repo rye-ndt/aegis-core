@@ -15,6 +15,7 @@ import { DrizzleGoogleOAuthTokenRepo } from "./repositories/googleOAuthToken.rep
 import { DrizzleTodoItemRepo } from "./repositories/todoItem.repo";
 import { DrizzleUserProfileRepo } from "./repositories/userProfile.repo";
 import { DrizzleEvaluationLogRepo } from "./repositories/evaluationLog.repo";
+import { DrizzleScheduledNotificationRepo } from "./repositories/scheduledNotification.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -26,6 +27,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly todoItems: DrizzleTodoItemRepo;
   readonly userProfiles: DrizzleUserProfileRepo;
   readonly evaluationLogs: DrizzleEvaluationLogRepo;
+  readonly scheduledNotifications: DrizzleScheduledNotificationRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -38,6 +40,9 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.todoItems = new DrizzleTodoItemRepo(this.db);
     this.userProfiles = new DrizzleUserProfileRepo(this.db);
     this.evaluationLogs = new DrizzleEvaluationLogRepo(this.db);
+    this.scheduledNotifications = new DrizzleScheduledNotificationRepo(
+      this.db,
+    );
   }
 
   async runMigrations(migrationsFolder: string): Promise<void> {
