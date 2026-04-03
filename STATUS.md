@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-02
+> Last updated: 2026-04-03
 
 ---
 
@@ -18,7 +18,7 @@ A personal, single-user AI assistant built in TypeScript with Hexagonal Architec
 | Interface      | Telegram (`grammy`)                            |
 | ORM            | Drizzle ORM + PostgreSQL (`pg` driver)         |
 | Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
-| LLM            | OpenAI chat completions + tool use (`gpt-4o`)  |
+| LLM            | OpenAI chat completions + tool use (`gpt-4o`) — usage tokens surfaced |
 | Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format            |
 | Speech-to-text | OpenAI Whisper (stub — not implemented)        |
 | Vision         | OpenAI gpt-4o vision (base64 data URL)         |
@@ -50,7 +50,8 @@ src/
 │                                   # ITool, IToolRegistry, IConversationDB,
 │                                   # IMessageDB, IUserDB, IJarvisConfigDB, IUserMemoryDB,
 │                                   # ITodoItemDB, ICalendarService, IGmailService,
-│                                   # IEmbeddingService, IVectorStore, ITextGenerator
+│                                   # IEmbeddingService, IVectorStore, ITextGenerator,
+│                                   # IEvaluationLogDB
 │                                   # (IOrchestratorMessage now carries imageBase64Url)
 │
 ├── adapters/
@@ -84,7 +85,7 @@ src/
 │           │   └── webSearch.tool.ts          # [working] — Tavily
 │           ├── toolRegistry.concrete.ts       # [working]
 │           ├── jarvisConfig/      # CachedJarvisConfigRepo (Redis + DB) [working]
-│           └── sqlDB/             # DrizzleSqlDB + all repos [working]
+│           └── sqlDB/             # DrizzleSqlDB + all repos [working] — adds evaluationLogs
 │
 └── helpers/
     ├── enums/
@@ -126,18 +127,35 @@ TelegramAssistantHandler.on("message:text" | "message:photo")
       │
       ▼
 AssistantUseCaseImpl.chat()
-  1. Load or create conversation → IConversationDB
-  2. Persist user message (caption or "[image]") → IMessageDB
-  3. If image present: inject imageBase64Url into last history entry (in-memory only)
-  4. Load config from CachedJarvisConfigRepo (Redis → DB) for system prompt
-     + append personality traits (from user_profiles) and current ISO date/time
-  5. Build tool registry for this userId (registryFactory)
-  6. Loop up to maxRounds:
-       a. Call ILLMOrchestrator with history + tool definitions
-       b. If no tool calls → persist assistant reply, return
-       c. Persist ASSISTANT_TOOL_CALL message
-       d. Execute each tool via IToolRegistry → persist TOOL result
-  7. Return IChatResponse { conversationId, messageId, reply, toolsUsed }
+  1. Create conversation if new → IConversationDB
+  2. Parallel batch (all concurrent):
+       - findByConversationId (prior history only — user INSERT not yet visible)
+       - searchRelevantMemories (embed query → Pinecone, score ≥ 0.75)
+       - jarvisConfigRepo.get() (Redis → DB)
+       - userProfileRepo.findByUserId()
+       - conversationRepo.findById()
+       - messageRepo.create() (persists user message)
+  3. Compression check: if uncompressed token estimate > 80k OR flaggedForCompression
+       - summarise oldest messages via ITextGenerator (gpt-4o-mini)
+       - upsertSummary + markCompressed (concurrent)
+       - sliding window = tail 20 uncompressed messages
+  4. Build sliding window: [summary message?] + buildOrchestratorHistory(recentMessages)
+  5. Build system prompt: base + personalities + datetime + relevant memories + reasoning instructions
+  6. Push current user message (+ optional imageBase64Url) onto sliding window
+  7. Agentic loop up to maxRounds:
+       a. Call ILLMOrchestrator
+       b. If no tool calls → capture finalReply, break
+       c. Execute all tool calls in parallel (single retry on failure)
+       d. Persist ASSISTANT_TOOL_CALL + all TOOL results (concurrent)
+       e. Push results onto sliding window
+  8. Persist assistant reply → IMessageDB
+  9. setImmediate (non-blocking post-processing):
+       - Write evaluation_logs row (system prompt hash, memories, tool calls, token usage)
+       - Detect implicit signal on previous turn's log (correction / repeat / clarification)
+       - Extract facts from last 4 messages → embed + upsert to Pinecone + user_memories
+       - Update conversations.intent via ITextGenerator
+       - Flag conversation for compression if post-turn token estimate > 70k
+ 10. Return IChatResponse { conversationId, messageId, reply, toolsUsed }
 ```
 
 ---
@@ -156,7 +174,7 @@ AssistantUseCaseImpl.chat()
 | Incoming voice messages | Telegram `message:voice` not handled — `/speech` does text-in/voice-out only |
 | **dream** | End-of-day job that sweeps the day's conversation history, extracts and consolidates personal facts, and upserts them into the user memory store — building a richer personal profile over time without requiring the user to explicitly say "remember this" |
 | **hear** | STT middleware layer that accepts audio input from Telegram voice messages (and future CLIs), transcribes via Whisper, and hands the text to the core `chat()` — unblocking `voiceChat()` which is already wired but currently throws |
-| **evaluate** | Feedback loop: after the agent proposes a plan or response, the user can rate or correct it; each interaction (context, response, feedback) is logged to a dedicated table to form a dataset for future reinforcement learning / fine-tuning |
+| **evaluate** | Per-turn `evaluation_logs` rows are written (system prompt hash, memories injected, tool calls, token usage, implicit signal detection). Explicit feedback — user rating or correction via a bot command — is not yet implemented |
 
 ---
 
@@ -167,13 +185,14 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | Table                 | Purpose                                                             |
 | --------------------- | ------------------------------------------------------------------- |
 | `users`               | User record — personalities used to personalise system prompt       |
-| `conversations`       | Per-user conversation threads                                       |
-| `messages`            | All messages (user/assistant/tool) within a conversation            |
+| `conversations`       | Per-user conversation threads — adds `summary`, `intent`, `flagged_for_compression` |
+| `messages`            | All messages (user/assistant/tool) within a conversation — adds `compressed_at_epoch` |
 | `jarvis_config`       | Singleton — stores system prompt and max tool rounds                |
 | `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
 | `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
 | `todo_items`          | To-do list — title, description, deadline (epoch), priority, status |
-| `user_profiles`       | Per-user personality traits and wake-up hour (set via `/setup`) |
+| `user_profiles`       | Per-user personality traits and wake-up hour (set via `/setup`)     |
+| `evaluation_logs`     | Per-turn evaluation log — system prompt hash, memories injected, tool calls, token usage, feedback signals |
 
 ---
 

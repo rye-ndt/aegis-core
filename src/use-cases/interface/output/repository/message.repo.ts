@@ -6,17 +6,17 @@ export interface Message {
   conversationId: string;
   role: MESSAGE_ROLE;
   content: string;
-  /** Set when role is TOOL — identifies which tool produced this result */
   toolName?: TOOL_TYPE;
-  /** Links a tool result message to its originating tool call */
   toolCallId?: string;
-  /** Set when role is ASSISTANT_TOOL_CALL — JSON-serialised OpenAI tool_calls array */
   toolCallsJson?: string;
+  compressedAtEpoch?: number | null;
   createdAtEpoch: number;
 }
 
 export interface IMessageDB {
   create(message: Message): Promise<void>;
   findByConversationId(conversationId: string): Promise<Message[]>;
+  findUncompressedByConversationId(conversationId: string): Promise<Message[]>;
+  markCompressed(ids: string[], epoch: number): Promise<void>;
   deleteByConversationId(conversationId: string): Promise<void>;
 }
