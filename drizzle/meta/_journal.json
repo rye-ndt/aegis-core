@@ -57,6 +57,13 @@
       "when": 1775201039436,
       "tag": "0007_wandering_purifiers",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775212137837,
+      "tag": "0008_hard_sunset_bain",
+      "breakpoints": true
     }
   ]
 }

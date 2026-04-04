@@ -18,37 +18,27 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   const googleOAuthService = inject.getGoogleOAuthService();
   const tts = inject.getTTS();
 
-  const fixedUserId = await inject.resolveUserId();
-
-  if (!fixedUserId) {
-    console.warn(
-      "No user profile found in DB and JARVIS_USER_ID is not set. " +
-        "Proactive crawlers will not start. Run /setup in Telegram first.",
-    );
-  }
+  const adminChatId = process.env.BOT_ADMIN_TELEGRAM_ID
+    ? parseInt(process.env.BOT_ADMIN_TELEGRAM_ID, 10)
+    : undefined;
 
   const handler = new TelegramAssistantHandler(
     useCase,
     sqlDB.userProfiles,
     googleOAuthService,
     tts,
-    fixedUserId,
+    sqlDB.allowedTelegramIds,
+    adminChatId,
     token,
   );
 
-  const notificationChatId = process.env.TELEGRAM_CHAT_ID
-    ? parseInt(process.env.TELEGRAM_CHAT_ID, 10)
-    : undefined;
-
-  const bot = new TelegramBot(token, handler, notificationChatId);
+  const bot = new TelegramBot(token, handler);
 
   const notificationRunner = inject.getNotificationRunner(bot);
   notificationRunner.start();
 
-  if (fixedUserId) {
-    inject.getCalendarCrawler(fixedUserId).start();
-    inject.getDailySummaryCrawler(fixedUserId, bot).start();
-  }
+  inject.getCalendarCrawler().start();
+  inject.getDailySummaryCrawler(bot).start();
 
   const oauthPort = parseInt(process.env.OAUTH_CALLBACK_PORT ?? "3000", 10);
 

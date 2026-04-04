@@ -1,12 +1,12 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-03 (synced from codebase)
+> Last updated: 2026-04-03 (multi-user feature)
 
 ---
 
 ## What it is
 
-A personal, single-user AI assistant built in TypeScript with Hexagonal Architecture. The user sends a message via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Every component is behind an interface so adapters are swappable without touching business logic.
+A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users send messages via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Access is controlled by an allowlist — only users added by the admin can interact with the bot. Every component is behind an interface so adapters are swappable without touching business logic.
 
 ---
 
@@ -85,7 +85,8 @@ src/
 │           │   └── webSearch.tool.ts          # [working] — Tavily
 │           ├── toolRegistry.concrete.ts       # [working]
 │           ├── jarvisConfig/      # CachedJarvisConfigRepo (Redis + DB) [working]
-│           └── sqlDB/             # DrizzleSqlDB + all repos [working] — adds evaluationLogs
+│           ├── reminder/          # CalendarCrawler, DailySummaryCrawler, NotificationRunner [working]
+│           └── sqlDB/             # DrizzleSqlDB + all repos [working] — adds evaluationLogs, scheduledNotifications
 │
 └── helpers/
     ├── enums/
@@ -113,9 +114,12 @@ src/
 | `/new`     | Clears active conversation ID (starts fresh) |
 | `/history` | Replies with last 10 messages of the current conversation |
 | `/setup`   | Launches 6-question personality quiz (a/b inline), then asks wake-up hour, saves `user_profiles`, presents Google OAuth link via InlineKeyboard |
+| `/allow <chatId>` | Admin only — adds a Telegram chat ID to `allowed_telegram_ids` |
+| `/revoke <chatId>` | Admin only — removes a Telegram chat ID from `allowed_telegram_ids` |
 | `/code <auth_code>` | Exchanges a Google OAuth authorization code for tokens, stored in `google_oauth_tokens` |
 | `/speech <message>` | Sends message through `chat()`, synthesizes the reply via `OpenAITTS`, returns an OGG voice message; falls back to text if TTS fails |
 | _(voice message)_ | Download OGG from Telegram → Whisper transcription → `voiceChat()` → TTS reply as voice; falls back to text if TTS fails |
+| _(photo message)_ | Download highest-res PhotoSize → base64 data URL → `chat()` with vision input |
 
 ### Normal message flow
 
@@ -124,6 +128,9 @@ Telegram message (text or photo)
       │
       ▼
 TelegramAssistantHandler.on("message:text" | "message:photo")
+  → isAllowed(chatId) — checks allowed_telegram_ids; rejects with "not authorized" if not found
+  → resolveUserId(chatId) — UUIDv5(chatId, TELEGRAM_NS)
+  → ensureUserProfile(userId, chatId) — creates/backfills user_profiles row if needed
   photo path: download highest-res PhotoSize → base64 data URL
       │
       ▼
@@ -161,6 +168,21 @@ AssistantUseCaseImpl.chat()
 
 ---
 
+## Reminder system
+
+Three background workers start automatically (wired in `telegramCli.ts`). They loop over all users from `user_profiles`. Users without a `telegram_chat_id` (i.e. no profile yet) are skipped or marked failed.
+
+### CalendarCrawler
+Runs every 30 minutes. Loops all users in parallel. Looks 24 hours ahead per user, creates a `scheduled_notifications` row for each upcoming calendar event at `eventStart - CALENDAR_REMINDER_OFFSET_MINS` (default 30). Deduplicates by `sourceId` (Google event ID).
+
+### DailySummaryCrawler
+Runs every 5 minutes. Loops all users in parallel. Fires once per day per user at their configured wake-up hour (set during `/setup`). Fetches that day's calendar events and sends a morning agenda via Telegram to their `telegram_chat_id`. Deduplicates by `daily_summary_<userId>_<date>`.
+
+### NotificationRunner
+Polls `scheduled_notifications` every 60 seconds. Fetches due rows, batch-loads the relevant user profiles, then sends each via Telegram to the user's `telegram_chat_id`. Marks rows `sent` on success, `failed` on missing profile or send error.
+
+---
+
 ## Not implemented / known limitations
 
 | Item | Note |
@@ -184,20 +206,22 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
 | `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
 | `todo_items`          | To-do list — title, description, deadline (epoch), priority, status |
-| `user_profiles`       | Per-user personality traits and wake-up hour (set via `/setup`)     |
+| `user_profiles`       | Per-user personality traits, wake-up hour, and `telegram_chat_id` (set via `/setup`) |
+| `allowed_telegram_ids` | Allowlist — only chat IDs in this table can interact with the bot; admin-managed via `/allow` / `/revoke` |
 | `evaluation_logs`     | Per-turn evaluation log — system prompt hash, memories injected, tool calls, token usage, feedback signals |
+| `scheduled_notifications` | Reminder queue — title, body, fire-at epoch, status (pending/sent/failed), sourceId for deduplication |
 
 ---
 
 ## Google OAuth setup
 
-There is no HTTP server to handle OAuth callbacks. The recommended flow is:
+An OAuth callback HTTP server runs on port 3000 (configurable via `OAUTH_CALLBACK_PORT`). The recommended flow is:
 
 1. Run `/setup` in Telegram — after the personality quiz it presents a "Connect Google" button that opens the OAuth consent URL.
-2. After authorizing, copy the `code` query parameter from the redirect URL.
-3. Send `/code <value>` in Telegram — the bot exchanges it for tokens and stores them in `google_oauth_tokens`.
+2. After authorizing, Google redirects to `GOOGLE_REDIRECT_URI` (your port-3000 server). If the redirect page loads, tokens are stored automatically.
+3. If the redirect page doesn't load, copy the `code` query parameter from the redirect URL and send `/code <value>` in Telegram — the bot exchanges it for tokens manually.
 
-Alternatively, manually insert a token row or run a temporary script using the Google OAuth2 client with `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REDIRECT_URI`. Until a token is present, calendar and Gmail tools return `CalendarNotConnectedError` / `GmailNotConnectedError`.
+Until a token is present, calendar and Gmail tools return `CalendarNotConnectedError` / `GmailNotConnectedError`.
 
 ---
 
@@ -207,14 +231,17 @@ Alternatively, manually insert a token row or run a temporary script using the G
 # 1. Install dependencies
 npm install
 
-# 2. Copy and fill in environment variables
+# 2. Copy and fill in environment variables (set BOT_ADMIN_TELEGRAM_ID)
 cp .env.example .env
 
 # 3. Generate and apply DB migrations
 npm run db:generate
 npm run db:migrate
 
-# 4. Start Telegram bot
+# 4. Seed the admin's own chat ID into the allowlist (one-time)
+# psql $DATABASE_URL -c "INSERT INTO allowed_telegram_ids (telegram_chat_id, added_at_epoch) VALUES ('<your_chat_id>', EXTRACT(EPOCH FROM NOW())::integer) ON CONFLICT DO NOTHING;"
+
+# 5. Start Telegram bot
 npm run dev
 
 # Other utilities

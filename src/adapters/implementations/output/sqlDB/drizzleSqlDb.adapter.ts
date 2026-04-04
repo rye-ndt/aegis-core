@@ -16,6 +16,7 @@ import { DrizzleTodoItemRepo } from "./repositories/todoItem.repo";
 import { DrizzleUserProfileRepo } from "./repositories/userProfile.repo";
 import { DrizzleEvaluationLogRepo } from "./repositories/evaluationLog.repo";
 import { DrizzleScheduledNotificationRepo } from "./repositories/scheduledNotification.repo";
+import { DrizzleAllowedTelegramIdRepo } from "./repositories/allowedTelegramId.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -28,6 +29,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly userProfiles: DrizzleUserProfileRepo;
   readonly evaluationLogs: DrizzleEvaluationLogRepo;
   readonly scheduledNotifications: DrizzleScheduledNotificationRepo;
+  readonly allowedTelegramIds: DrizzleAllowedTelegramIdRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -43,6 +45,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.scheduledNotifications = new DrizzleScheduledNotificationRepo(
       this.db,
     );
+    this.allowedTelegramIds = new DrizzleAllowedTelegramIdRepo(this.db);
   }
 
   async runMigrations(migrationsFolder: string): Promise<void> {

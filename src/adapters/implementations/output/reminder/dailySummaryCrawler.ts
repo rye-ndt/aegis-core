@@ -3,7 +3,7 @@ import { newUuid } from "../../../../helpers/uuid";
 import { CalendarNotConnectedError } from "../../../../helpers/errors/calendarNotConnected.error";
 import type { ICalendarService } from "../../../../use-cases/interface/output/calendar.interface";
 import type { IScheduledNotificationDB } from "../../../../use-cases/interface/output/repository/scheduledNotification.repo";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IUserProfile, IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { INotificationSender } from "../../../../use-cases/interface/output/notificationSender.interface";
 
 const CHECK_INTERVAL_MS = 5 * 60_000;
@@ -16,21 +16,17 @@ export class DailySummaryCrawler {
     private readonly notificationRepo: IScheduledNotificationDB,
     private readonly userProfileRepo: IUserProfileDB,
     private readonly sender: INotificationSender,
-    private readonly userId: string,
   ) {}
 
   start(): void {
-    this.isRunning = true;
-    this.tick()
-      .catch((err) => console.error("DailySummaryCrawler initial tick error:", err))
-      .finally(() => { this.isRunning = false; });
+    this.tick().catch((err) =>
+      console.error("DailySummaryCrawler initial tick error:", err),
+    );
     setInterval(() => {
       if (this.isRunning) return;
       this.isRunning = true;
       this.tick()
-        .catch((err) =>
-          console.error("DailySummaryCrawler tick error:", err),
-        )
+        .catch((err) => console.error("DailySummaryCrawler tick error:", err))
         .finally(() => {
           this.isRunning = false;
         });
@@ -38,17 +34,27 @@ export class DailySummaryCrawler {
   }
 
   private async tick(): Promise<void> {
-    const profile = await this.userProfileRepo.findByUserId(this.userId);
-    if (!profile || profile.wakeUpHour === null) return;
+    const users = await this.userProfileRepo.findAll();
+    await Promise.allSettled(
+      users.map((user) =>
+        this.tickForUser(user).catch((err) =>
+          console.error(`DailySummaryCrawler: error for user ${user.userId}:`, err),
+        ),
+      ),
+    );
+  }
+
+  private async tickForUser(user: IUserProfile): Promise<void> {
+    if (user.wakeUpHour === null || !user.telegramChatId) return;
 
     const now = newCurrentUTCEpoch();
     const nowDate = new Date(now * 1000);
     const currentHourUTC = nowDate.getUTCHours();
 
-    if (currentHourUTC !== profile.wakeUpHour) return;
+    if (currentHourUTC !== user.wakeUpHour) return;
 
-    const todayKey = nowDate.toISOString().slice(0, 10); // "YYYY-MM-DD"
-    const dedupId = `daily_summary_${todayKey}`;
+    const todayKey = nowDate.toISOString().slice(0, 10);
+    const dedupId = `daily_summary_${user.userId}_${todayKey}`;
 
     const existing = await this.notificationRepo.findBySourceId(dedupId);
     if (existing) return;
@@ -58,7 +64,7 @@ export class DailySummaryCrawler {
 
     let events;
     try {
-      events = await this.calendarService.listEvents(this.userId, {
+      events = await this.calendarService.listEvents(user.userId, {
         startDateTime: startOfDay.toISOString(),
         endDateTime: endOfDay.toISOString(),
         maxResults: 50,
@@ -80,11 +86,11 @@ export class DailySummaryCrawler {
       }
     }
 
-    await this.sender.send(lines.join("\n"));
+    await this.sender.send(lines.join("\n"), user.telegramChatId);
 
     await this.notificationRepo.create({
       id: newUuid(),
-      userId: this.userId,
+      userId: user.userId,
       title: "Daily summary",
       body: dedupId,
       fireAtEpoch: now,

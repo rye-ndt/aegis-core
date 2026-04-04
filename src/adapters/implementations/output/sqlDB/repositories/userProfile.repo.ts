@@ -20,6 +20,7 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
         displayName: profile.displayName ?? null,
         personalities: profile.personalities,
         wakeUpHour: profile.wakeUpHour,
+        telegramChatId: profile.telegramChatId ?? null,
         createdAtEpoch: now,
         updatedAtEpoch: now,
       })
@@ -29,6 +30,7 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
           displayName: profile.displayName ?? null,
           personalities: profile.personalities,
           wakeUpHour: profile.wakeUpHour,
+          telegramChatId: profile.telegramChatId ?? null,
           updatedAtEpoch: now,
         },
       });
@@ -42,14 +44,23 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       .limit(1);
 
     if (!rows[0]) return null;
-    return {
-      userId: rows[0].userId,
-      displayName: rows[0].displayName,
-      personalities: rows[0].personalities,
-      wakeUpHour: rows[0].wakeUpHour,
-      createdAtEpoch: rows[0].createdAtEpoch,
-      updatedAtEpoch: rows[0].updatedAtEpoch,
-    };
+    return this.toProfile(rows[0]);
+  }
+
+  async findByTelegramChatId(chatId: string): Promise<IUserProfile | null> {
+    const rows = await this.db
+      .select()
+      .from(userProfiles)
+      .where(eq(userProfiles.telegramChatId, chatId))
+      .limit(1);
+
+    if (!rows[0]) return null;
+    return this.toProfile(rows[0]);
+  }
+
+  async findAll(): Promise<IUserProfile[]> {
+    const rows = await this.db.select().from(userProfiles);
+    return rows.map(this.toProfile);
   }
 
   async findFirst(): Promise<IUserProfile | null> {
@@ -60,13 +71,18 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       .limit(1);
 
     if (!rows[0]) return null;
+    return this.toProfile(rows[0]);
+  }
+
+  private toProfile(row: typeof userProfiles.$inferSelect): IUserProfile {
     return {
-      userId: rows[0].userId,
-      displayName: rows[0].displayName,
-      personalities: rows[0].personalities,
-      wakeUpHour: rows[0].wakeUpHour,
-      createdAtEpoch: rows[0].createdAtEpoch,
-      updatedAtEpoch: rows[0].updatedAtEpoch,
+      userId: row.userId,
+      displayName: row.displayName,
+      personalities: row.personalities,
+      wakeUpHour: row.wakeUpHour,
+      telegramChatId: row.telegramChatId,
+      createdAtEpoch: row.createdAtEpoch,
+      updatedAtEpoch: row.updatedAtEpoch,
     };
   }
 }

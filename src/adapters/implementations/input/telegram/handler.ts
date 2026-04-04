@@ -2,7 +2,9 @@ import type { Bot, Context } from "grammy";
 import { InlineKeyboard, InputFile } from "grammy";
 import { v5 as uuidV5 } from "uuid";
 import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
+import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
+import type { IAllowedTelegramIdDB } from "../../../../use-cases/interface/output/repository/allowedTelegramId.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { ITextToSpeech } from "../../../../use-cases/interface/output/tts.interface";
 import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
@@ -67,7 +69,8 @@ export class TelegramAssistantHandler {
     private readonly userProfileRepo: IUserProfileDB,
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly tts: ITextToSpeech,
-    private readonly fixedUserId?: string,
+    private readonly allowedTelegramIds: IAllowedTelegramIdDB,
+    private readonly adminChatId: number | undefined,
     private readonly botToken?: string,
   ) {}
 
@@ -77,18 +80,28 @@ export class TelegramAssistantHandler {
       if (err.error) console.error("Cause:", err.error);
     });
 
-    bot.command("start", (ctx) =>
-      ctx.reply(
-        "JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.",
-      ),
-    );
+    bot.command("start", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot. Contact the administrator.");
+        return;
+      }
+      await ctx.reply("JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.");
+    });
 
-    bot.command("new", (ctx) => {
+    bot.command("new", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
       this.conversations.delete(ctx.chat.id);
-      return ctx.reply("Conversation reset. Starting fresh.");
+      await ctx.reply("Conversation reset. Starting fresh.");
     });
 
     bot.command("history", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
       const conversationId = this.conversations.get(ctx.chat.id);
       if (!conversationId) {
         return ctx.reply("No active conversation yet. Send a message first.");
@@ -105,7 +118,33 @@ export class TelegramAssistantHandler {
       return ctx.reply(text || "No messages yet.");
     });
 
+    bot.command("allow", async (ctx) => {
+      if (!this.adminChatId || ctx.chat.id !== this.adminChatId) return;
+      const targetId = ctx.match?.trim();
+      if (!targetId || !/^\d+$/.test(targetId)) {
+        await ctx.reply("Usage: /allow <telegramChatId>");
+        return;
+      }
+      await this.allowedTelegramIds.add(targetId, newCurrentUTCEpoch());
+      await ctx.reply(`Allowed: ${targetId}`);
+    });
+
+    bot.command("revoke", async (ctx) => {
+      if (!this.adminChatId || ctx.chat.id !== this.adminChatId) return;
+      const targetId = ctx.match?.trim();
+      if (!targetId || !/^\d+$/.test(targetId)) {
+        await ctx.reply("Usage: /revoke <telegramChatId>");
+        return;
+      }
+      await this.allowedTelegramIds.remove(targetId);
+      await ctx.reply(`Revoked: ${targetId}`);
+    });
+
     bot.command("setup", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
       this.setupSessions.set(ctx.chat.id, {
         phase: { name: "traits", questionIndex: 0 },
         collectedTraits: [],
@@ -118,6 +157,10 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("code", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
       const code = ctx.match?.trim();
       if (!code) {
         return ctx.reply(
@@ -138,12 +181,17 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("speech", async (ctx) => {
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
       const message = ctx.match?.trim();
       if (!message) {
         return ctx.reply("Usage: /speech <your message>");
       }
 
       const userId = this.resolveUserId(ctx.chat.id);
+      await this.ensureUserProfile(userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
 
       await ctx.replyWithChatAction("record_voice");
@@ -181,8 +229,13 @@ export class TelegramAssistantHandler {
 
     bot.on("message:voice", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
 
       const userId = this.resolveUserId(ctx.chat.id);
+      await this.ensureUserProfile(userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
 
       await ctx.replyWithChatAction("record_voice");
@@ -225,8 +278,13 @@ export class TelegramAssistantHandler {
 
     bot.on("message:photo", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
 
       const userId = this.resolveUserId(ctx.chat.id);
+      await this.ensureUserProfile(userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
 
       await ctx.replyWithChatAction("typing");
@@ -263,8 +321,13 @@ export class TelegramAssistantHandler {
         await this.handleSetupReply(ctx);
         return;
       }
+      if (!(await this.isAllowed(ctx.chat.id))) {
+        await ctx.reply("You are not authorized to use this bot.");
+        return;
+      }
 
       const userId = this.resolveUserId(ctx.chat.id);
+      await this.ensureUserProfile(userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
 
       await ctx.replyWithChatAction("typing");
@@ -342,6 +405,7 @@ export class TelegramAssistantHandler {
         userId,
         personalities: session.collectedTraits,
         wakeUpHour: hour,
+        telegramChatId: String(chatId),
       });
 
       session.phase = { name: "done" };
@@ -393,6 +457,29 @@ export class TelegramAssistantHandler {
   }
 
   private resolveUserId(chatId: number): string {
-    return this.fixedUserId ?? uuidV5(String(chatId), TELEGRAM_NS);
+    return uuidV5(String(chatId), TELEGRAM_NS);
+  }
+
+  private async isAllowed(chatId: number): Promise<boolean> {
+    return this.allowedTelegramIds.isAllowed(String(chatId));
+  }
+
+  private async ensureUserProfile(userId: string, chatId: number): Promise<void> {
+    const existing = await this.userProfileRepo.findByUserId(userId);
+    if (!existing) {
+      await this.userProfileRepo.upsert({
+        userId,
+        personalities: [],
+        wakeUpHour: null,
+        telegramChatId: String(chatId),
+      });
+    } else if (!existing.telegramChatId) {
+      await this.userProfileRepo.upsert({
+        userId,
+        personalities: existing.personalities,
+        wakeUpHour: existing.wakeUpHour,
+        telegramChatId: String(chatId),
+      });
+    }
   }
 }
