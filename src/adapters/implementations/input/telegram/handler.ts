@@ -1,15 +1,13 @@
 import type { Bot, Context } from "grammy";
 import { InlineKeyboard, InputFile } from "grammy";
-import { v5 as uuidV5 } from "uuid";
 import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
-import type { IAllowedTelegramIdDB } from "../../../../use-cases/interface/output/repository/allowedTelegramId.repo";
+import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
+import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { ITextToSpeech } from "../../../../use-cases/interface/output/tts.interface";
 import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
-
-const TELEGRAM_NS = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
 interface TraitQuestion {
   text: string;
@@ -58,19 +56,21 @@ type SetupPhase =
 interface SetupSession {
   phase: SetupPhase;
   collectedTraits: PERSONALITIES[];
+  userId: string;
 }
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
   private setupSessions = new Map<number, SetupSession>();
+  private sessionCache = new Map<number, { userId: string; expiresAtEpoch: number }>();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
     private readonly userProfileRepo: IUserProfileDB,
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly tts: ITextToSpeech,
-    private readonly allowedTelegramIds: IAllowedTelegramIdDB,
-    private readonly adminChatId: number | undefined,
+    private readonly authUseCase: IAuthUseCase,
+    private readonly telegramSessions: ITelegramSessionDB,
     private readonly botToken?: string,
   ) {}
 
@@ -81,16 +81,38 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("start", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot. Contact the administrator.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("JARVIS online.\n\nAuthenticate first: call POST /auth/login to get a token, then send /auth <token> here.");
         return;
       }
       await ctx.reply("JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.");
     });
 
+    bot.command("auth", async (ctx) => {
+      const token = ctx.match?.trim();
+      if (!token) {
+        await ctx.reply("Usage: /auth <your_token>\n\nGet a token via POST /auth/login.");
+        return;
+      }
+      try {
+        const { userId, expiresAtEpoch } = await this.authUseCase.validateToken(token);
+        await this.telegramSessions.upsert({
+          telegramChatId: String(ctx.chat.id),
+          userId,
+          expiresAtEpoch,
+        });
+        this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
+        await ctx.reply("Authenticated. You can now use JARVIS.");
+      } catch {
+        await ctx.reply("Invalid or expired token. Get a fresh token via POST /auth/login.");
+      }
+    });
+
     bot.command("new", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
       this.conversations.delete(ctx.chat.id);
@@ -98,17 +120,17 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("history", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
       const conversationId = this.conversations.get(ctx.chat.id);
       if (!conversationId) {
         return ctx.reply("No active conversation yet. Send a message first.");
       }
-      const userId = this.resolveUserId(ctx.chat.id);
       const messages = await this.assistantUseCase.getConversation({
-        userId,
+        userId: session.userId,
         conversationId,
       });
       const text = messages
@@ -118,36 +140,16 @@ export class TelegramAssistantHandler {
       return ctx.reply(text || "No messages yet.");
     });
 
-    bot.command("allow", async (ctx) => {
-      if (!this.adminChatId || ctx.chat.id !== this.adminChatId) return;
-      const targetId = ctx.match?.trim();
-      if (!targetId || !/^\d+$/.test(targetId)) {
-        await ctx.reply("Usage: /allow <telegramChatId>");
-        return;
-      }
-      await this.allowedTelegramIds.add(targetId, newCurrentUTCEpoch());
-      await ctx.reply(`Allowed: ${targetId}`);
-    });
-
-    bot.command("revoke", async (ctx) => {
-      if (!this.adminChatId || ctx.chat.id !== this.adminChatId) return;
-      const targetId = ctx.match?.trim();
-      if (!targetId || !/^\d+$/.test(targetId)) {
-        await ctx.reply("Usage: /revoke <telegramChatId>");
-        return;
-      }
-      await this.allowedTelegramIds.remove(targetId);
-      await ctx.reply(`Revoked: ${targetId}`);
-    });
-
     bot.command("setup", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
       this.setupSessions.set(ctx.chat.id, {
         phase: { name: "traits", questionIndex: 0 },
         collectedTraits: [],
+        userId: session.userId,
       });
       await this.safeSend(
         ctx,
@@ -157,8 +159,9 @@ export class TelegramAssistantHandler {
     });
 
     bot.command("code", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
       const code = ctx.match?.trim();
@@ -167,48 +170,38 @@ export class TelegramAssistantHandler {
           "Usage: /code <authorization_code>\n\nCopy the `code` value from the redirect URL after authorizing Google.",
         );
       }
-      const userId = this.resolveUserId(ctx.chat.id);
       try {
-        await this.googleOAuthService.handleCallback(code, userId);
-        await ctx.reply(
-          "Google account connected. Calendar and Gmail are ready.",
-        );
+        await this.googleOAuthService.handleCallback(code, session.userId);
+        await ctx.reply("Google account connected. Calendar and Gmail are ready.");
       } catch {
         await ctx.reply(
-          "Authorization failed. The code may be expired — run /setup again to get a fresh link.",
+          "Authorization failed. The code may be expired — use /setup to get a fresh link.",
         );
       }
     });
 
     bot.command("speech", async (ctx) => {
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
       const message = ctx.match?.trim();
       if (!message) {
         return ctx.reply("Usage: /speech <your message>");
       }
-
-      const userId = this.resolveUserId(ctx.chat.id);
-      await this.ensureUserProfile(userId, ctx.chat.id);
+      await this.ensureUserProfile(session.userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
-
       await ctx.replyWithChatAction("record_voice");
-
       try {
         const response = await this.assistantUseCase.chat({
-          userId,
+          userId: session.userId,
           conversationId,
           message,
         });
-
         this.conversations.set(ctx.chat.id, response.conversationId);
-
         try {
-          const { audioBuffer } = await this.tts.synthesize({
-            text: response.reply,
-          });
+          const { audioBuffer } = await this.tts.synthesize({ text: response.reply });
           await ctx.replyWithVoice(new InputFile(audioBuffer, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
@@ -216,9 +209,7 @@ export class TelegramAssistantHandler {
         } catch (ttsErr) {
           console.error("TTS synthesis failed:", ttsErr);
           let reply = response.reply;
-          if (response.toolsUsed.length > 0) {
-            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-          }
+          if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice unavailable)_`);
         }
       } catch (err) {
@@ -229,33 +220,25 @@ export class TelegramAssistantHandler {
 
     bot.on("message:voice", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
-
-      const userId = this.resolveUserId(ctx.chat.id);
-      await this.ensureUserProfile(userId, ctx.chat.id);
+      await this.ensureUserProfile(session.userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
-
       await ctx.replyWithChatAction("record_voice");
-
       try {
         const audioBuffer = await this.downloadVoiceAsBuffer(ctx);
-
         const response = await this.assistantUseCase.voiceChat({
-          userId,
+          userId: session.userId,
           conversationId,
           audioBuffer,
           mimeType: "audio/ogg",
         });
-
         this.conversations.set(ctx.chat.id, response.conversationId);
-
         try {
-          const { audioBuffer: replyAudio } = await this.tts.synthesize({
-            text: response.reply,
-          });
+          const { audioBuffer: replyAudio } = await this.tts.synthesize({ text: response.reply });
           await ctx.replyWithVoice(new InputFile(replyAudio, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
@@ -263,56 +246,41 @@ export class TelegramAssistantHandler {
         } catch (ttsErr) {
           console.error("TTS failed for voice reply:", ttsErr);
           let reply = response.reply;
-          if (response.toolsUsed.length > 0) {
-            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-          }
+          if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice reply unavailable)_`);
         }
       } catch (err) {
         console.error("Error handling voice message:", err);
-        await ctx.reply(
-          "Sorry, I couldn't process that voice message. Please try again.",
-        );
+        await ctx.reply("Sorry, I couldn't process that voice message. Please try again.");
       }
     });
 
     bot.on("message:photo", async (ctx) => {
       if (this.setupSessions.has(ctx.chat.id)) return;
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
-
-      const userId = this.resolveUserId(ctx.chat.id);
-      await this.ensureUserProfile(userId, ctx.chat.id);
+      await this.ensureUserProfile(session.userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
-
       await ctx.replyWithChatAction("typing");
-
       try {
         const imageBase64Url = await this.downloadPhotoAsBase64(ctx);
         const caption = ctx.message.caption?.trim() || "[image]";
-
         const response = await this.assistantUseCase.chat({
-          userId,
+          userId: session.userId,
           conversationId,
           message: caption,
           imageBase64Url,
         });
-
         this.conversations.set(ctx.chat.id, response.conversationId);
-
         let reply = response.reply;
-        if (response.toolsUsed.length > 0) {
-          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-        }
-
+        if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
       } catch (err) {
         console.error("Error handling photo:", err);
-        await ctx.reply(
-          "Sorry, I couldn't process that image. Please try again.",
-        );
+        await ctx.reply("Sorry, I couldn't process that image. Please try again.");
       }
     });
 
@@ -321,37 +289,48 @@ export class TelegramAssistantHandler {
         await this.handleSetupReply(ctx);
         return;
       }
-      if (!(await this.isAllowed(ctx.chat.id))) {
-        await ctx.reply("You are not authorized to use this bot.");
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
-
-      const userId = this.resolveUserId(ctx.chat.id);
-      await this.ensureUserProfile(userId, ctx.chat.id);
+      await this.ensureUserProfile(session.userId, ctx.chat.id);
       const conversationId = this.conversations.get(ctx.chat.id);
-
       await ctx.replyWithChatAction("typing");
-
       try {
         const response = await this.assistantUseCase.chat({
-          userId,
+          userId: session.userId,
           conversationId,
           message: ctx.message.text,
         });
-
         this.conversations.set(ctx.chat.id, response.conversationId);
-
         let reply = response.reply;
-        if (response.toolsUsed.length > 0) {
-          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-        }
-
+        if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
+  }
+
+  private async ensureAuthenticated(chatId: number): Promise<{ userId: string } | null> {
+    const now = newCurrentUTCEpoch();
+    const cached = this.sessionCache.get(chatId);
+    if (cached) {
+      if (cached.expiresAtEpoch > now) return { userId: cached.userId };
+      this.sessionCache.delete(chatId);
+      await this.telegramSessions.deleteByChatId(String(chatId));
+      return null;
+    }
+    const session = await this.telegramSessions.findByChatId(String(chatId));
+    if (!session) return null;
+    if (session.expiresAtEpoch <= now) {
+      await this.telegramSessions.deleteByChatId(String(chatId));
+      return null;
+    }
+    this.sessionCache.set(chatId, { userId: session.userId, expiresAtEpoch: session.expiresAtEpoch });
+    return { userId: session.userId };
   }
 
   private async handleSetupReply(ctx: Context): Promise<void> {
@@ -400,7 +379,7 @@ export class TelegramAssistantHandler {
         return;
       }
 
-      const userId = this.resolveUserId(chatId);
+      const userId = session.userId;
       await this.userProfileRepo.upsert({
         userId,
         personalities: session.collectedTraits,
@@ -454,14 +433,6 @@ export class TelegramAssistantHandler {
     const base64 = Buffer.from(buffer).toString("base64");
 
     return `data:image/jpeg;base64,${base64}`;
-  }
-
-  private resolveUserId(chatId: number): string {
-    return uuidV5(String(chatId), TELEGRAM_NS);
-  }
-
-  private async isAllowed(chatId: number): Promise<boolean> {
-    return this.allowedTelegramIds.isAllowed(String(chatId));
   }
 
   private async ensureUserProfile(userId: string, chatId: number): Promise<void> {

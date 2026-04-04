@@ -1,4 +1,4 @@
-import { eq, or } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 import type {
@@ -17,11 +17,9 @@ export class DrizzleUserRepo implements IUserDB {
   async create(user: UserInit): Promise<void> {
     await this.db.insert(users).values({
       id: user.id,
-      fullName: user.fullName,
       userName: user.userName,
       hashedPassword: user.hashedPassword,
       email: user.email,
-      dob: user.dob,
       status: user.status,
       personalities: [],
       secondaryPersonalities: [],
@@ -34,11 +32,9 @@ export class DrizzleUserRepo implements IUserDB {
     await this.db
       .update(users)
       .set({
-        fullName: user.fullName,
         userName: user.userName,
         hashedPassword: user.hashedPassword,
         email: user.email,
-        dob: user.dob,
         status: user.status,
         updatedAtEpoch: user.updatedAtEpoch,
       })
@@ -56,25 +52,27 @@ export class DrizzleUserRepo implements IUserDB {
     return this.toIUser(rows[0]);
   }
 
-  async findByUsernameOrEmail(
-    username: string,
-    email: string,
-  ): Promise<IUser | null> {
+  async findByEmail(email: string): Promise<IUser | null> {
     const rows = await this.db
       .select()
       .from(users)
-      .where(or(eq(users.userName, username), eq(users.email, email)))
+      .where(eq(users.email, email))
       .limit(1);
-
     if (!rows[0]) return null;
     return this.toIUser(rows[0]);
   }
 
   private toIUser(row: typeof users.$inferSelect): IUser {
     return {
-      ...row,
+      id: row.id,
+      userName: row.userName,
+      hashedPassword: row.hashedPassword,
+      email: row.email,
       status: row.status as USER_STATUSES,
       personalities: row.personalities as PERSONALITIES[],
+      secondaryPersonalities: row.secondaryPersonalities,
+      createdAtEpoch: row.createdAtEpoch,
+      updatedAtEpoch: row.updatedAtEpoch,
     };
   }
 }

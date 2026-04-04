@@ -29,11 +29,15 @@ import { NotificationRunner } from "../implementations/output/reminder/notificat
 import { CalendarCrawler } from "../implementations/output/reminder/calendarCrawler";
 import { DailySummaryCrawler } from "../implementations/output/reminder/dailySummaryCrawler";
 import type { INotificationSender } from "../../use-cases/interface/output/notificationSender.interface";
+import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
+import { HttpApiServer } from "../implementations/input/http/httpServer";
+import type { IAuthUseCase } from "../../use-cases/interface/input/auth.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private _googleOAuthService: GoogleOAuthService | null = null;
+  private _authUseCase: IAuthUseCase | null = null;
   private _calendarService: GoogleCalendarService | null = null;
   private tts: ITextToSpeech | null = null;
 
@@ -170,6 +174,26 @@ export class AssistantInject {
   getGoogleOAuthService(): GoogleOAuthService {
     if (!this._googleOAuthService) this.getUseCase();
     return this._googleOAuthService!;
+  }
+
+  getAuthUseCase(): IAuthUseCase {
+    if (!this._authUseCase) {
+      this._authUseCase = new AuthUseCaseImpl(
+        this.getSqlDB().users,
+        process.env.JWT_SECRET ?? "",
+        process.env.JWT_EXPIRES_IN ?? "7d",
+      );
+    }
+    return this._authUseCase;
+  }
+
+  getHttpApiServer(): HttpApiServer {
+    const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
+    return new HttpApiServer(
+      this.getAuthUseCase(),
+      this.getGoogleOAuthService(),
+      port,
+    );
   }
 
   getTTS(): ITextToSpeech {

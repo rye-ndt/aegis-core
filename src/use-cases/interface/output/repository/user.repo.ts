@@ -3,11 +3,9 @@ import { USER_STATUSES } from "../../../../helpers/enums/statuses.enum";
 
 export interface UserInit {
   id: string;
-  fullName: string;
   userName: string;
   hashedPassword: string;
   email: string;
-  dob: number;
   status: USER_STATUSES;
   createdAtEpoch: number;
   updatedAtEpoch: number;
@@ -15,11 +13,9 @@ export interface UserInit {
 
 export interface UserUpdate {
   id: string;
-  fullName: string;
   userName: string;
   hashedPassword: string;
   email: string;
-  dob: number;
   status: USER_STATUSES;
   updatedAtEpoch: number;
 }
@@ -33,4 +29,5 @@ export interface IUserDB {
   create(user: UserInit): Promise<void>;
   update(user: UserUpdate): Promise<void>;
   findById(id: string): Promise<IUser | undefined>;
+  findByEmail(email: string): Promise<IUser | null>;
 }

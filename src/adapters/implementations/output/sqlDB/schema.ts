@@ -2,11 +2,9 @@ import { boolean, index, integer, pgTable, text, uuid } from "drizzle-orm/pg-cor
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
-  fullName: text("full_name").notNull(),
   userName: text("user_name").notNull(),
   hashedPassword: text("hashed_password").notNull(),
-  email: text("email").notNull(),
-  dob: integer("dob").notNull(),
+  email: text("email").notNull().unique(),
   status: text("status").notNull(),
   personalities: text("personalities").array().notNull().default([]),
   secondaryPersonalities: text("secondary_personalities")
@@ -15,6 +13,13 @@ export const users = pgTable("users", {
     .default([]),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const telegramSessions = pgTable("telegram_sessions", {
+  telegramChatId: text("telegram_chat_id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  expiresAtEpoch: integer("expires_at_epoch").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
 });
 
 export const conversations = pgTable("conversations", {
@@ -108,11 +113,6 @@ export const evaluationLogs = pgTable("evaluation_logs", {
   explicitRating: integer("explicit_rating"),
   outcomeConfirmed: boolean("outcome_confirmed"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
-});
-
-export const allowedTelegramIds = pgTable("allowed_telegram_ids", {
-  telegramChatId: text("telegram_chat_id").primaryKey(),
-  addedAtEpoch: integer("added_at_epoch").notNull(),
 });
 
 export const scheduledNotifications = pgTable(

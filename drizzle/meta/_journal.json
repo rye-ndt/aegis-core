@@ -64,6 +64,20 @@
       "when": 1775212137837,
       "tag": "0008_hard_sunset_bain",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1775290907350,
+      "tag": "0009_sleepy_mojo",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1775290915581,
+      "tag": "0010_marvelous_doorman",
+      "breakpoints": true
     }
   ]
 }
