@@ -75,6 +75,7 @@ export const userProfiles = pgTable("user_profiles", {
   displayName: text("display_name"),
   personalities: text("personalities").array().notNull().default([]),
   wakeUpHour: integer("wake_up_hour"),
+  telegramChatId: text("telegram_chat_id"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
@@ -107,6 +108,11 @@ export const evaluationLogs = pgTable("evaluation_logs", {
   explicitRating: integer("explicit_rating"),
   outcomeConfirmed: boolean("outcome_confirmed"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
+});
+
+export const allowedTelegramIds = pgTable("allowed_telegram_ids", {
+  telegramChatId: text("telegram_chat_id").primaryKey(),
+  addedAtEpoch: integer("added_at_epoch").notNull(),
 });
 
 export const scheduledNotifications = pgTable(

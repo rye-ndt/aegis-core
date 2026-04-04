@@ -5,18 +5,9 @@ import type { INotificationSender } from "../../../../use-cases/interface/output
 export class TelegramBot implements INotificationSender {
   private bot: Bot;
 
-  constructor(
-    token: string,
-    handler: TelegramAssistantHandler,
-    private readonly notificationChatId?: number,
-  ) {
+  constructor(token: string, handler: TelegramAssistantHandler) {
     this.bot = new Bot(token);
     handler.register(this.bot);
-    if (!notificationChatId) {
-      console.warn(
-        "TELEGRAM_CHAT_ID not configured — proactive reminders disabled.",
-      );
-    }
   }
 
   start(): void {
@@ -27,8 +18,7 @@ export class TelegramBot implements INotificationSender {
     return this.bot.stop();
   }
 
-  async send(text: string): Promise<void> {
-    if (!this.notificationChatId) return;
-    await this.bot.api.sendMessage(this.notificationChatId, text);
+  async send(text: string, telegramChatId: string): Promise<void> {
+    await this.bot.api.sendMessage(parseInt(telegramChatId, 10), text);
   }
 }

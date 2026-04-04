@@ -179,21 +179,15 @@ export class AssistantInject {
     return this.tts;
   }
 
-  async resolveUserId(): Promise<string | undefined> {
-    const fromEnv = process.env.JARVIS_USER_ID ?? process.env.CLI_USER_ID;
-    if (fromEnv) return fromEnv;
-    const profile = await this.getSqlDB().userProfiles.findFirst();
-    return profile?.userId;
-  }
-
   getNotificationRunner(sender: INotificationSender): NotificationRunner {
     return new NotificationRunner(
       this.getSqlDB().scheduledNotifications,
+      this.getSqlDB().userProfiles,
       sender,
     );
   }
 
-  getCalendarCrawler(userId: string): CalendarCrawler {
+  getCalendarCrawler(): CalendarCrawler {
     const offsetMins = parseInt(
       process.env.CALENDAR_REMINDER_OFFSET_MINS ?? "30",
       10,
@@ -201,21 +195,17 @@ export class AssistantInject {
     return new CalendarCrawler(
       this.getCalendarService(),
       this.getSqlDB().scheduledNotifications,
-      userId,
+      this.getSqlDB().userProfiles,
       offsetMins * 60,
     );
   }
 
-  getDailySummaryCrawler(
-    userId: string,
-    sender: INotificationSender,
-  ): DailySummaryCrawler {
+  getDailySummaryCrawler(sender: INotificationSender): DailySummaryCrawler {
     return new DailySummaryCrawler(
       this.getCalendarService(),
       this.getSqlDB().scheduledNotifications,
       this.getSqlDB().userProfiles,
       sender,
-      userId,
     );
   }
 }

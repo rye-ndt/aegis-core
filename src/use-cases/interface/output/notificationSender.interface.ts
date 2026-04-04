@@ -1,4 +1,4 @@
 export interface INotificationSender {
-  send(text: string): Promise<void>;
+  send(text: string, telegramChatId: string): Promise<void>;
 }
 
