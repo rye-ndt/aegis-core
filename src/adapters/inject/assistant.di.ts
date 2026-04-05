@@ -204,23 +204,26 @@ export class AssistantInject {
   }
 
   getNotificationRunner(sender: INotificationSender): NotificationRunner {
+    const pollIntervalSecs = parseInt(process.env.NOTIFICATION_POLL_INTERVAL_SECS ?? "60", 10);
     return new NotificationRunner(
       this.getSqlDB().scheduledNotifications,
       this.getSqlDB().userProfiles,
       sender,
+      pollIntervalSecs * 1000,
     );
   }
 
   getCalendarCrawler(): CalendarCrawler {
-    const offsetMins = parseInt(
-      process.env.CALENDAR_REMINDER_OFFSET_MINS ?? "30",
-      10,
-    );
+    const offsetMins = parseInt(process.env.CALENDAR_REMINDER_OFFSET_MINS ?? "30", 10);
+    const lookAheadHours = parseInt(process.env.CALENDAR_LOOK_AHEAD_HOURS ?? "24", 10);
+    const crawlIntervalMins = parseInt(process.env.CALENDAR_CRAWL_INTERVAL_MINS ?? "30", 10);
     return new CalendarCrawler(
       this.getCalendarService(),
       this.getSqlDB().scheduledNotifications,
       this.getSqlDB().userProfiles,
       offsetMins * 60,
+      lookAheadHours * 3600,
+      crawlIntervalMins * 60_000,
     );
   }
 

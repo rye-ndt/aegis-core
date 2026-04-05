@@ -1,12 +1,12 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-03 (multi-user feature)
+> Last updated: 2026-04-05
 
 ---
 
 ## What it is
 
-A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users send messages via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Access is controlled by an allowlist — only users added by the admin can interact with the bot. Every component is behind an interface so adapters are swappable without touching business logic.
+A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users interact via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Authentication is JWT-based — users register/login via HTTP API, then link their Telegram session with `/auth <token>`. Every component is behind an interface so adapters are swappable without touching business logic.
 
 ---
 
@@ -15,12 +15,12 @@ A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users
 | Layer          | Choice                                         |
 | -------------- | ---------------------------------------------- |
 | Language       | TypeScript 5.3, Node.js, strict mode           |
-| Interface      | Telegram (`grammy`)                            |
+| Interface      | Telegram (`grammy`) + HTTP API (native `http`) |
 | ORM            | Drizzle ORM + PostgreSQL (`pg` driver)         |
 | Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
 | LLM            | OpenAI chat completions + tool use (`gpt-4o`) — usage tokens surfaced |
 | Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format            |
-| Speech-to-text | OpenAI Whisper `whisper-1` [working]            |
+| Speech-to-text | OpenAI Whisper `whisper-1`                     |
 | Vision         | OpenAI gpt-4o vision (base64 data URL)         |
 | Validation     | Zod 4.3.6                                      |
 | DI             | Manual container in `src/adapters/inject/`     |
@@ -40,146 +40,171 @@ Hexagonal (Ports & Adapters). Use cases depend only on interfaces; adapters neve
 ```
 src/
 ├── telegramCli.ts              # Entry point (npm run dev)
+│                               # Boots HTTP API, Telegram bot, NotificationRunner,
+│                               # CalendarCrawler, DailySummaryCrawler; SIGINT shutdown
 │
 ├── use-cases/
 │   ├── implementations/
-│   │   └── assistant.usecase.ts    # chat(), voiceChat(), listConversations(), getConversation()
+│   │   ├── assistant.usecase.ts    # chat(), voiceChat(), listConversations(), getConversation()
+│   │   └── auth.usecase.ts         # register(), login(), validateToken()
 │   └── interface/
-│       ├── input/                  # Inbound ports: IAssistantUseCase
-│       └── output/                 # Outbound ports: ISpeechToText, ILLMOrchestrator,
-│                                   # ITool, IToolRegistry, IConversationDB,
-│                                   # IMessageDB, IUserDB, IJarvisConfigDB, IUserMemoryDB,
-│                                   # ITodoItemDB, ICalendarService, IGmailService,
-│                                   # IEmbeddingService, IVectorStore, ITextGenerator,
-│                                   # IEvaluationLogDB
-│                                   # (IOrchestratorMessage now carries imageBase64Url)
+│       ├── input/                  # IAssistantUseCase, IAuthUseCase
+│       └── output/                 # All outbound ports (see list below)
 │
 ├── adapters/
 │   ├── inject/
-│   │   └── assistant.di.ts        # Wires all components; getSqlDB(), getUseCase()
+│   │   └── assistant.di.ts        # Wires all 20+ components; lazy singletons
 │   │
 │   └── implementations/
 │       ├── input/
-│       │   └── telegram/          # TelegramBot, TelegramAssistantHandler
-│       │                          # handles text + photo messages
+│       │   ├── http/              # HttpApiServer — 4 routes
+│       │   └── telegram/          # TelegramBot (INotificationSender), TelegramAssistantHandler
 │       │
 │       └── output/
-│           ├── orchestrator/      # OpenAIOrchestrator [working] — vision-capable
-│           ├── stt/               # WhisperSpeechToText [working] — whisper-1, ogg input
-│           ├── textToSpeech/      # OpenAITTS [working] — tts-1, opus/ogg
-│           ├── calendar/          # GoogleCalendarService [working]
-│           ├── mail/              # GoogleGmailService [working]
-│           ├── embedding/         # OpenAIEmbeddingService [working]
-│           ├── vectorDB/          # PineconeVectorStore [working]
-│           ├── textGenerator/     # OpenAITextGenerator [working]
-│           ├── googleOAuth/       # GoogleOAuthService [working]
+│           ├── orchestrator/      # OpenAIOrchestrator — tool calling + vision
+│           ├── stt/               # WhisperSpeechToText — whisper-1, ogg input
+│           ├── textToSpeech/      # OpenAITTS — tts-1, opus/ogg
+│           ├── textGenerator/     # OpenAITextGenerator — summarisation, enrichment
+│           ├── embedding/         # OpenAIEmbeddingService — text-embedding-3-small
+│           ├── vectorDB/          # PineconeVectorStore
+│           ├── calendar/          # GoogleCalendarService — CRUD + OAuth token refresh
+│           ├── mail/              # GoogleGmailService — search + draft creation
+│           ├── googleOAuth/       # GoogleOAuthService — auth URL + code exchange
+│           ├── webSearch/         # TavilyWebSearchService
 │           ├── tools/
-│           │   ├── calendarRead.tool.ts       # [working]
-│           │   ├── calendarWrite.tool.ts      # [working]
-│           │   ├── gmailSearchEmails.tool.ts  # [working]
-│           │   ├── gmailCreateDraft.tool.ts   # [working]
-│           │   ├── storeUserMemory.tool.ts    # [working]
-│           │   ├── retrieveUserMemory.tool.ts # [working]
-│           │   ├── createTodoItem.ts          # [working]
-│           │   ├── retrieveTodoItems.ts       # [working]
-│           │   └── webSearch.tool.ts          # [working] — Tavily
-│           ├── toolRegistry.concrete.ts       # [working]
-│           ├── jarvisConfig/      # CachedJarvisConfigRepo (Redis + DB) [working]
-│           ├── reminder/          # CalendarCrawler, DailySummaryCrawler, NotificationRunner [working]
-│           └── sqlDB/             # DrizzleSqlDB + all repos [working] — adds evaluationLogs, scheduledNotifications
+│           │   ├── calendarRead.tool.ts       # List events by date range + search
+│           │   ├── calendarWrite.tool.ts      # Create / update / delete calendar events
+│           │   ├── gmailSearchEmails.tool.ts  # Gmail search, returns metadata
+│           │   ├── gmailCreateDraft.tool.ts   # Create draft (not auto-sent), threading support
+│           │   ├── storeUserMemory.tool.ts    # Enrich → embed → upsert Pinecone + DB
+│           │   ├── retrieveUserMemory.tool.ts # Semantic search, score ≥ 0.75, updates lastAccessed
+│           │   ├── createTodoItem.ts          # Create todo + auto-schedule reminder notification
+│           │   ├── retrieveTodoItems.ts       # List todos by status/priority
+│           │   └── webSearch.tool.ts          # Tavily web search, up to 5 results
+│           ├── toolRegistry.concrete.ts       # Map-based registry
+│           ├── jarvisConfig/      # CachedJarvisConfigRepo — Redis + DB
+│           ├── reminder/
+│           │   ├── calendarCrawler.ts         # Polls calendar per user, schedules notifications
+│           │   ├── dailySummaryCrawler.ts      # Morning agenda at wake-up hour
+│           │   └── notificationRunner.ts      # Dispatches due notifications via Telegram
+│           └── sqlDB/             # DrizzleSqlDB + 11 repositories
 │
 └── helpers/
-    ├── enums/
-    │   ├── toolType.enum.ts
-    │   ├── messageRole.enum.ts
-    │   ├── statuses.enum.ts
-    │   ├── personalities.enum.ts
-    │   └── jarvisConfig.enum.ts
+    ├── enums/                     # TOOL_TYPE, PERSONALITIES, MESSAGE_ROLE, USER_STATUSES,
+    │                              # CONVERSATION_STATUSES, JARVIS_CONFIG
     ├── errors/
     │   ├── calendarNotConnected.error.ts
     │   └── gmailNotConnected.error.ts
-    ├── time/dateTime.ts
-    └── uuid.ts
+    ├── time/dateTime.ts           # newCurrentUTCEpoch() — seconds, not ms
+    └── uuid.ts                    # newUuid() — v4
 ```
 
 ---
 
-## Conversation flow
+## HTTP API
 
-### Commands
+Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
-| Command    | Behavior |
-| ---------- | -------- |
-| `/start`   | Welcome message, hints at `/setup` |
-| `/new`     | Clears active conversation ID (starts fresh) |
-| `/history` | Replies with last 10 messages of the current conversation |
-| `/setup`   | Launches 6-question personality quiz (a/b inline), then asks wake-up hour, saves `user_profiles`, presents Google OAuth link via InlineKeyboard |
-| `/allow <chatId>` | Admin only — adds a Telegram chat ID to `allowed_telegram_ids` |
-| `/revoke <chatId>` | Admin only — removes a Telegram chat ID from `allowed_telegram_ids` |
-| `/code <auth_code>` | Exchanges a Google OAuth authorization code for tokens, stored in `google_oauth_tokens` |
-| `/speech <message>` | Sends message through `chat()`, synthesizes the reply via `OpenAITTS`, returns an OGG voice message; falls back to text if TTS fails |
-| _(voice message)_ | Download OGG from Telegram → Whisper transcription → `voiceChat()` → TTS reply as voice; falls back to text if TTS fails |
-| _(photo message)_ | Download highest-res PhotoSize → base64 data URL → `chat()` with vision input |
+| Method | Route | Auth | Purpose |
+| ------ | ----- | ---- | ------- |
+| `POST` | `/auth/register` | None | Create account; returns `{ userId }` |
+| `POST` | `/auth/login` | None | Returns `{ token, expiresAtEpoch, userId }` |
+| `GET`  | `/auth/google` | Bearer JWT | Returns Google OAuth consent URL |
+| `GET`  | `/api/auth/google/calendar/callback` | `?code=&state=` | OAuth callback — stores tokens |
 
-### Normal message flow
+---
+
+## Telegram commands
+
+| Command | Behavior |
+| ------- | -------- |
+| `/start` | Welcome; redirects to `/auth` if not logged in |
+| `/auth <token>` | Links JWT to this Telegram chat; persists to `telegram_sessions` |
+| `/logout` | Deletes session from DB + cache; invalidates Telegram access immediately |
+| `/new` | Clears active conversation ID (starts fresh thread) |
+| `/history` | Shows last 10 messages of the current conversation |
+| `/setup` | 6-question personality quiz (a/b), then wake-up hour, then Google OAuth link |
+| `/code <auth_code>` | Manual fallback — exchanges Google OAuth code for tokens |
+| `/speech <message>` | Chat → TTS → returns OGG voice reply; text fallback if TTS fails |
+| _(voice message)_ | Whisper transcription → chat → TTS reply; text fallback |
+| _(photo message)_ | Base64 → vision chat |
+
+---
+
+## Normal message flow
 
 ```
-Telegram message (text or photo)
+Telegram message (text / photo / voice)
       │
       ▼
-TelegramAssistantHandler.on("message:text" | "message:photo")
-  → isAllowed(chatId) — checks allowed_telegram_ids; rejects with "not authorized" if not found
-  → resolveUserId(chatId) — UUIDv5(chatId, TELEGRAM_NS)
-  → ensureUserProfile(userId, chatId) — creates/backfills user_profiles row if needed
-  photo path: download highest-res PhotoSize → base64 data URL
+TelegramAssistantHandler
+  → ensureAuthenticated(chatId) — in-memory cache → telegram_sessions DB → JWT expiry
+  → ensureUserProfile(userId, chatId)
       │
       ▼
 AssistantUseCaseImpl.chat()
-  1. Create conversation if new → IConversationDB
-  2. Parallel batch (all concurrent):
-       - findByConversationId (prior history only — user INSERT not yet visible)
-       - searchRelevantMemories (embed query → Pinecone, score ≥ 0.75)
-       - jarvisConfigRepo.get() (Redis → DB)
-       - userProfileRepo.findByUserId()
-       - conversationRepo.findById()
-       - messageRepo.create() (persists user message)
-  3. Compression check: if uncompressed token estimate > 80k OR flaggedForCompression
-       - summarise oldest messages via ITextGenerator (gpt-4o-mini)
-       - upsertSummary + markCompressed (concurrent)
-       - sliding window = tail 20 uncompressed messages
-  4. Build sliding window: [summary message?] + buildOrchestratorHistory(recentMessages)
-  5. Build system prompt: base + personalities + datetime + relevant memories + reasoning instructions
-  6. Push current user message (+ optional imageBase64Url) onto sliding window
-  7. Agentic loop up to maxRounds:
-       a. Call ILLMOrchestrator
-       b. If no tool calls → capture finalReply, break
-       c. Execute all tool calls in parallel (single retry on failure)
-       d. Persist ASSISTANT_TOOL_CALL + all TOOL results (concurrent)
+  1. Create conversation if new
+  2. Parallel batch:
+       - prior message history
+       - semantic memory search (embed → Pinecone, score ≥ 0.75)
+       - jarvis_config (Redis → DB)
+       - user_profiles (personalities)
+       - persist user message
+  3. Compression check: if uncompressed tokens > 80k or flagged
+       - LLM-summarise oldest messages
+       - upsertSummary + markCompressed
+  4. Build sliding window: [summary?] + recent messages
+  5. Build system prompt: base + personalities + datetime + memories + reasoning instructions
+  6. Agentic tool loop (up to maxToolRounds, default 10):
+       a. Call OpenAIOrchestrator
+       b. No tool calls → finalReply, break
+       c. Execute all tool calls in parallel (single retry on transient failure)
+       d. Persist ASSISTANT_TOOL_CALL + TOOL results
        e. Push results onto sliding window
-  8. Persist assistant reply → IMessageDB
-  9. setImmediate (non-blocking post-processing):
-       - Write evaluation_logs row (system prompt hash, memories, tool calls, token usage)
-       - Detect implicit signal on previous turn's log (correction / repeat / clarification)
-       - Extract facts from last 4 messages → embed + upsert to Pinecone + user_memories
-       - Update conversations.intent via ITextGenerator
-       - Flag conversation for compression if post-turn token estimate > 70k
- 10. Return IChatResponse { conversationId, messageId, reply, toolsUsed }
+  7. Persist assistant reply
+  8. setImmediate post-processing (non-blocking):
+       - Write evaluation_logs (prompt hash, memories, tool calls, token usage)
+       - Detect implicit signal on previous turn (correction / repeat / clarification)
+       - Extract facts from last 4 messages → embed → upsert Pinecone + user_memories
+       - Update conversations.intent
+       - Flag for compression if tokens > 70k
+  9. Return { conversationId, messageId, reply, toolsUsed }
 ```
 
 ---
 
 ## Reminder system
 
-Three background workers start automatically (wired in `telegramCli.ts`). They loop over all users from `user_profiles`. Users without a `telegram_chat_id` (i.e. no profile yet) are skipped or marked failed.
+Three background workers start automatically in `telegramCli.ts`. All intervals and offsets are configurable via env vars.
 
 ### CalendarCrawler
-Runs every 30 minutes. Loops all users in parallel. Looks 24 hours ahead per user, creates a `scheduled_notifications` row for each upcoming calendar event at `eventStart - CALENDAR_REMINDER_OFFSET_MINS` (default 30). Deduplicates by `sourceId` (Google event ID).
+Runs every `CALENDAR_CRAWL_INTERVAL_MINS` (default 30). Scans `CALENDAR_LOOK_AHEAD_HOURS` (default 24) ahead per user. Schedules a notification at `eventStart − CALENDAR_REMINDER_OFFSET_MINS` (default 30). Deduplicates by Google event ID.
 
 ### DailySummaryCrawler
-Runs every 5 minutes. Loops all users in parallel. Fires once per day per user at their configured wake-up hour (set during `/setup`). Fetches that day's calendar events and sends a morning agenda via Telegram to their `telegram_chat_id`. Deduplicates by `daily_summary_<userId>_<date>`.
+Runs every 5 minutes. Fires once per day per user at their wake-up hour (configured in `/setup`). Fetches that day's calendar events and sends a morning agenda to their Telegram chat. Deduplicates by `daily_summary_<userId>_<date>`.
 
 ### NotificationRunner
-Polls `scheduled_notifications` every 60 seconds. Fetches due rows, batch-loads the relevant user profiles, then sends each via Telegram to the user's `telegram_chat_id`. Marks rows `sent` on success, `failed` on missing profile or send error.
+Polls `scheduled_notifications` every `NOTIFICATION_POLL_INTERVAL_SECS` (default 60). Fetches due rows, resolves Telegram chat IDs from `user_profiles`, sends via Telegram. Marks rows `sent` or `failed`.
+
+---
+
+## Database schema
+
+Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run db:generate && npm run db:migrate` after changes.
+
+| Table | Purpose |
+| ----- | ------- |
+| `users` | Account record — hashed password, email, status |
+| `telegram_sessions` | Links Telegram chat ID → userId with JWT expiry |
+| `conversations` | Per-user threads — summary, intent, flagged_for_compression |
+| `messages` | All turns (user / assistant / tool) — compressed_at_epoch |
+| `jarvis_config` | Singleton — system prompt, max tool rounds |
+| `user_memories` | RAG store — content, enriched content, category, Pinecone ID |
+| `google_oauth_tokens` | Per-user OAuth tokens for Calendar + Gmail |
+| `todo_items` | Todos — title, description, deadline (epoch), priority, status |
+| `user_profiles` | Per-user personality traits, wake-up hour, telegram_chat_id |
+| `evaluation_logs` | Per-turn log — prompt hash, memories injected, tool calls, token usage, feedback signals |
+| `scheduled_notifications` | Reminder queue — fire_at_epoch, status (pending/sent/failed), sourceId for deduplication |
 
 ---
 
@@ -188,40 +213,11 @@ Polls `scheduled_notifications` every 60 seconds. Fetches due rows, batch-loads 
 | Item | Note |
 | ---- | ---- |
 | Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
-| **dream** | End-of-day job that sweeps the day's conversation history, extracts and consolidates personal facts, and upserts them into the user memory store — building a richer personal profile over time without requiring the user to explicitly say "remember this" |
-| **evaluate** (explicit feedback) | Per-turn `evaluation_logs` rows are written (system prompt hash, memories injected, tool calls, token usage, implicit signal detection). Explicit feedback — user rating or correction via a bot command — is not yet implemented |
-
----
-
-## Database schema
-
-Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run db:generate && npm run db:migrate` after changes.
-
-| Table                 | Purpose                                                             |
-| --------------------- | ------------------------------------------------------------------- |
-| `users`               | User record — personalities used to personalise system prompt       |
-| `conversations`       | Per-user conversation threads — adds `summary`, `intent`, `flagged_for_compression` |
-| `messages`            | All messages (user/assistant/tool) within a conversation — adds `compressed_at_epoch` |
-| `jarvis_config`       | Singleton — stores system prompt and max tool rounds                |
-| `user_memories`       | RAG memory store — content, enriched content, category, Pinecone ID |
-| `google_oauth_tokens` | Per-user Google OAuth tokens for Calendar + Gmail                   |
-| `todo_items`          | To-do list — title, description, deadline (epoch), priority, status |
-| `user_profiles`       | Per-user personality traits, wake-up hour, and `telegram_chat_id` (set via `/setup`) |
-| `allowed_telegram_ids` | Allowlist — only chat IDs in this table can interact with the bot; admin-managed via `/allow` / `/revoke` |
-| `evaluation_logs`     | Per-turn evaluation log — system prompt hash, memories injected, tool calls, token usage, feedback signals |
-| `scheduled_notifications` | Reminder queue — title, body, fire-at epoch, status (pending/sent/failed), sourceId for deduplication |
-
----
-
-## Google OAuth setup
-
-An OAuth callback HTTP server runs on port 3000 (configurable via `OAUTH_CALLBACK_PORT`). The recommended flow is:
-
-1. Run `/setup` in Telegram — after the personality quiz it presents a "Connect Google" button that opens the OAuth consent URL.
-2. After authorizing, Google redirects to `GOOGLE_REDIRECT_URI` (your port-3000 server). If the redirect page loads, tokens are stored automatically.
-3. If the redirect page doesn't load, copy the `code` query parameter from the redirect URL and send `/code <value>` in Telegram — the bot exchanges it for tokens manually.
-
-Until a token is present, calendar and Gmail tools return `CalendarNotConnectedError` / `GmailNotConnectedError`.
+| Explicit feedback | `evaluation_logs` rows are written with implicit signal detection (correction/repeat/clarification). Explicit user rating via a bot command is not implemented |
+| **dream** | End-of-day job to sweep conversation history, consolidate facts, and upsert them into the memory store — building a richer profile without requiring explicit "remember this" commands |
+| Rate limiting | No rate limiting on HTTP API or tool calls |
+| Structured logging | Uses `console.error/log` only; no log levels or rotation |
+| Tests | No test files |
 
 ---
 
@@ -231,22 +227,19 @@ Until a token is present, calendar and Gmail tools return `CalendarNotConnectedE
 # 1. Install dependencies
 npm install
 
-# 2. Copy and fill in environment variables (set BOT_ADMIN_TELEGRAM_ID)
+# 2. Copy and fill in environment variables
 cp .env.example .env
 
-# 3. Generate and apply DB migrations
-npm run db:generate
+# 3. Apply DB migrations
 npm run db:migrate
 
-# 4. Seed the admin's own chat ID into the allowlist (one-time)
-# psql $DATABASE_URL -c "INSERT INTO allowed_telegram_ids (telegram_chat_id, added_at_epoch) VALUES ('<your_chat_id>', EXTRACT(EPOCH FROM NOW())::integer) ON CONFLICT DO NOTHING;"
-
-# 5. Start Telegram bot
+# 4. Start
 npm run dev
 
-# Other utilities
+# Utilities
+npm run db:generate  # Generate migration from schema changes
+npm run db:migrate   # Apply pending migrations
 npm run db:studio    # Drizzle Studio GUI
-npm run db:push      # Push schema without migration files (dev only)
 npm run build        # Compile to dist/
 ```
 
@@ -254,17 +247,30 @@ npm run build        # Compile to dist/
 
 ## Environment variables
 
-See `.env.example` for the full list.
+See `.env.example` for the full list. Key variables:
 
----
-
-## Querying the database
-
-```bash
-psql $(grep DATABASE_URL .env | cut -d= -f2-)
-# or
-npm run db:studio
-```
+| Variable | Default | Purpose |
+| -------- | ------- | ------- |
+| `DATABASE_URL` | — | PostgreSQL connection string |
+| `REDIS_URL` | — | Redis connection string |
+| `OPENAI_API_KEY` | — | OpenAI API key |
+| `OPENAI_MODEL` | `gpt-4o` | LLM model |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
+| `JWT_SECRET` | — | JWT signing secret (`openssl rand -hex 32`) |
+| `JWT_EXPIRES_IN` | `7d` | Token lifetime |
+| `HTTP_API_PORT` | `4000` | HTTP API port |
+| `CALENDAR_REMINDER_OFFSET_MINS` | `30` | Minutes before event to fire reminder |
+| `CALENDAR_LOOK_AHEAD_HOURS` | `24` | Hours ahead crawler scans for events |
+| `CALENDAR_CRAWL_INTERVAL_MINS` | `30` | How often calendar crawler runs |
+| `NOTIFICATION_POLL_INTERVAL_SECS` | `60` | How often notification runner dispatches |
+| `TODO_REMINDER_OFFSET_HOURS` | `24` | Hours before todo deadline to fire reminder |
+| `PINECONE_API_KEY` | — | Pinecone API key |
+| `PINECONE_INDEX_NAME` | — | Pinecone index name (1536 dims, cosine) |
+| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |
+| `GOOGLE_REDIRECT_URI` | — | Must match Google Cloud Console |
+| `TAVILY_API_KEY` | — | Tavily web search key |
+| `MAX_TOOL_ROUNDS` | `10` | Max agentic tool rounds per chat |
 
 ---
 
@@ -272,14 +278,14 @@ npm run db:studio
 
 ### IDs and timestamps
 
-Never use `crypto.randomUUID()` or `Date.now()` directly — always use the project helpers:
+Never use `crypto.randomUUID()` or `Date.now()` directly:
 
 ```typescript
 import { newUuid } from "../../helpers/uuid";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 ```
 
-All `*_at_epoch` columns store seconds, not milliseconds.
+All `*_at_epoch` columns store **seconds**, not milliseconds.
 
 ### Comments
 
@@ -299,8 +305,6 @@ Only add a comment when the code cannot explain itself: unit conversion mismatch
 2. Create `src/adapters/implementations/output/tools/myTool.tool.ts` implementing `ITool`.
 3. Register it inside the `registryFactory` closure in `AssistantInject.getUseCase()`.
 
-**`ITool` interface:**
-
 ```typescript
 interface ITool {
   definition(): IToolDefinition;
@@ -318,18 +322,27 @@ interface IToolOutput {
 }
 ```
 
-Tools self-validate their own prerequisites. If a required parameter is missing (e.g., an email address for Gmail search), return `{ success: false, error: "..." }` with an actionable message — do not rely on system prompt instructions.
+Tools self-validate their own prerequisites. If a required parameter is missing, return `{ success: false, error: "..." }` with an actionable message — do not rely on system prompt instructions.
 
-**Registry factory pattern:** `registryFactory(userId)` is called on every request to build a fresh `ToolRegistryConcrete` with `userId` injected — this is how tools receive per-request user identity.
+**Registry factory pattern:** `registryFactory(userId)` is called on every request to build a fresh `ToolRegistryConcrete` with `userId` injected.
 
 ---
 
 ### Adding a new DB table
 
-1. `src/adapters/implementations/output/sqlDB/schema.ts` — add `pgTable(...)` definition.
-2. `src/use-cases/interface/output/repository/myThing.repo.ts` — domain type + outbound port interface.
+1. `src/adapters/implementations/output/sqlDB/schema.ts` — add `pgTable(...)`.
+2. `src/use-cases/interface/output/repository/myThing.repo.ts` — domain type + interface.
 3. `src/adapters/implementations/output/sqlDB/repositories/myThing.repo.ts` — Drizzle implementation.
-4. `src/adapters/implementations/output/sqlDB/drizzleSqlDb.adapter.ts` — add property + instantiate in constructor.
+4. `src/adapters/implementations/output/sqlDB/drizzleSqlDb.adapter.ts` — add property + instantiate.
 5. `src/adapters/inject/assistant.di.ts` — pass `sqlDB.myThings` to whatever needs it.
+6. `npm run db:generate && npm run db:migrate`
 
-After step 1: `npm run db:generate && npm run db:migrate`.
+---
+
+## Google OAuth flow
+
+1. `/setup` in Telegram → personality quiz → presents "Connect Google" InlineKeyboard button.
+2. User taps → Google consent → redirects to `GOOGLE_REDIRECT_URI` (HTTP API callback). Tokens stored automatically.
+3. If redirect doesn't load, copy `code` from URL and send `/code <value>` in Telegram.
+
+Until tokens are present, calendar and Gmail tools return `CalendarNotConnectedError` / `GmailNotConnectedError` and the bot reports the service is not connected.

@@ -109,6 +109,14 @@ export class TelegramAssistantHandler {
       }
     });
 
+    bot.command("logout", async (ctx) => {
+      const chatId = ctx.chat.id;
+      await this.telegramSessions.deleteByChatId(String(chatId));
+      this.sessionCache.delete(chatId);
+      this.conversations.delete(chatId);
+      await ctx.reply("Logged out. Your session has been invalidated.");
+    });
+
     bot.command("new", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {

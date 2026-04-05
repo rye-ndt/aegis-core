@@ -5,9 +5,6 @@ import type { ICalendarService } from "../../../../use-cases/interface/output/ca
 import type { IScheduledNotificationDB } from "../../../../use-cases/interface/output/repository/scheduledNotification.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 
-const LOOK_AHEAD_SECONDS = 24 * 3600;
-const CRAWL_INTERVAL_MS = 30 * 60_000;
-
 export class CalendarCrawler {
   private isRunning = false;
 
@@ -16,6 +13,8 @@ export class CalendarCrawler {
     private readonly notificationRepo: IScheduledNotificationDB,
     private readonly userProfileRepo: IUserProfileDB,
     private readonly reminderOffsetSeconds: number,
+    private readonly lookAheadSeconds: number,
+    private readonly crawlIntervalMs: number,
   ) {}
 
   start(): void {
@@ -32,7 +31,7 @@ export class CalendarCrawler {
         .finally(() => {
           this.isRunning = false;
         });
-    }, CRAWL_INTERVAL_MS);
+    }, this.crawlIntervalMs);
   }
 
   private async crawl(): Promise<void> {
@@ -48,7 +47,7 @@ export class CalendarCrawler {
 
   private async crawlForUser(userId: string): Promise<void> {
     const now = newCurrentUTCEpoch();
-    const windowEnd = now + LOOK_AHEAD_SECONDS;
+    const windowEnd = now + this.lookAheadSeconds;
 
     let events;
     try {
