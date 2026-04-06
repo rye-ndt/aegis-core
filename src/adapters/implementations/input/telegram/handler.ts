@@ -7,6 +7,7 @@ import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.in
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { ITextToSpeech } from "../../../../use-cases/interface/output/tts.interface";
+import type { ITextGenerator } from "../../../../use-cases/interface/output/textGenerator.interface";
 import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
 
 interface TraitQuestion {
@@ -69,15 +70,43 @@ export class TelegramAssistantHandler {
     private readonly userProfileRepo: IUserProfileDB,
     private readonly googleOAuthService: GoogleOAuthService,
     private readonly tts: ITextToSpeech,
+    private readonly textGenerator: ITextGenerator,
     private readonly authUseCase: IAuthUseCase,
     private readonly telegramSessions: ITelegramSessionDB,
     private readonly botToken?: string,
   ) {}
 
+  private readonly RATING_KEYBOARD = (messageId: string) =>
+    new InlineKeyboard()
+      .text("⭐", `rate:${messageId}:1`)
+      .text("⭐⭐", `rate:${messageId}:2`)
+      .text("⭐⭐⭐", `rate:${messageId}:3`)
+      .text("⭐⭐⭐⭐", `rate:${messageId}:4`)
+      .text("⭐⭐⭐⭐⭐", `rate:${messageId}:5`);
+
   register(bot: Bot): void {
     bot.catch((err) => {
       console.error("Bot error:", err.message);
       if (err.error) console.error("Cause:", err.error);
+    });
+
+    bot.on("callback_query:data", async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (!data.startsWith("rate:")) return;
+
+      const parts = data.split(":");
+      const messageId = parts[1];
+      const rating = parseInt(parts[2], 10);
+
+      if (!messageId || isNaN(rating) || rating < 1 || rating > 5) return;
+
+      try {
+        await this.assistantUseCase.submitRating(messageId, rating);
+        await ctx.answerCallbackQuery({ text: "Thank you — your gracious feedback has been noted." });
+        await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
+      } catch {
+        await ctx.answerCallbackQuery({ text: "We were unable to record your response. Please try again." });
+      }
     });
 
     bot.command("start", async (ctx) => {
@@ -213,12 +242,14 @@ export class TelegramAssistantHandler {
           await ctx.replyWithVoice(new InputFile(audioBuffer, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
+            await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
           }
         } catch (ttsErr) {
           console.error("TTS synthesis failed:", ttsErr);
           let reply = response.reply;
           if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice unavailable)_`);
+          if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
         }
       } catch (err) {
         console.error("Error handling /speech:", err);
@@ -250,12 +281,14 @@ export class TelegramAssistantHandler {
           await ctx.replyWithVoice(new InputFile(replyAudio, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
+            await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
           }
         } catch (ttsErr) {
           console.error("TTS failed for voice reply:", ttsErr);
           let reply = response.reply;
           if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice reply unavailable)_`);
+          if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
         }
       } catch (err) {
         console.error("Error handling voice message:", err);
@@ -286,6 +319,7 @@ export class TelegramAssistantHandler {
         let reply = response.reply;
         if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
+        if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
       } catch (err) {
         console.error("Error handling photo:", err);
         await ctx.reply("Sorry, I couldn't process that image. Please try again.");
@@ -315,6 +349,7 @@ export class TelegramAssistantHandler {
         let reply = response.reply;
         if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
+        if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
@@ -406,6 +441,19 @@ export class TelegramAssistantHandler {
         },
       );
       return;
+    }
+  }
+
+  private async sendRatingPrompt(ctx: Context, messageId: string, toolsUsed: string[]): Promise<void> {
+    try {
+      const toolContext = toolsUsed.length > 0 ? `Tools used: ${toolsUsed.join(", ")}.` : "";
+      const prompt = await this.textGenerator.generate(
+        `You are the voice of a five-star luxury concierge AI assistant. Your task is to ask the user for feedback on the service just rendered — but do so with elegance, warmth, and restraint, as a world-class concierge would. Never mention numbers, stars, or a rating scale in your message. The rating buttons will appear below your message automatically. Write a single sentence or two at most. Vary your phrasing each time — never repeat the same form. Do not start with "I".`,
+        `The assistant just completed the following for the user. ${toolContext} Compose your feedback invitation now.`,
+      );
+      await ctx.reply(prompt.trim(), { reply_markup: this.RATING_KEYBOARD(messageId) });
+    } catch {
+      // non-critical — swallow silently
     }
   }
 

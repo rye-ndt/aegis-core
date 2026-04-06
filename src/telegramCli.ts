@@ -24,6 +24,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     sqlDB.userProfiles,
     googleOAuthService,
     tts,
+    inject.getTextGenerator(),
     inject.getAuthUseCase(),
     sqlDB.telegramSessions,
     token,

@@ -44,4 +44,6 @@ export interface IAssistantUseCase {
   listConversations(input: IListConversationsInput): Promise<Conversation[]>;
   /** Get the full message history of a conversation */
   getConversation(input: IGetConversationInput): Promise<Message[]>;
+  /** Store an explicit 1–5 rating for the turn identified by messageId */
+  submitRating(messageId: string, rating: number): Promise<void>;
 }

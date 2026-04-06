@@ -39,6 +39,7 @@ export class AssistantInject {
   private _googleOAuthService: GoogleOAuthService | null = null;
   private _authUseCase: IAuthUseCase | null = null;
   private _calendarService: GoogleCalendarService | null = null;
+  private _textGenerator: OpenAITextGenerator | null = null;
   private tts: ITextToSpeech | null = null;
 
   getSqlDB(): DrizzleSqlDB {
@@ -49,6 +50,16 @@ export class AssistantInject {
       });
     }
     return this.sqlDB;
+  }
+
+  getTextGenerator(): OpenAITextGenerator {
+    if (!this._textGenerator) {
+      this._textGenerator = new OpenAITextGenerator(
+        process.env.OPENAI_API_KEY ?? "",
+        "gpt-4o-mini",
+      );
+    }
+    return this._textGenerator;
   }
 
   private getCalendarService(): GoogleCalendarService {
