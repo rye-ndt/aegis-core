@@ -346,6 +346,10 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     return this.messageRepo.findByConversationId(input.conversationId);
   }
 
+  async submitRating(messageId: string, rating: number): Promise<void> {
+    await this.evaluationLogRepo.updateExplicitRating(messageId, rating);
+  }
+
   private async initConversation(input: IChatInput): Promise<string> {
     if (input.conversationId) return input.conversationId;
 

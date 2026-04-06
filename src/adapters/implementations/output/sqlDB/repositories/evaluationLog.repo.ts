@@ -59,4 +59,11 @@ export class DrizzleEvaluationLogRepo implements IEvaluationLogDB {
       .set({ implicitSignal: signal })
       .where(eq(evaluationLogs.id, id));
   }
+
+  async updateExplicitRating(messageId: string, rating: number): Promise<void> {
+    await this.db
+      .update(evaluationLogs)
+      .set({ explicitRating: rating })
+      .where(eq(evaluationLogs.messageId, messageId));
+  }
 }
