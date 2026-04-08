@@ -135,8 +135,8 @@ export class HttpApiServer {
 
     try {
       await this.googleOAuthService.handleCallback(code, userId);
-      res.writeHead(200, { "Content-Type": "text/html" });
-      res.end(`<html><body><h2>Authorization complete.</h2><p>Return to Telegram — you're all set.</p></body></html>`);
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      res.end(`<html><head><meta charset="utf-8"></head><body><h2>Authorization complete.</h2><p>Return to Telegram &mdash; you're all set.</p></body></html>`);
     } catch (err) {
       console.error("OAuth callback error:", err);
       res.writeHead(500);

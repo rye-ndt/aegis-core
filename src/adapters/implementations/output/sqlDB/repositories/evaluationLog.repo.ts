@@ -60,6 +60,13 @@ export class DrizzleEvaluationLogRepo implements IEvaluationLogDB {
       .where(eq(evaluationLogs.id, id));
   }
 
+  async updateOutcomeConfirmed(id: string, confirmed: boolean): Promise<void> {
+    await this.db
+      .update(evaluationLogs)
+      .set({ outcomeConfirmed: confirmed })
+      .where(eq(evaluationLogs.id, id));
+  }
+
   async updateExplicitRating(messageId: string, rating: number): Promise<void> {
     await this.db
       .update(evaluationLogs)

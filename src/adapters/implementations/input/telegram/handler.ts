@@ -63,7 +63,10 @@ interface SetupSession {
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
   private setupSessions = new Map<number, SetupSession>();
-  private sessionCache = new Map<number, { userId: string; expiresAtEpoch: number }>();
+  private sessionCache = new Map<
+    number,
+    { userId: string; expiresAtEpoch: number }
+  >();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
@@ -102,30 +105,43 @@ export class TelegramAssistantHandler {
 
       try {
         await this.assistantUseCase.submitRating(messageId, rating);
-        await ctx.answerCallbackQuery({ text: "Thank you — your gracious feedback has been noted." });
-        await ctx.editMessageReplyMarkup({ reply_markup: new InlineKeyboard() });
+        await ctx.answerCallbackQuery({
+          text: "Thank you — your gracious feedback has been noted.",
+        });
+        await ctx.editMessageReplyMarkup({
+          reply_markup: new InlineKeyboard(),
+        });
       } catch {
-        await ctx.answerCallbackQuery({ text: "We were unable to record your response. Please try again." });
+        await ctx.answerCallbackQuery({
+          text: "We were unable to record your response. Please try again.",
+        });
       }
     });
 
     bot.command("start", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
-        await ctx.reply("JARVIS online.\n\nAuthenticate first: call POST /auth/login to get a token, then send /auth <token> here.");
+        await ctx.reply(
+          "JARVIS online.\n\nAuthenticate first: call POST /auth/login to get a token, then send /auth <token> here.",
+        );
         return;
       }
-      await ctx.reply("JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.");
+      await ctx.reply(
+        "JARVIS online. Send me a message.\n\nRun /setup to personalize your experience.",
+      );
     });
 
     bot.command("auth", async (ctx) => {
       const token = ctx.match?.trim();
       if (!token) {
-        await ctx.reply("Usage: /auth <your_token>\n\nGet a token via POST /auth/login.");
+        await ctx.reply(
+          "Usage: /auth <your_token>\n\nGet a token via POST /auth/login.",
+        );
         return;
       }
       try {
-        const { userId, expiresAtEpoch } = await this.authUseCase.validateToken(token);
+        const { userId, expiresAtEpoch } =
+          await this.authUseCase.validateToken(token);
         await this.telegramSessions.upsert({
           telegramChatId: String(ctx.chat.id),
           userId,
@@ -134,7 +150,9 @@ export class TelegramAssistantHandler {
         this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
         await ctx.reply("Authenticated. You can now use JARVIS.");
       } catch {
-        await ctx.reply("Invalid or expired token. Get a fresh token via POST /auth/login.");
+        await ctx.reply(
+          "Invalid or expired token. Get a fresh token via POST /auth/login.",
+        );
       }
     });
 
@@ -195,26 +213,16 @@ export class TelegramAssistantHandler {
       );
     });
 
-    bot.command("code", async (ctx) => {
+    bot.command("google", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
         await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
-      const code = ctx.match?.trim();
-      if (!code) {
-        return ctx.reply(
-          "Usage: /code <authorization_code>\n\nCopy the `code` value from the redirect URL after authorizing Google.",
-        );
-      }
-      try {
-        await this.googleOAuthService.handleCallback(code, session.userId);
-        await ctx.reply("Google account connected. Calendar and Gmail are ready.");
-      } catch {
-        await ctx.reply(
-          "Authorization failed. The code may be expired — use /setup to get a fresh link.",
-        );
-      }
+      const authUrl = this.googleOAuthService.generateAuthUrl(session.userId);
+      await ctx.reply("Tap the button below to connect Google Calendar and Gmail.", {
+        reply_markup: new InlineKeyboard().url("Connect Google", authUrl),
+      });
     });
 
     bot.command("speech", async (ctx) => {
@@ -238,18 +246,30 @@ export class TelegramAssistantHandler {
         });
         this.conversations.set(ctx.chat.id, response.conversationId);
         try {
-          const { audioBuffer } = await this.tts.synthesize({ text: response.reply });
+          const { audioBuffer } = await this.tts.synthesize({
+            text: response.reply,
+          });
           await ctx.replyWithVoice(new InputFile(audioBuffer, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
-            await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+            await this.sendRatingPrompt(
+              ctx,
+              response.messageId,
+              response.toolsUsed,
+            );
           }
         } catch (ttsErr) {
           console.error("TTS synthesis failed:", ttsErr);
           let reply = response.reply;
-          if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+          if (response.toolsUsed.length > 0)
+            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice unavailable)_`);
-          if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+          if (response.toolsUsed.length > 0)
+            await this.sendRatingPrompt(
+              ctx,
+              response.messageId,
+              response.toolsUsed,
+            );
         }
       } catch (err) {
         console.error("Error handling /speech:", err);
@@ -277,22 +297,36 @@ export class TelegramAssistantHandler {
         });
         this.conversations.set(ctx.chat.id, response.conversationId);
         try {
-          const { audioBuffer: replyAudio } = await this.tts.synthesize({ text: response.reply });
+          const { audioBuffer: replyAudio } = await this.tts.synthesize({
+            text: response.reply,
+          });
           await ctx.replyWithVoice(new InputFile(replyAudio, "reply.ogg"));
           if (response.toolsUsed.length > 0) {
             await ctx.reply(`[tools: ${response.toolsUsed.join(", ")}]`);
-            await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+            await this.sendRatingPrompt(
+              ctx,
+              response.messageId,
+              response.toolsUsed,
+            );
           }
         } catch (ttsErr) {
           console.error("TTS failed for voice reply:", ttsErr);
           let reply = response.reply;
-          if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+          if (response.toolsUsed.length > 0)
+            reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
           await this.safeSend(ctx, `${reply}\n\n_(voice reply unavailable)_`);
-          if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+          if (response.toolsUsed.length > 0)
+            await this.sendRatingPrompt(
+              ctx,
+              response.messageId,
+              response.toolsUsed,
+            );
         }
       } catch (err) {
         console.error("Error handling voice message:", err);
-        await ctx.reply("Sorry, I couldn't process that voice message. Please try again.");
+        await ctx.reply(
+          "Sorry, I couldn't process that voice message. Please try again.",
+        );
       }
     });
 
@@ -317,12 +351,20 @@ export class TelegramAssistantHandler {
         });
         this.conversations.set(ctx.chat.id, response.conversationId);
         let reply = response.reply;
-        if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+        if (response.toolsUsed.length > 0)
+          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
-        if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+        if (response.toolsUsed.length > 0)
+          await this.sendRatingPrompt(
+            ctx,
+            response.messageId,
+            response.toolsUsed,
+          );
       } catch (err) {
         console.error("Error handling photo:", err);
-        await ctx.reply("Sorry, I couldn't process that image. Please try again.");
+        await ctx.reply(
+          "Sorry, I couldn't process that image. Please try again.",
+        );
       }
     });
 
@@ -347,9 +389,15 @@ export class TelegramAssistantHandler {
         });
         this.conversations.set(ctx.chat.id, response.conversationId);
         let reply = response.reply;
-        if (response.toolsUsed.length > 0) reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
+        if (response.toolsUsed.length > 0)
+          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
         await this.safeSend(ctx, reply);
-        if (response.toolsUsed.length > 0) await this.sendRatingPrompt(ctx, response.messageId, response.toolsUsed);
+        if (response.toolsUsed.length > 0)
+          await this.sendRatingPrompt(
+            ctx,
+            response.messageId,
+            response.toolsUsed,
+          );
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
@@ -357,7 +405,9 @@ export class TelegramAssistantHandler {
     });
   }
 
-  private async ensureAuthenticated(chatId: number): Promise<{ userId: string } | null> {
+  private async ensureAuthenticated(
+    chatId: number,
+  ): Promise<{ userId: string } | null> {
     const now = newCurrentUTCEpoch();
     const cached = this.sessionCache.get(chatId);
     if (cached) {
@@ -372,7 +422,10 @@ export class TelegramAssistantHandler {
       await this.telegramSessions.deleteByChatId(String(chatId));
       return null;
     }
-    this.sessionCache.set(chatId, { userId: session.userId, expiresAtEpoch: session.expiresAtEpoch });
+    this.sessionCache.set(chatId, {
+      userId: session.userId,
+      expiresAtEpoch: session.expiresAtEpoch,
+    });
     return { userId: session.userId };
   }
 
@@ -434,24 +487,28 @@ export class TelegramAssistantHandler {
       this.setupSessions.delete(chatId);
 
       const authUrl = this.googleOAuthService.generateAuthUrl(userId);
-      await ctx.reply(
-        "Profile saved! JARVIS is now tuned to you.\n\nTap the button below to connect Google Calendar and Gmail.\n\nIf the redirect page doesn't load, copy the `code` from the URL and send `/code <value>` here.",
-        {
-          reply_markup: new InlineKeyboard().url("Connect Google", authUrl),
-        },
-      );
+      await ctx.reply("Profile saved! JARVIS is now tuned to you.\n\nTap the button below to connect Google Calendar and Gmail.", {
+        reply_markup: new InlineKeyboard().url("Connect Google", authUrl),
+      });
       return;
     }
   }
 
-  private async sendRatingPrompt(ctx: Context, messageId: string, toolsUsed: string[]): Promise<void> {
+  private async sendRatingPrompt(
+    ctx: Context,
+    messageId: string,
+    toolsUsed: string[],
+  ): Promise<void> {
     try {
-      const toolContext = toolsUsed.length > 0 ? `Tools used: ${toolsUsed.join(", ")}.` : "";
+      const toolContext =
+        toolsUsed.length > 0 ? `Tools used: ${toolsUsed.join(", ")}.` : "";
       const prompt = await this.textGenerator.generate(
         `You are the voice of a five-star luxury concierge AI assistant. Your task is to ask the user for feedback on the service just rendered — but do so with elegance, warmth, and restraint, as a world-class concierge would. Never mention numbers, stars, or a rating scale in your message. The rating buttons will appear below your message automatically. Write a single sentence or two at most. Vary your phrasing each time — never repeat the same form. Do not start with "I".`,
         `The assistant just completed the following for the user. ${toolContext} Compose your feedback invitation now.`,
       );
-      await ctx.reply(prompt.trim(), { reply_markup: this.RATING_KEYBOARD(messageId) });
+      await ctx.reply(prompt.trim(), {
+        reply_markup: this.RATING_KEYBOARD(messageId),
+      });
     } catch {
       // non-critical — swallow silently
     }
@@ -491,7 +548,10 @@ export class TelegramAssistantHandler {
     return `data:image/jpeg;base64,${base64}`;
   }
 
-  private async ensureUserProfile(userId: string, chatId: number): Promise<void> {
+  private async ensureUserProfile(
+    userId: string,
+    chatId: number,
+  ): Promise<void> {
     const existing = await this.userProfileRepo.findByUserId(userId);
     if (!existing) {
       await this.userProfileRepo.upsert({

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   Message,
@@ -52,6 +52,34 @@ export class DrizzleMessageRepo implements IMessageDB {
         ),
       )
       .orderBy(messages.createdAtEpoch);
+
+    return rows.map((r) => ({
+      ...r,
+      role: r.role as MESSAGE_ROLE,
+      toolName: r.toolName ? (r.toolName as TOOL_TYPE) : undefined,
+      toolCallId: r.toolCallId ?? undefined,
+      toolCallsJson: r.toolCallsJson ?? undefined,
+      compressedAtEpoch: r.compressedAtEpoch ?? undefined,
+    }));
+  }
+
+  async findAfterEpoch(
+    conversationId: string,
+    afterEpoch: number,
+    limit: number,
+  ): Promise<Message[]> {
+    const rows = await this.db
+      .select()
+      .from(messages)
+      .where(
+        and(
+          eq(messages.conversationId, conversationId),
+          gt(messages.createdAtEpoch, afterEpoch),
+          inArray(messages.role, [MESSAGE_ROLE.USER, MESSAGE_ROLE.ASSISTANT]),
+        ),
+      )
+      .orderBy(asc(messages.createdAtEpoch))
+      .limit(limit);
 
     return rows.map((r) => ({
       ...r,
