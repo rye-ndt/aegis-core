@@ -1,14 +1,26 @@
-# JARVIS — Status
+# JARVIS / Aegis — Status
 
 > Last updated: 2026-04-08
 
 ---
 
-## What it is
+## Vision
+
+The long-term goal is twofold:
+
+1. **Personal AI assistant.** A contextual, persistent assistant available on Telegram (and eventually as a physical device). It manages calendar, tasks, memory, email drafts, and web search — learning the user's preferences over time through implicit and explicit feedback.
+
+2. **Curated RLHF dataset network.** Every interaction produces a structured evaluation record (agent action + tool calls + reasoning + feedback signal). Users opt-in to contribute selected records on-chain. Contributors earn AGS tokens. AI labs and researchers pay AGS to access the dataset. This creates a self-sustaining flywheel: better data → better models → better assistant → more users → more data.
+
+The blockchain layer (Avalanche, ERC-4337 smart accounts, session keys) serves two purposes: seamless UX for non-crypto users, and verifiable provenance for every data contribution.
+
+---
+
+## What it is (current implementation)
 
 A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users interact via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Authentication is JWT-based — users register/login via HTTP API, then link their Telegram session with `/auth <token>`. Every component is behind an interface so adapters are swappable without touching business logic.
 
-**Web3 Integration:** JARVIS incorporates a blockchain-based reward system (Avalanche Fuji testnet). Users are provisioned an ERC-4337 Smart Account via a `SessionKeySmartAccountFactory` upon registration. Through Session Keys, the JARVIS bot is authorized to act on the user's behalf to submit data contributions on-chain and claim $AGS (Aegis) token rewards seamlessly, without requiring manual transaction signing from the user.
+**Web3 Integration:** Smart contracts are deployed on Avalanche Fuji testnet. Users will be provisioned an ERC-4337 Smart Account via `SessionKeySmartAccountFactory` on registration, with the bot wallet authorized via session key to submit contributions and claim AGS rewards on their behalf — no manual transaction signing required. TypeScript integration is pending (see mismatches below).
 
 ---
 
@@ -251,6 +263,26 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | Rate limiting      | No rate limiting on HTTP API or tool calls                                                                                                                                                                |
 | Structured logging | Uses `console.error/log` only; no log levels or rotation                                                                                                                                                  |
 | Tests              | No test files                                                                                                                                                                                             |
+| **Data marketplace** | Vision includes charging external parties (AI labs, researchers) AGS tokens to access the curated dataset — not designed or implemented |
+| **Federated / distributed training** | Vision includes using contributed data in a federated learning program or distributed model — architecture not defined |
+| **User contribution selection UI** | User should be able to browse their own evaluation_logs and cherry-pick which records to contribute — not implemented |
+| **On-chain data linkage** | What exactly gets stored on-chain per contribution (hash scheme, off-chain pointer) is not decided; current design uses `sha256(userId+actionId+feedbackScore+timestamp)` as a placeholder |
+| **Physical hardware** | Vision includes a physical body + peripherals form factor — not in scope for current implementation |
+
+---
+
+## Doc–code mismatches (as of 2026-04-08)
+
+These items are described in this document but do not yet exist in the codebase:
+
+| Claimed in docs | Reality |
+| --------------- | ------- |
+| `user_profiles.smart_account_address`, `user_profiles.eoa_address` | Columns missing from `schema.ts`; DB migration not run |
+| `evaluation_logs.contributed_at_epoch`, `contribution_tx_hash`, `contribution_data_hash` | Columns missing from `schema.ts`; DB migration not run |
+| `src/adapters/implementations/output/tools/contributeData.tool.ts` | File does not exist |
+| `src/adapters/implementations/input/blockchain/` | Directory does not exist |
+| `src/adapters/implementations/output/blockchain/` | Directory does not exist |
+| `auth.usecase.ts` calls `SessionKeySmartAccountFactory` on register | Call is not present; registration creates a DB user only |
 
 ---
 
