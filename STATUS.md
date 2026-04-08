@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-06
+> Last updated: 2026-04-08
 
 ---
 
@@ -8,24 +8,27 @@
 
 A multi-user AI assistant built in TypeScript with Hexagonal Architecture. Users interact via Telegram; JARVIS reasons over conversation history, calls tools as needed, and returns a reply. Authentication is JWT-based — users register/login via HTTP API, then link their Telegram session with `/auth <token>`. Every component is behind an interface so adapters are swappable without touching business logic.
 
+**Web3 Integration:** JARVIS incorporates a blockchain-based reward system (Avalanche Fuji testnet). Users are provisioned an ERC-4337 Smart Account via a `SessionKeySmartAccountFactory` upon registration. Through Session Keys, the JARVIS bot is authorized to act on the user's behalf to submit data contributions on-chain and claim $AGS (Aegis) token rewards seamlessly, without requiring manual transaction signing from the user.
+
 ---
 
 ## Tech stack
 
-| Layer          | Choice                                         |
-| -------------- | ---------------------------------------------- |
-| Language       | TypeScript 5.3, Node.js, strict mode           |
-| Interface      | Telegram (`grammy`) + HTTP API (native `http`) |
-| ORM            | Drizzle ORM + PostgreSQL (`pg` driver)         |
-| Config cache   | Redis (`ioredis`) — JarvisConfig system prompt |
+| Layer          | Choice                                                                |
+| -------------- | --------------------------------------------------------------------- |
+| Language       | TypeScript 5.3, Node.js, strict mode                                  |
+| Interface      | Telegram (`grammy`) + HTTP API (native `http`)                        |
+| ORM            | Drizzle ORM + PostgreSQL (`pg` driver)                                |
+| Config cache   | Redis (`ioredis`) — JarvisConfig system prompt                        |
 | LLM            | OpenAI chat completions + tool use (`gpt-4o`) — usage tokens surfaced |
-| Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format            |
-| Speech-to-text | OpenAI Whisper `whisper-1`                     |
-| Vision         | OpenAI gpt-4o vision (base64 data URL)         |
-| Validation     | Zod 4.3.6                                      |
-| DI             | Manual container in `src/adapters/inject/`     |
-| Vector DB      | Pinecone (`@pinecone-database/pinecone`)       |
-| Web search     | Tavily (`@tavily/core`)                        |
+| Text-to-speech | OpenAI TTS `tts-1`, opus/ogg format                                   |
+| Speech-to-text | OpenAI Whisper `whisper-1`                                            |
+| Vision         | OpenAI gpt-4o vision (base64 data URL)                                |
+| Validation     | Zod 4.3.6                                                             |
+| DI             | Manual container in `src/adapters/inject/`                            |
+| Vector DB      | Pinecone (`@pinecone-database/pinecone`)                              |
+| Web search     | Tavily (`@tavily/core`)                                               |
+| **Blockchain** | Avalanche Fuji Testnet, ERC-4337, Session Keys                        |
 
 ---
 
@@ -37,7 +40,7 @@ Hexagonal (Ports & Adapters). Use cases depend only on interfaces; adapters neve
 
 ## Project structure
 
-```
+```text
 src/
 ├── telegramCli.ts              # Entry point (npm run dev)
 │                               # Boots HTTP API, Telegram bot, NotificationRunner,
@@ -46,7 +49,7 @@ src/
 ├── use-cases/
 │   ├── implementations/
 │   │   ├── assistant.usecase.ts    # chat(), voiceChat(), listConversations(), getConversation()
-│   │   └── auth.usecase.ts         # register(), login(), validateToken()
+│   │   └── auth.usecase.ts         # register() [WIP: Account Factory call], login(), validateToken()
 │   └── interface/
 │       ├── input/                  # IAssistantUseCase, IAuthUseCase
 │       └── output/                 # All outbound ports (see list below)
@@ -58,7 +61,8 @@ src/
 │   └── implementations/
 │       ├── input/
 │       │   ├── http/              # HttpApiServer — 4 routes
-│       │   └── telegram/          # TelegramBot (INotificationSender), TelegramAssistantHandler
+│       │   ├── telegram/          # TelegramBot (INotificationSender), TelegramAssistantHandler
+│       │   └── blockchain/        # [WIP] DataContributed event listeners
 │       │
 │       └── output/
 │           ├── orchestrator/      # OpenAIOrchestrator — tool calling + vision
@@ -71,6 +75,7 @@ src/
 │           ├── mail/              # GoogleGmailService — search + draft creation
 │           ├── googleOAuth/       # GoogleOAuthService — auth URL + code exchange
 │           ├── webSearch/         # TavilyWebSearchService
+│           ├── blockchain/        # [WIP] Web3 Provider/Signer integrations
 │           ├── tools/
 │           │   ├── calendarRead.tool.ts       # List events by date range + search
 │           │   ├── calendarWrite.tool.ts      # Create / update / delete calendar events
@@ -80,7 +85,8 @@ src/
 │           │   ├── retrieveUserMemory.tool.ts # Semantic search, score ≥ 0.75, updates lastAccessed
 │           │   ├── createTodoItem.ts          # Create todo + auto-schedule reminder notification
 │           │   ├── retrieveTodoItems.ts       # List todos by status/priority
-│           │   └── webSearch.tool.ts          # Tavily web search, up to 5 results
+│           │   ├── webSearch.tool.ts          # Tavily web search, up to 5 results
+│           │   └── contributeData.tool.ts     # [WIP] Bot claims reward via Session Key
 │           ├── toolRegistry.concrete.ts       # Map-based registry
 │           ├── jarvisConfig/      # CachedJarvisConfigRepo — Redis + DB
 │           ├── reminder/
@@ -101,39 +107,62 @@ src/
 
 ---
 
+## Web3 & Rewards System (Avalanche Fuji)
+
+The system utilizes ERC-4337 Account Abstraction and Session Keys to allow the bot to operate on the user's behalf securely.
+
+### Contract Registry
+
+- **AegisToken (Proxy):** `0x8839ecFB1BefD232d5Fcf55C223BDD78bc3A2f69`
+- **RewardController (Proxy):** `0x519092C2185E4209B43d3ea40cC34D39978073A7`
+- **SessionKeyFactory:** `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443`
+- **SessionKeyManager:** `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291`
+- **ERC-4337 EntryPoint:** `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`
+
+### Interaction Flow
+
+1. **Registration:** `auth.usecase.ts` calls `SessionKeySmartAccountFactory`. A smart account is deployed for the user, and the `SessionKeyManager` is configured to grant JARVIS's bot wallet a session key.
+2. **Contribution:** User issues `/contribute`. JARVIS computes `sha256(userId + actionId + feedbackScore + timestamp)`.
+3. **Execution:** Bot uses its session key to call `RewardController.claimReward(userAddress, dataHash)`.
+4. **Reward:** RewardController mints 10 AGS to the user's smart account (max 5/day).
+5. **Sync:** An event listener detects `DataContributed` and updates the DB.
+
+---
+
 ## HTTP API
 
 Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
-| Method | Route | Auth | Purpose |
-| ------ | ----- | ---- | ------- |
-| `POST` | `/auth/register` | None | Create account; returns `{ userId }` |
-| `POST` | `/auth/login` | None | Returns `{ token, expiresAtEpoch, userId }` |
-| `GET`  | `/auth/google` | Bearer JWT | Returns Google OAuth consent URL |
-| `GET`  | `/api/auth/google/calendar/callback` | `?code=&state=` | OAuth callback — stores tokens |
+| Method | Route                                | Auth            | Purpose                                                                |
+| ------ | ------------------------------------ | --------------- | ---------------------------------------------------------------------- |
+| `POST` | `/auth/register`                     | None            | Create account; returns `{ userId }`. **[WIP: Deploys Smart Account]** |
+| `POST` | `/auth/login`                        | None            | Returns `{ token, expiresAtEpoch, userId }`                            |
+| `GET`  | `/auth/google`                       | Bearer JWT      | Returns Google OAuth consent URL                                       |
+| `GET`  | `/api/auth/google/calendar/callback` | `?code=&state=` | OAuth callback — stores tokens                                         |
 
 ---
 
 ## Telegram commands
 
-| Command | Behavior |
-| ------- | -------- |
-| `/start` | Welcome; redirects to `/auth` if not logged in |
-| `/auth <token>` | Links JWT to this Telegram chat; persists to `telegram_sessions` |
-| `/logout` | Deletes session from DB + cache; invalidates Telegram access immediately |
-| `/new` | Clears active conversation ID (starts fresh thread) |
-| `/history` | Shows last 10 messages of the current conversation |
-| `/setup` | 6-question personality quiz (a/b), then wake-up hour, then Google OAuth link |
-| `/code <auth_code>` | Manual fallback — exchanges Google OAuth code for tokens |
-| `/speech <message>` | Chat → TTS → returns OGG voice reply; text fallback if TTS fails |
-| _(voice message)_ | Whisper transcription → chat → TTS reply; text fallback |
-| _(photo message)_ | Base64 → vision chat |
+| Command             | Behavior                                                                     |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `/start`            | Welcome; redirects to `/auth` if not logged in                               |
+| `/auth <token>`     | Links JWT to this Telegram chat; persists to `telegram_sessions`             |
+| `/logout`           | Deletes session from DB + cache; invalidates Telegram access immediately     |
+| `/new`              | Clears active conversation ID (starts fresh thread)                          |
+| `/history`          | Shows last 10 messages of the current conversation                           |
+| `/setup`            | 6-question personality quiz (a/b), then wake-up hour, then Google OAuth link |
+| `/code <auth_code>` | Manual fallback — exchanges Google OAuth code for tokens                     |
+| `/speech <message>` | Chat → TTS → returns OGG voice reply; text fallback if TTS fails             |
+| `/contribute`       | **[WIP]** Triggers on-chain data contribution and AGS reward claim           |
+| _(voice message)_   | Whisper transcription → chat → TTS reply; text fallback                      |
+| _(photo message)_   | Base64 → vision chat                                                         |
 
 ---
 
 ## Normal message flow
 
-```
+```text
 Telegram message (text / photo / voice)
       │
       ▼
@@ -178,12 +207,15 @@ AssistantUseCaseImpl.chat()
 Three background workers start automatically in `telegramCli.ts`. All intervals and offsets are configurable via env vars.
 
 ### CalendarCrawler
+
 Runs every `CALENDAR_CRAWL_INTERVAL_MINS` (default 30). Scans `CALENDAR_LOOK_AHEAD_HOURS` (default 24) ahead per user. Schedules a notification at `eventStart − CALENDAR_REMINDER_OFFSET_MINS` (default 30). Deduplicates by Google event ID.
 
 ### DailySummaryCrawler
+
 Runs every 5 minutes. Fires once per day per user at their wake-up hour (configured in `/setup`). Fetches that day's calendar events and sends a morning agenda to their Telegram chat. Deduplicates by `daily_summary_<userId>_<date>`.
 
 ### NotificationRunner
+
 Polls `scheduled_notifications` every `NOTIFICATION_POLL_INTERVAL_SECS` (default 60). Fetches due rows, resolves Telegram chat IDs from `user_profiles`, sends via Telegram. Marks rows `sent` or `failed`.
 
 ---
@@ -192,32 +224,33 @@ Polls `scheduled_notifications` every `NOTIFICATION_POLL_INTERVAL_SECS` (default
 
 Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run db:generate && npm run db:migrate` after changes.
 
-| Table | Purpose |
-| ----- | ------- |
-| `users` | Account record — hashed password, email, status |
-| `telegram_sessions` | Links Telegram chat ID → userId with JWT expiry |
-| `conversations` | Per-user threads — summary, intent, flagged_for_compression |
-| `messages` | All turns (user / assistant / tool) — compressed_at_epoch |
-| `jarvis_config` | Singleton — system prompt, max tool rounds |
-| `user_memories` | RAG store — content, enriched content, category, Pinecone ID |
-| `google_oauth_tokens` | Per-user OAuth tokens for Calendar + Gmail |
-| `todo_items` | Todos — title, description, deadline (epoch), priority, status |
-| `user_profiles` | Per-user personality traits, wake-up hour, telegram_chat_id |
-| `evaluation_logs` | Per-turn log — prompt hash, memories injected, tool calls, token usage, feedback signals |
-| `scheduled_notifications` | Reminder queue — fire_at_epoch, status (pending/sent/failed), sourceId for deduplication |
+| Table                     | Purpose                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `users`                   | Account record — hashed password, email, status                                                                                                                                |
+| `telegram_sessions`       | Links Telegram chat ID → userId with JWT expiry                                                                                                                                |
+| `conversations`           | Per-user threads — summary, intent, flagged_for_compression                                                                                                                    |
+| `messages`                | All turns (user / assistant / tool) — compressed_at_epoch                                                                                                                      |
+| `jarvis_config`           | Singleton — system prompt, max tool rounds                                                                                                                                     |
+| `user_memories`           | RAG store — content, enriched content, category, Pinecone ID                                                                                                                   |
+| `google_oauth_tokens`     | Per-user OAuth tokens for Calendar + Gmail                                                                                                                                     |
+| `todo_items`              | Todos — title, description, deadline (epoch), priority, status                                                                                                                 |
+| `user_profiles`           | Per-user personality traits, wake-up hour, telegram_chat_id, **`smart_account_address`**, **`eoa_address`**                                                                    |
+| `evaluation_logs`         | Per-turn log — prompt hash, memories injected, tool calls, token usage, feedback signals, **`contributed_at_epoch`**, **`contribution_tx_hash`**, **`contribution_data_hash`** |
+| `scheduled_notifications` | Reminder queue — fire_at_epoch, status (pending/sent/failed), sourceId for deduplication                                                                                       |
 
 ---
 
 ## Not implemented / known limitations
 
-| Item | Note |
-| ---- | ---- |
-| Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
-| Explicit feedback | `evaluation_logs` rows are written; implicit signal detection uses LLM analysis over a configurable window (`FEEDBACK_WINDOW_SIZE`, default 3). Explicit user rating via a bot command is not implemented |
-| **dream** | End-of-day job to sweep conversation history, consolidate facts, and upsert them into the memory store — building a richer profile without requiring explicit "remember this" commands |
-| Rate limiting | No rate limiting on HTTP API or tool calls |
-| Structured logging | Uses `console.error/log` only; no log levels or rotation |
-| Tests | No test files |
+| Item               | Note                                                                                                                                                                                                      |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **WIP Web3**       | Pending: DB migrations, TS integration for Account Factory in `/register`, `/contribute` tool, and `DataContributed` event listener.                                                                      |
+| Image history      | Past image messages stored as `[image]` in DB; image data is not persisted                                                                                                                                |
+| Explicit feedback  | `evaluation_logs` rows are written; implicit signal detection uses LLM analysis over a configurable window (`FEEDBACK_WINDOW_SIZE`, default 3). Explicit user rating via a bot command is not implemented |
+| **dream**          | End-of-day job to sweep conversation history, consolidate facts, and upsert them into the memory store — building a richer profile without requiring explicit "remember this" commands                    |
+| Rate limiting      | No rate limiting on HTTP API or tool calls                                                                                                                                                                |
+| Structured logging | Uses `console.error/log` only; no log levels or rotation                                                                                                                                                  |
+| Tests              | No test files                                                                                                                                                                                             |
 
 ---
 
@@ -249,29 +282,36 @@ npm run build        # Compile to dist/
 
 See `.env.example` for the full list. Key variables:
 
-| Variable | Default | Purpose |
-| -------- | ------- | ------- |
-| `DATABASE_URL` | — | PostgreSQL connection string |
-| `REDIS_URL` | — | Redis connection string |
-| `OPENAI_API_KEY` | — | OpenAI API key |
-| `OPENAI_MODEL` | `gpt-4o` | LLM model |
-| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token |
-| `JWT_SECRET` | — | JWT signing secret (`openssl rand -hex 32`) |
-| `JWT_EXPIRES_IN` | `7d` | Token lifetime |
-| `HTTP_API_PORT` | `4000` | HTTP API port |
-| `CALENDAR_REMINDER_OFFSET_MINS` | `30` | Minutes before event to fire reminder |
-| `CALENDAR_LOOK_AHEAD_HOURS` | `24` | Hours ahead crawler scans for events |
-| `CALENDAR_CRAWL_INTERVAL_MINS` | `30` | How often calendar crawler runs |
-| `NOTIFICATION_POLL_INTERVAL_SECS` | `60` | How often notification runner dispatches |
-| `TODO_REMINDER_OFFSET_HOURS` | `24` | Hours before todo deadline to fire reminder |
-| `PINECONE_API_KEY` | — | Pinecone API key |
-| `PINECONE_INDEX_NAME` | — | Pinecone index name (1536 dims, cosine) |
-| `GOOGLE_CLIENT_ID` | — | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | — | Google OAuth client secret |
-| `GOOGLE_REDIRECT_URI` | — | Must match Google Cloud Console |
-| `TAVILY_API_KEY` | — | Tavily web search key |
-| `MAX_TOOL_ROUNDS` | `10` | Max agentic tool rounds per chat |
-| `FEEDBACK_WINDOW_SIZE` | `3` | Messages after a turn before evaluating implicit feedback |
+| Variable                             | Default  | Purpose                                                   |
+| ------------------------------------ | -------- | --------------------------------------------------------- |
+| `DATABASE_URL`                       | —        | PostgreSQL connection string                              |
+| `REDIS_URL`                          | —        | Redis connection string                                   |
+| `OPENAI_API_KEY`                     | —        | OpenAI API key                                            |
+| `OPENAI_MODEL`                       | `gpt-4o` | LLM model                                                 |
+| `TELEGRAM_BOT_TOKEN`                 | —        | Telegram bot token                                        |
+| `JWT_SECRET`                         | —        | JWT signing secret (`openssl rand -hex 32`)               |
+| `JWT_EXPIRES_IN`                     | `7d`     | Token lifetime                                            |
+| `HTTP_API_PORT`                      | `4000`   | HTTP API port                                             |
+| `CALENDAR_REMINDER_OFFSET_MINS`      | `30`     | Minutes before event to fire reminder                     |
+| `CALENDAR_LOOK_AHEAD_HOURS`          | `24`     | Hours ahead crawler scans for events                      |
+| `CALENDAR_CRAWL_INTERVAL_MINS`       | `30`     | How often calendar crawler runs                           |
+| `NOTIFICATION_POLL_INTERVAL_SECS`    | `60`     | How often notification runner dispatches                  |
+| `TODO_REMINDER_OFFSET_HOURS`         | `24`     | Hours before todo deadline to fire reminder               |
+| `PINECONE_API_KEY`                   | —        | Pinecone API key                                          |
+| `PINECONE_INDEX_NAME`                | —        | Pinecone index name (1536 dims, cosine)                   |
+| `GOOGLE_CLIENT_ID`                   | —        | Google OAuth client ID                                    |
+| `GOOGLE_CLIENT_SECRET`               | —        | Google OAuth client secret                                |
+| `GOOGLE_REDIRECT_URI`                | —        | Must match Google Cloud Console                           |
+| `TAVILY_API_KEY`                     | —        | Tavily web search key                                     |
+| `MAX_TOOL_ROUNDS`                    | `10`     | Max agentic tool rounds per chat                          |
+| `FEEDBACK_WINDOW_SIZE`               | `3`      | Messages after a turn before evaluating implicit feedback |
+| **`AVAX_RPC_URL`**                   | —        | `https://api.avax-test.network/ext/bc/C/rpc`              |
+| **`BOT_PRIVATE_KEY`**                | —        | Private key holding `CLAIMER_ROLE` for rewards            |
+| **`AEGIS_TOKEN_ADDRESS`**            | —        | `0x8839ecFB1BefD232d5Fcf55C223BDD78bc3A2f69`              |
+| **`REWARD_CONTROLLER_ADDRESS`**      | —        | `0x519092C2185E4209B43d3ea40cC34D39978073A7`              |
+| **`JARVIS_ACCOUNT_FACTORY_ADDRESS`** | —        | `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443`              |
+| **`SESSION_KEY_MANAGER_ADDRESS`**    | —        | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291`              |
+| **`ENTRY_POINT_ADDRESS`**            | —        | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`              |
 
 ---
 
