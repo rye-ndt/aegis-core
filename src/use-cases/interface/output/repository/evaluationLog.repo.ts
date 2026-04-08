@@ -20,5 +20,6 @@ export interface IEvaluationLogDB {
   create(log: EvaluationLog): Promise<void>;
   findLastByConversation(conversationId: string, skip?: number): Promise<EvaluationLog | null>;
   updateImplicitSignal(id: string, signal: string): Promise<void>;
+  updateOutcomeConfirmed(id: string, confirmed: boolean): Promise<void>;
   updateExplicitRating(messageId: string, rating: number): Promise<void>;
 }

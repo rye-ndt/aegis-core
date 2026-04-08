@@ -1,6 +1,6 @@
 # JARVIS — Status
 
-> Last updated: 2026-04-05
+> Last updated: 2026-04-06
 
 ---
 
@@ -164,7 +164,7 @@ AssistantUseCaseImpl.chat()
   7. Persist assistant reply
   8. setImmediate post-processing (non-blocking):
        - Write evaluation_logs (prompt hash, memories, tool calls, token usage)
-       - Detect implicit signal on previous turn (correction / repeat / clarification)
+       - LLM-based implicit feedback detection on turn N−FEEDBACK_WINDOW_SIZE (correction / repeat / clarification / positive + outcomeConfirmed)
        - Extract facts from last 4 messages → embed → upsert Pinecone + user_memories
        - Update conversations.intent
        - Flag for compression if tokens > 70k
@@ -213,7 +213,7 @@ Defined in `src/adapters/implementations/output/sqlDB/schema.ts`. Run `npm run d
 | Item | Note |
 | ---- | ---- |
 | Image history | Past image messages stored as `[image]` in DB; image data is not persisted |
-| Explicit feedback | `evaluation_logs` rows are written with implicit signal detection (correction/repeat/clarification). Explicit user rating via a bot command is not implemented |
+| Explicit feedback | `evaluation_logs` rows are written; implicit signal detection uses LLM analysis over a configurable window (`FEEDBACK_WINDOW_SIZE`, default 3). Explicit user rating via a bot command is not implemented |
 | **dream** | End-of-day job to sweep conversation history, consolidate facts, and upsert them into the memory store — building a richer profile without requiring explicit "remember this" commands |
 | Rate limiting | No rate limiting on HTTP API or tool calls |
 | Structured logging | Uses `console.error/log` only; no log levels or rotation |
@@ -271,6 +271,7 @@ See `.env.example` for the full list. Key variables:
 | `GOOGLE_REDIRECT_URI` | — | Must match Google Cloud Console |
 | `TAVILY_API_KEY` | — | Tavily web search key |
 | `MAX_TOOL_ROUNDS` | `10` | Max agentic tool rounds per chat |
+| `FEEDBACK_WINDOW_SIZE` | `3` | Messages after a turn before evaluating implicit feedback |
 
 ---
 

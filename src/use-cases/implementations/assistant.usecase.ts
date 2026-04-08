@@ -40,6 +40,7 @@ import type { IUserMemoryDB } from "../interface/output/repository/userMemory.re
 const DEFAULT_SYSTEM_PROMPT =
   "You are JARVIS, a personal AI assistant. Be concise and helpful.";
 const DEFAULT_MAX_TOOL_ROUNDS = 10;
+const DEFAULT_FEEDBACK_WINDOW_SIZE = 3;
 
 interface IToolResult {
   toolCallId: string;
@@ -70,46 +71,6 @@ function buildReasoningTrace(toolsUsed: IToolResult[]): string | null {
 // NOTE: Extracting reasoning from the final reply text is not viable with gpt-4o —
 // the final response is just the answer. The tool call sequence above is the only
 // reliable trace available.
-
-function detectImplicitSignal(
-  currentMessage: string,
-  _previousResponse: string,
-): string | null {
-  const msg = currentMessage.toLowerCase();
-
-  const correctionKeywords = [
-    "actually,",
-    "that's wrong",
-    "that is wrong",
-    "no,",
-    "incorrect",
-    "you said",
-    "wait,",
-    "not quite",
-    "wrong,",
-  ];
-  const repeatKeywords = [
-    "as i asked",
-    "again,",
-    "still need",
-    "i already asked",
-    "why didn't you",
-    "you didn't",
-  ];
-  const clarificationKeywords = [
-    "what do you mean",
-    "can you explain",
-    "i meant",
-    "i was asking about",
-    "clarify",
-  ];
-
-  if (correctionKeywords.some((k) => msg.includes(k))) return "correction";
-  if (repeatKeywords.some((k) => msg.includes(k))) return "repeat";
-  if (clarificationKeywords.some((k) => msg.includes(k)))
-    return "clarification";
-  return null;
-}
 
 function formatMessagesForPrompt(
   messages: Pick<Message, "role" | "content">[],
@@ -493,16 +454,10 @@ Never skip the Thought step.`,
         createdAtEpoch: newCurrentUTCEpoch(),
       });
 
-      const prevLog = await this.evaluationLogRepo.findLastByConversation(
-        ctx.conversationId,
-        1,
+      const windowSize = parseInt(
+        process.env.FEEDBACK_WINDOW_SIZE ?? String(DEFAULT_FEEDBACK_WINDOW_SIZE),
       );
-      if (prevLog) {
-        const signal = detectImplicitSignal(ctx.userMessage, prevLog.response);
-        if (signal) {
-          await this.evaluationLogRepo.updateImplicitSignal(prevLog.id, signal);
-        }
-      }
+      await this.evaluatePastTurn(ctx.conversationId, windowSize);
 
       // Skip trivial turns (short reply, no tools) to avoid unnecessary LLM + embedding calls.
       // NOTE: when facts are extracted, each requires a separate embeddingService.embed() call
@@ -587,6 +542,75 @@ Never skip the Thought step.`,
     } catch (err) {
       console.error("[assistant] postProcess error:", err);
     }
+  }
+
+  private async evaluatePastTurn(
+    conversationId: string,
+    windowSize: number,
+  ): Promise<void> {
+    const targetLog = await this.evaluationLogRepo.findLastByConversation(
+      conversationId,
+      windowSize,
+    );
+    if (!targetLog || targetLog.implicitSignal != null) return;
+
+    const followUps = await this.messageRepo.findAfterEpoch(
+      conversationId,
+      targetLog.createdAtEpoch,
+      windowSize,
+    );
+    if (followUps.length < windowSize) return;
+
+    const context =
+      `Assistant response being evaluated:\n${targetLog.response}\n\n` +
+      `Follow-up conversation:\n` +
+      formatMessagesForPrompt(followUps);
+
+    const raw = await this.textGenerator.generate(
+      "Analyze whether the user's follow-up messages indicate implicit feedback about the assistant response. " +
+        "Return a JSON object with exactly two fields:\n" +
+        "  signal: one of \"correction\" | \"repeat\" | \"clarification\" | \"positive\" | null\n" +
+        "    - correction: user indicates the response was wrong or needs to be changed\n" +
+        "    - repeat: user asks again for something the assistant already answered\n" +
+        "    - clarification: user indicates the response was unclear or asks for more detail\n" +
+        "    - positive: user explicitly confirms the response was correct or helpful\n" +
+        "    - null: no clear feedback signal\n" +
+        "  outcomeConfirmed: true if the user confirmed the outcome was correct, false if they rejected it, null if unclear.\n" +
+        "Return only valid JSON. No markdown, no explanation.",
+      context,
+    );
+
+    let signal: string | null = null;
+    let outcomeConfirmed: boolean | null = null;
+    try {
+      const parsed = JSON.parse(raw) as {
+        signal?: string | null;
+        outcomeConfirmed?: boolean | null;
+      };
+      const validSignals = ["correction", "repeat", "clarification", "positive"];
+      signal =
+        typeof parsed.signal === "string" && validSignals.includes(parsed.signal)
+          ? parsed.signal
+          : null;
+      outcomeConfirmed =
+        typeof parsed.outcomeConfirmed === "boolean"
+          ? parsed.outcomeConfirmed
+          : null;
+    } catch {
+      return;
+    }
+
+    await Promise.all([
+      signal !== null
+        ? this.evaluationLogRepo.updateImplicitSignal(targetLog.id, signal)
+        : Promise.resolve(),
+      outcomeConfirmed !== null
+        ? this.evaluationLogRepo.updateOutcomeConfirmed(
+            targetLog.id,
+            outcomeConfirmed,
+          )
+        : Promise.resolve(),
+    ]);
   }
 
   private buildOrchestratorHistory(

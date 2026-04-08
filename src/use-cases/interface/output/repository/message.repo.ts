@@ -17,6 +17,11 @@ export interface IMessageDB {
   create(message: Message): Promise<void>;
   findByConversationId(conversationId: string): Promise<Message[]>;
   findUncompressedByConversationId(conversationId: string): Promise<Message[]>;
+  findAfterEpoch(
+    conversationId: string,
+    afterEpoch: number,
+    limit: number,
+  ): Promise<Message[]>;
   markCompressed(ids: string[], epoch: number): Promise<void>;
   deleteByConversationId(conversationId: string): Promise<void>;
 }
