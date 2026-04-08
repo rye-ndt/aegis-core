@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   EvaluationLog,
@@ -72,5 +72,33 @@ export class DrizzleEvaluationLogRepo implements IEvaluationLogDB {
       .update(evaluationLogs)
       .set({ explicitRating: rating })
       .where(eq(evaluationLogs.messageId, messageId));
+  }
+
+  async markContributed(id: string, txHash: string, dataHash: string, epoch: number): Promise<void> {
+    await this.db
+      .update(evaluationLogs)
+      .set({ contributionTxHash: txHash, contributionDataHash: dataHash, contributedAtEpoch: epoch })
+      .where(eq(evaluationLogs.id, id));
+  }
+
+  async findContributable(userId: string): Promise<EvaluationLog[]> {
+    const rows = await this.db
+      .select()
+      .from(evaluationLogs)
+      .where(and(eq(evaluationLogs.userId, userId), isNull(evaluationLogs.contributedAtEpoch)))
+      .orderBy(desc(evaluationLogs.createdAtEpoch));
+
+    return rows.map((r) => ({
+      ...r,
+      reasoningTrace: r.reasoningTrace ?? undefined,
+      promptTokens: r.promptTokens ?? undefined,
+      completionTokens: r.completionTokens ?? undefined,
+      implicitSignal: r.implicitSignal ?? undefined,
+      explicitRating: r.explicitRating ?? undefined,
+      outcomeConfirmed: r.outcomeConfirmed ?? undefined,
+      contributedAtEpoch: r.contributedAtEpoch ?? undefined,
+      contributionTxHash: r.contributionTxHash ?? undefined,
+      contributionDataHash: r.contributionDataHash ?? undefined,
+    }));
   }
 }

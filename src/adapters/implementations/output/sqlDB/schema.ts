@@ -81,6 +81,8 @@ export const userProfiles = pgTable("user_profiles", {
   personalities: text("personalities").array().notNull().default([]),
   wakeUpHour: integer("wake_up_hour"),
   telegramChatId: text("telegram_chat_id"),
+  smartAccountAddress: text("smart_account_address"),
+  eoaAddress: text("eoa_address"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
@@ -112,6 +114,9 @@ export const evaluationLogs = pgTable("evaluation_logs", {
   implicitSignal: text("implicit_signal"),
   explicitRating: integer("explicit_rating"),
   outcomeConfirmed: boolean("outcome_confirmed"),
+  contributedAtEpoch: integer("contributed_at_epoch"),
+  contributionTxHash: text("contribution_tx_hash"),
+  contributionDataHash: text("contribution_data_hash"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
 

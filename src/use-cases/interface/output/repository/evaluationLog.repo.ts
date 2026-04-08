@@ -13,6 +13,9 @@ export interface EvaluationLog {
   implicitSignal?: string | null;
   explicitRating?: number | null;
   outcomeConfirmed?: boolean | null;
+  contributedAtEpoch?: number | null;
+  contributionTxHash?: string | null;
+  contributionDataHash?: string | null;
   createdAtEpoch: number;
 }
 
@@ -22,4 +25,6 @@ export interface IEvaluationLogDB {
   updateImplicitSignal(id: string, signal: string): Promise<void>;
   updateOutcomeConfirmed(id: string, confirmed: boolean): Promise<void>;
   updateExplicitRating(messageId: string, rating: number): Promise<void>;
+  markContributed(id: string, txHash: string, dataHash: string, epoch: number): Promise<void>;
+  findContributable(userId: string): Promise<EvaluationLog[]>;
 }

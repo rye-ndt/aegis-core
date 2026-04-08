@@ -63,6 +63,13 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
     return rows.map(this.toProfile);
   }
 
+  async updateSmartAccount(userId: string, smartAccountAddress: string, eoaAddress: string): Promise<void> {
+    await this.db
+      .update(userProfiles)
+      .set({ smartAccountAddress, eoaAddress, updatedAtEpoch: newCurrentUTCEpoch() })
+      .where(eq(userProfiles.userId, userId));
+  }
+
   async findFirst(): Promise<IUserProfile | null> {
     const rows = await this.db
       .select()
@@ -81,6 +88,8 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       personalities: row.personalities,
       wakeUpHour: row.wakeUpHour,
       telegramChatId: row.telegramChatId,
+      smartAccountAddress: row.smartAccountAddress,
+      eoaAddress: row.eoaAddress,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,
     };
