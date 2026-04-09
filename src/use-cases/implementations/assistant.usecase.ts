@@ -40,7 +40,7 @@ interface IToolResult {
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly orchestrator: ILLMOrchestrator,
-    private readonly registryFactory: (userId: string) => IToolRegistry,
+    private readonly registryFactory: (userId: string, conversationId: string) => IToolRegistry,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
   ) {}
@@ -76,7 +76,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const systemPrompt =
       `${DEFAULT_SYSTEM_PROMPT}\n\nCurrent datetime: ${new Date().toISOString()}.`;
 
-    const toolRegistry = this.registryFactory(input.userId);
+    const toolRegistry = this.registryFactory(input.userId, conversationId);
     const availableTools = toolRegistry.getAll().map((t) => t.definition());
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";

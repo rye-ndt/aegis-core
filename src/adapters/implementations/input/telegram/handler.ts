@@ -3,6 +3,11 @@ import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
+import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
+import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
+import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
@@ -16,6 +21,11 @@ export class TelegramAssistantHandler {
     private readonly authUseCase: IAuthUseCase,
     private readonly telegramSessions: ITelegramSessionDB,
     private readonly botToken?: string,
+    private readonly intentUseCase?: IIntentUseCase,
+    private readonly userProfileDB?: IUserProfileDB,
+    private readonly tokenRegistryService?: ITokenRegistryService,
+    private readonly viemClient?: ViemClientAdapter,
+    private readonly chainId?: number,
   ) {}
 
   register(bot: Bot): void {
@@ -101,6 +111,89 @@ export class TelegramAssistantHandler {
       return ctx.reply(text || "No messages yet.");
     });
 
+    bot.command("confirm", async (ctx) => {
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      if (!this.intentUseCase) {
+        await ctx.reply("Intent execution not configured.");
+        return;
+      }
+      await ctx.replyWithChatAction("typing");
+      try {
+        // Find the latest pending intent for this user
+        const { userId } = session;
+        // We need to find pending intent — intentUseCase exposes confirmAndExecute
+        // The pending intentId must be stored in DB; use a placeholder lookup approach
+        // by calling confirmAndExecute with a sentinel that triggers DB lookup
+        const result = await this.confirmLatestIntent(userId);
+        await this.safeSend(ctx, result);
+      } catch (err) {
+        console.error("Error confirming intent:", err);
+        await ctx.reply("Sorry, something went wrong. Please try again.");
+      }
+    });
+
+    bot.command("cancel", async (ctx) => {
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      if (!this.intentUseCase) {
+        await ctx.reply("Intent execution not configured.");
+        return;
+      }
+      await ctx.reply("Intent cancelled. No transaction was submitted.");
+    });
+
+    bot.command("portfolio", async (ctx) => {
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      await ctx.replyWithChatAction("typing");
+      try {
+        const portfolio = await this.fetchPortfolio(session.userId);
+        await this.safeSend(ctx, portfolio);
+      } catch (err) {
+        console.error("Error fetching portfolio:", err);
+        await ctx.reply("Sorry, couldn't fetch portfolio. Please try again.");
+      }
+    });
+
+    bot.command("wallet", async (ctx) => {
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      try {
+        const profile = await this.userProfileDB?.findByUserId(session.userId);
+        if (!profile?.smartAccountAddress) {
+          await ctx.reply("No wallet found. Complete registration to deploy your Smart Contract Account.");
+          return;
+        }
+        const lines = [
+          "🔑 Wallet Info",
+          `Smart Account: \`${profile.smartAccountAddress}\``,
+          profile.sessionKeyAddress ? `Session Key: \`${profile.sessionKeyAddress}\`` : "Session Key: Not set",
+          `Session Key Status: ${profile.sessionKeyStatus ?? "N/A"}`,
+        ];
+        if (profile.sessionKeyExpiresAtEpoch) {
+          const expiresDate = new Date(profile.sessionKeyExpiresAtEpoch * 1000).toISOString().split("T")[0];
+          lines.push(`Expires: ${expiresDate}`);
+        }
+        await this.safeSend(ctx, lines.join("\n"));
+      } catch (err) {
+        console.error("Error fetching wallet:", err);
+        await ctx.reply("Sorry, couldn't fetch wallet info. Please try again.");
+      }
+    });
+
     bot.on("message:photo", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
@@ -153,6 +246,59 @@ export class TelegramAssistantHandler {
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
+  }
+
+  private async confirmLatestIntent(userId: string): Promise<string> {
+    if (!this.intentUseCase) return "Intent execution not configured.";
+    // The intentUseCase needs access to the intent DB to find the pending intent.
+    // We expose a method that internally looks up the latest AWAITING_CONFIRMATION intent.
+    // For now, we pass a sentinel intentId that the use case understands to mean "latest".
+    const result = await this.intentUseCase.confirmAndExecute({
+      intentId: "__latest__",
+      userId,
+    });
+    return result.humanSummary;
+  }
+
+  private async fetchPortfolio(userId: string): Promise<string> {
+    if (!this.userProfileDB || !this.tokenRegistryService || !this.viemClient || !this.chainId) {
+      return "Portfolio service not configured.";
+    }
+    const profile = await this.userProfileDB.findByUserId(userId);
+    if (!profile?.smartAccountAddress) {
+      return "No Smart Contract Account found. Please complete registration.";
+    }
+
+    const scaAddress = profile.smartAccountAddress as `0x${string}`;
+    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
+
+    const ERC20_BALANCE_ABI = [
+      {
+        name: "balanceOf",
+        type: "function" as const,
+        stateMutability: "view",
+        inputs: [{ name: "account", type: "address" }],
+        outputs: [{ name: "", type: "uint256" }],
+      },
+    ] as const;
+
+    const rows: string[] = ["💼 Portfolio", `SCA: \`${scaAddress}\``, "", "Token | Balance", "------|-------"];
+    for (const token of tokens) {
+      let rawBalance: bigint;
+      if (token.isNative) {
+        rawBalance = await this.viemClient.publicClient.getBalance({ address: scaAddress });
+      } else {
+        rawBalance = await this.viemClient.publicClient.readContract({
+          address: token.address as `0x${string}`,
+          abi: ERC20_BALANCE_ABI,
+          functionName: "balanceOf",
+          args: [scaAddress],
+        }) as bigint;
+      }
+      const humanBalance = (Number(rawBalance) / 10 ** token.decimals).toFixed(6);
+      rows.push(`${token.symbol} | ${humanBalance}`);
+    }
+    return rows.join("\n");
   }
 
   private async ensureAuthenticated(

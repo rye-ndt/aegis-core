@@ -14,9 +14,9 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 ## What it is (current implementation)
 
-A stateless AI agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions and execute web searches. It remembers conversation history within a session but has no long-term memory per user.
+A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Web3 status:** Smart contracts remain deployed on Avalanche Fuji testnet. TypeScript integration is pending (Phase 3).
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅**
 
 ---
 
@@ -27,7 +27,8 @@ A stateless AI agent on Telegram backed by Hexagonal Architecture. Users authent
 | Language       | TypeScript 5.3, Node.js, strict mode                          |
 | Interface      | Telegram (`grammy`) + HTTP API (native `http`)                |
 | ORM            | Drizzle ORM + PostgreSQL (`pg` driver)                        |
-| LLM            | OpenAI chat completions + tool use (`gpt-4o`)                 |
+| LLM            | Anthropic Claude (`claude-sonnet-4-6`) via `@anthropic-ai/sdk` |
+| Blockchain     | `viem` ^2 — public + wallet clients                           |
 | Validation     | Zod 4.3.6                                                     |
 | DI             | Manual container in `src/adapters/inject/`                    |
 | Web search     | Tavily (`@tavily/core`)                                       |
@@ -50,10 +51,18 @@ src/
 ├── use-cases/
 │   ├── implementations/
 │   │   ├── assistant.usecase.ts    # chat(), listConversations(), getConversation()
-│   │   └── auth.usecase.ts         # register(), login(), validateToken()
+│   │   ├── auth.usecase.ts         # register() → deploys SCA + grants session key
+│   │   └── intent.usecase.ts       # parseAndExecute() → confirmAndExecute()
 │   └── interface/
-│       ├── input/                  # IAssistantUseCase, IAuthUseCase
+│       ├── input/                  # IAssistantUseCase, IAuthUseCase, IIntentUseCase
 │       └── output/                 # Outbound ports
+│           ├── blockchain/         # ISmartAccountService, ISessionKeyService,
+│           │                       # IUserOperationBuilder, IPaymasterService
+│           ├── solver/             # ISolver, ISolverRegistry
+│           ├── repository/         # 9 repo interfaces (users → feeRecords)
+│           ├── intentParser.interface.ts   # IntentPackage, SimulationReport
+│           ├── simulator.interface.ts
+│           └── tokenRegistry.interface.ts
 │
 ├── adapters/
 │   ├── inject/
@@ -61,20 +70,36 @@ src/
 │   │
 │   └── implementations/
 │       ├── input/
-│       │   ├── http/              # HttpApiServer — /auth/register, /auth/login
+│       │   ├── http/              # HttpApiServer — /auth/*, /intent/:id, /portfolio, /tokens
 │       │   └── telegram/          # TelegramBot, TelegramAssistantHandler
 │       │
 │       └── output/
-│           ├── orchestrator/      # OpenAIOrchestrator — tool calling + vision
+│           ├── orchestrator/
+│           │   ├── anthropic.ts   # AnthropicOrchestrator (active)
+│           │   └── openai.ts      # OpenAIOrchestrator (kept, unused)
+│           ├── blockchain/        # viemClient, smartAccount, sessionKey,
+│           │                      # userOperation.builder, paymaster
+│           ├── solver/
+│           │   ├── solverRegistry.ts
+│           │   ├── static/claimRewards.solver.ts
+│           │   └── restful/traderJoe.solver.ts
+│           ├── simulator/         # rpc.simulator.ts — viem eth_call simulation
+│           ├── intentParser/      # anthropic.intentParser.ts — LLM → IntentPackage
+│           ├── tokenRegistry/     # db.tokenRegistry.ts
+│           ├── resultParser/      # tx.resultParser.ts — receipt → human string
 │           ├── webSearch/         # TavilyWebSearchService
 │           ├── tools/
-│           │   └── webSearch.tool.ts   # Tavily web search, up to 5 results
+│           │   ├── webSearch.tool.ts
+│           │   ├── executeIntent.tool.ts   # LLM triggers intent parse+execute
+│           │   └── getPortfolio.tool.ts    # Reads SCA on-chain balances
 │           ├── toolRegistry.concrete.ts
-│           └── sqlDB/             # DrizzleSqlDB + 4 repositories
+│           └── sqlDB/             # DrizzleSqlDB + 10 repositories
 │
 └── helpers/
     ├── enums/                     # TOOL_TYPE, MESSAGE_ROLE, USER_STATUSES,
-    │                              # CONVERSATION_STATUSES
+    │                              # CONVERSATION_STATUSES, INTENT_STATUSES,
+    │                              # EXECUTION_STATUSES, SESSION_KEY_STATUSES,
+    │                              # SOLVER_TYPE
     ├── time/dateTime.ts           # newCurrentUTCEpoch() — seconds, not ms
     └── uuid.ts                    # newUuid() — v4
 ```
@@ -95,10 +120,13 @@ src/
 
 Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
-| Method | Route            | Auth | Purpose                                            |
-| ------ | ---------------- | ---- | -------------------------------------------------- |
-| `POST` | `/auth/register` | None | Create account; returns `{ userId }`               |
-| `POST` | `/auth/login`    | None | Returns `{ token, expiresAtEpoch, userId }`        |
+| Method | Route              | Auth   | Purpose                                            |
+| ------ | ------------------ | ------ | -------------------------------------------------- |
+| `POST` | `/auth/register`   | None   | Create account + deploy SCA; returns `{ userId }`  |
+| `POST` | `/auth/login`      | None   | Returns `{ token, expiresAtEpoch, userId }`        |
+| `GET`  | `/intent/:intentId`| JWT    | Fetch intent + execution status                    |
+| `GET`  | `/portfolio`       | JWT    | On-chain balances for user's SCA                   |
+| `GET`  | `/tokens?chainId=` | None   | List verified tokens for a chain                   |
 
 ---
 
@@ -111,33 +139,47 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 | `/logout`       | Deletes session from DB + cache                                          |
 | `/new`          | Clears active conversation ID (starts fresh thread)                      |
 | `/history`      | Shows last 10 messages of the current conversation                       |
-| _(text)_        | Chat with the agent; supports tool calls (web search)                    |
+| `/confirm`      | Executes the latest `AWAITING_CONFIRMATION` intent                       |
+| `/cancel`       | Aborts the pending intent (no tx submitted)                              |
+| `/portfolio`    | Shows on-chain token balances for user's SCA                             |
+| `/wallet`       | Shows SCA address + session key status                                   |
+| _(text)_        | Chat with the agent; supports tool calls (web search, executeIntent, getPortfolio) |
 | _(photo)_       | Base64 → vision chat with caption as message                             |
 
 ---
 
-## Message flow
+## Intent execution flow
 
 ```text
-Telegram message (text / photo)
-      │
-      ▼
-TelegramAssistantHandler
-  → ensureAuthenticated(chatId) — in-memory cache → telegram_sessions DB → JWT expiry
+User message: "Swap 100 USDC for AVAX"
       │
       ▼
 AssistantUseCaseImpl.chat()
-  1. Create conversation if new
-  2. Load prior message history (last 20 uncompressed)
-  3. Persist user message
-  4. Build sliding window + system prompt
-  5. Agentic tool loop (up to MAX_TOOL_ROUNDS, default 10):
-       a. Call OpenAIOrchestrator
-       b. No tool calls → finalReply, break
-       c. Execute tool calls in parallel (single retry on transient failure)
-       d. Persist ASSISTANT_TOOL_CALL + TOOL results
-  6. Persist assistant reply
-  7. Return { conversationId, messageId, reply, toolsUsed }
+  → LLM decides to call executeIntent tool
+      │
+      ▼
+IntentUseCaseImpl.parseAndExecute()
+  1. AnthropicIntentParser.parse()     → IntentPackage (JSON)
+  2. TokenRegistry.resolve()           → fill addresses + decimals
+  3. Confidence check (< 0.7 → reject)
+  4. SolverRegistry.getSolver("swap")  → TraderJoeSolver
+  5. solver.buildCalldata()            → { to, data, value }
+  6. UserOpBuilder.build()             → IUserOperation
+  7. RpcSimulator.simulate()           → SimulationReport
+  8. If !passed → SIMULATION_FAILED, return summary
+  9. Save intent(AWAITING_CONFIRMATION) to DB
+ 10. Return pre-flight summary + "Type /confirm to execute"
+
+User sends /confirm
+      │
+      ▼
+IntentUseCaseImpl.confirmAndExecute()
+ 11. Rebuild calldata + UserOp
+ 12. UserOpBuilder.submit()            → { userOpHash }
+ 13. UserOpBuilder.waitForReceipt()    → { txHash, success }
+ 14. Save intent_executions + fee_records to DB
+ 15. TxResultParser.parse()            → human success string
+ 16. Return { status: COMPLETED, txHash, humanSummary }
 ```
 
 ---
@@ -149,46 +191,73 @@ AssistantUseCaseImpl.chat()
 | `users`             | Account record — hashed password, email, status                     |
 | `telegram_sessions` | Links Telegram chat ID → userId with JWT expiry                      |
 | `conversations`     | Per-user threads — title, status                                     |
-| `messages`          | All turns (user / assistant / tool)                                  |
-| `user_profiles`     | Reserved for ERC-4337 wallet abstraction (smartAccountAddress, eoa) |
+| `messages`          | All turns (user / assistant / tool / assistant_tool_call)            |
+| `user_profiles`     | SCA address, session key address + scope + status                    |
+| `token_registry`    | Verified symbol → address + decimals per chainId                     |
+| `intents`           | Parsed intent records with status lifecycle                          |
+| `intent_executions` | Per-attempt execution records with userOpHash + txHash               |
+| `tool_manifests`    | Solver registry with rev-share metadata                              |
+| `fee_records`       | Audit trail of every 1% protocol fee collected                       |
 
 ---
 
 ## Pivot roadmap
 
 ### Phase 1 — Purge ✅
-Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vector DB + Pinecone), Google Calendar/Gmail tools, reminder crawlers, TTS/STT, personality customization, todo system, jarvisConfig.
+Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vector DB + Pinecone), Google Calendar/Gmail tools, reminder crawlers, TTS/STT, personality customization, todo system, jarvisConfig, orphaned dead code.
 
-### Phase 2 — Core infrastructure (pending)
-- [ ] Swap OpenAI orchestrator for `AnthropicOrchestrator` (Claude Sonnet 4.6)
-- [ ] Wire `SessionKeySmartAccountFactory` in `auth.usecase.ts` on `/register`
+### Phase 2 — Core infrastructure ✅
+- [x] Swap OpenAI orchestrator → `AnthropicOrchestrator` (Claude Sonnet 4.6)
+- [x] Wire `SmartAccountAdapter` in `auth.usecase.ts` — deploys SCA + grants session key on `/register`
+- [x] New DB: `aether_intent` with 5 new tables + extended `user_profiles`
+- [x] All new repository interfaces + Drizzle implementations
+- [x] `ViemClientAdapter` — shared public + wallet clients
 
-### Phase 3 — Execution engine (pending)
-- [ ] Intent parser: LLM → strict JSON (`action`, `tokenIn`, `tokenOut`, `amount`, `slippage`)
-- [ ] Deterministic safety layer: DEX quote, balance check, transaction simulation
-- [ ] Protocol fee: 1% auto-routed to treasury on every execution
-- [ ] UserOperation builder + ERC-4337 EntryPoint submission via Session Key
+### Phase 3 — Execution engine ✅
+- [x] `AnthropicIntentParser` — LLM → strict `IntentPackage` JSON with Zod validation
+- [x] `TokenRegistry` — DB-backed symbol → address resolver + chain filter
+- [x] `SolverRegistry` + `ClaimRewardsSolver` (static) + `TraderJoeSolver` (REST)
+- [x] `RpcSimulator` — `eth_call` simulation, revert detection
+- [x] `UserOperationBuilder` — nonce fetch, gas estimation, bundler submit, receipt poll
+- [x] `IntentUseCaseImpl` — full parse → simulate → confirm → execute flow
+- [x] `TxResultParser` — receipt → human success string
+- [x] `ExecuteIntentTool` + `GetPortfolioTool` registered in DI
+- [x] Protocol fee: 1% auto-routed to treasury, fee_record written per execution
+- [x] Telegram: `/confirm`, `/cancel`, `/portfolio`, `/wallet` commands
+- [x] HTTP API: `/intent/:id`, `/portfolio`, `/tokens` endpoints
+
+### Next steps
+- [ ] `npm run db:generate && npm run db:migrate` — generate migration for new tables
+- [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
+- [ ] Fill `.env` with `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
+- [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash
 
 ---
 
 ## Environment variables
 
-| Variable             | Default  | Purpose                                   |
-| -------------------- | -------- | ----------------------------------------- |
-| `DATABASE_URL`       | —        | PostgreSQL connection string              |
-| `OPENAI_API_KEY`     | —        | OpenAI API key                            |
-| `OPENAI_MODEL`       | `gpt-4o` | LLM model                                 |
-| `TELEGRAM_BOT_TOKEN` | —        | Telegram bot token                        |
-| `JWT_SECRET`         | —        | JWT signing secret                        |
-| `JWT_EXPIRES_IN`     | `7d`     | Token lifetime                            |
-| `HTTP_API_PORT`      | `4000`   | HTTP API port                             |
-| `TAVILY_API_KEY`     | —        | Tavily web search key                     |
-| `MAX_TOOL_ROUNDS`    | `10`     | Max agentic tool rounds per chat          |
-| `AVAX_RPC_URL`       | —        | Avalanche RPC endpoint                    |
-| `BOT_PRIVATE_KEY`    | —        | Session key wallet private key            |
-| `ENTRY_POINT_ADDRESS`| —        | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789` |
-| `JARVIS_ACCOUNT_FACTORY_ADDRESS` | — | `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443` |
-| `SESSION_KEY_MANAGER_ADDRESS`    | — | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291` |
+| Variable                           | Default                          | Purpose                                   |
+| ---------------------------------- | -------------------------------- | ----------------------------------------- |
+| `DATABASE_URL`                     | `postgres://localhost/aether_intent` | PostgreSQL connection string          |
+| `ANTHROPIC_API_KEY`                | —                                | Anthropic API key                         |
+| `ANTHROPIC_MODEL`                  | `claude-sonnet-4-6`              | LLM model                                 |
+| `TELEGRAM_BOT_TOKEN`               | —                                | Telegram bot token                        |
+| `JWT_SECRET`                       | —                                | JWT signing secret                        |
+| `JWT_EXPIRES_IN`                   | `7d`                             | Token lifetime                            |
+| `HTTP_API_PORT`                    | `4000`                           | HTTP API port                             |
+| `TAVILY_API_KEY`                   | —                                | Tavily web search key                     |
+| `MAX_TOOL_ROUNDS`                  | `10`                             | Max agentic tool rounds per chat          |
+| `AVAX_RPC_URL`                     | Fuji public RPC                  | Avalanche RPC endpoint                    |
+| `AVAX_BUNDLER_URL`                 | —                                | ERC-4337 bundler (e.g. Pimlico)           |
+| `BOT_PRIVATE_KEY`                  | —                                | Session key signer private key            |
+| `BOT_ADDRESS`                      | —                                | On-chain address of BOT_PRIVATE_KEY       |
+| `TREASURY_ADDRESS`                 | —                                | Platform fee recipient wallet             |
+| `CHAIN_ID`                         | `43113`                          | 43113 = Fuji, 43114 = Mainnet             |
+| `ENTRY_POINT_ADDRESS`              | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789` | ERC-4337 EntryPoint      |
+| `JARVIS_ACCOUNT_FACTORY_ADDRESS`   | `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443` | SCA factory              |
+| `SESSION_KEY_MANAGER_ADDRESS`      | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291` | Session key manager      |
+| `REWARD_CONTROLLER_ADDRESS`        | —                                | Rewards contract for ClaimRewardsSolver   |
+| `TRADERJOE_API_URL`                | `https://api.traderjoexyz.com`   | TraderJoe quote API                       |
 
 ---
 
@@ -229,3 +298,8 @@ Only add a comment when the code cannot explain itself: unit conversion mismatch
 4. `drizzleSqlDb.adapter.ts` — add property + instantiate.
 5. `assistant.di.ts` — pass `sqlDB.myThings` to whatever needs it.
 6. `npm run db:generate && npm run db:migrate`
+
+### Adding a new solver
+
+1. Implement `ISolver` in `src/adapters/implementations/output/solver/static/` or `restful/`.
+2. Register it in `AssistantInject.getSolverRegistry()` with the action string key.

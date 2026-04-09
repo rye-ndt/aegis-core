@@ -2,6 +2,11 @@ import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
+import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
+import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
+import jwt from "jsonwebtoken";
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -14,6 +19,16 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
+const ERC20_BALANCE_ABI = [
+  {
+    name: "balanceOf",
+    type: "function" as const,
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
 export class HttpApiServer {
   private server: http.Server;
 
@@ -21,6 +36,12 @@ export class HttpApiServer {
     private readonly authUseCase: IAuthUseCase,
     _unused: null,
     private readonly port: number,
+    private readonly jwtSecret?: string,
+    private readonly intentUseCase?: IIntentUseCase,
+    private readonly userProfileDB?: IUserProfileDB,
+    private readonly tokenRegistryService?: ITokenRegistryService,
+    private readonly viemClient?: ViemClientAdapter,
+    private readonly chainId?: number,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -40,6 +61,15 @@ export class HttpApiServer {
     }
     if (method === "POST" && url.pathname === "/auth/login") {
       return this.handleLogin(req, res);
+    }
+    if (method === "GET" && url.pathname.startsWith("/intent/")) {
+      return this.handleGetIntent(req, res, url);
+    }
+    if (method === "GET" && url.pathname === "/portfolio") {
+      return this.handleGetPortfolio(req, res);
+    }
+    if (method === "GET" && url.pathname === "/tokens") {
+      return this.handleGetTokens(req, res, url);
     }
 
     res.writeHead(404);
@@ -91,6 +121,78 @@ export class HttpApiServer {
         return this.sendJson(res, 401, { error: "Invalid email or password" });
       }
       throw err;
+    }
+  }
+
+  private async handleGetIntent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.intentUseCase) return this.sendJson(res, 503, { error: "Intent service not available" });
+
+    const intentId = url.pathname.split("/").pop() ?? "";
+    if (!intentId) return this.sendJson(res, 400, { error: "Intent ID required" });
+
+    const result = await this.intentUseCase.confirmAndExecute({ intentId, userId });
+    return this.sendJson(res, 200, result);
+  }
+
+  private async handleGetPortfolio(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.userProfileDB || !this.tokenRegistryService || !this.viemClient || !this.chainId) {
+      return this.sendJson(res, 503, { error: "Portfolio service not available" });
+    }
+
+    const profile = await this.userProfileDB.findByUserId(userId);
+    if (!profile?.smartAccountAddress) {
+      return this.sendJson(res, 404, { error: "No Smart Contract Account found" });
+    }
+
+    const scaAddress = profile.smartAccountAddress as `0x${string}`;
+    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
+    const balances: { symbol: string; address: string; balance: string }[] = [];
+
+    for (const token of tokens) {
+      let rawBalance: bigint;
+      if (token.isNative) {
+        rawBalance = await this.viemClient.publicClient.getBalance({ address: scaAddress });
+      } else {
+        rawBalance = await this.viemClient.publicClient.readContract({
+          address: token.address as `0x${string}`,
+          abi: ERC20_BALANCE_ABI,
+          functionName: "balanceOf",
+          args: [scaAddress],
+        }) as bigint;
+      }
+      balances.push({
+        symbol: token.symbol,
+        address: token.address,
+        balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
+      });
+    }
+
+    return this.sendJson(res, 200, { smartAccountAddress: scaAddress, balances });
+  }
+
+  private async handleGetTokens(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    if (!this.tokenRegistryService) {
+      return this.sendJson(res, 503, { error: "Token registry not available" });
+    }
+    const chainIdStr = url.searchParams.get("chainId");
+    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : (this.chainId ?? 43113);
+    const tokens = await this.tokenRegistryService.listByChain(chainId);
+    return this.sendJson(res, 200, { tokens });
+  }
+
+  private extractUserId(req: http.IncomingMessage): string | null {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ") || !this.jwtSecret) return null;
+    try {
+      const token = authHeader.slice(7);
+      const payload = jwt.verify(token, this.jwtSecret) as { userId: string };
+      return payload.userId;
+    } catch {
+      return null;
     }
   }
 

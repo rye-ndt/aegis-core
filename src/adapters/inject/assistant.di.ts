@@ -1,46 +1,180 @@
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
-import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
+import { AnthropicOrchestrator } from "../implementations/output/orchestrator/anthropic";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
 import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
+import { ExecuteIntentTool } from "../implementations/output/tools/executeIntent.tool";
+import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.tool";
 import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
 import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
 import { HttpApiServer } from "../implementations/input/http/httpServer";
 import type { IAuthUseCase } from "../../use-cases/interface/input/auth.interface";
 import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
+import type { IIntentUseCase } from "../../use-cases/interface/input/intent.interface";
+import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecase";
+import { ViemClientAdapter } from "../implementations/output/blockchain/viemClient";
+import { SmartAccountAdapter } from "../implementations/output/blockchain/smartAccount.adapter";
+import { SessionKeyAdapter } from "../implementations/output/blockchain/sessionKey.adapter";
+import { UserOperationBuilder } from "../implementations/output/blockchain/userOperation.builder";
+import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
+import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
+import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
+import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator";
+import { AnthropicIntentParser } from "../implementations/output/intentParser/anthropic.intentParser";
+import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
+import { TxResultParser } from "../implementations/output/resultParser/tx.resultParser";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private _authUseCase: IAuthUseCase | null = null;
+  private _intentUseCase: IIntentUseCase | null = null;
+  private _viemClient: ViemClientAdapter | null = null;
+  private _smartAccountService: SmartAccountAdapter | null = null;
+  private _sessionKeyService: SessionKeyAdapter | null = null;
+  private _userOpBuilder: UserOperationBuilder | null = null;
+  private _solverRegistry: SolverRegistry | null = null;
+  private _intentParser: AnthropicIntentParser | null = null;
+  private _tokenRegistryService: DbTokenRegistryService | null = null;
+  private _simulator: RpcSimulator | null = null;
+  private _resultParser: TxResultParser | null = null;
 
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
       this.sqlDB = new DrizzleSqlDB({
         connectionString:
-          process.env.DATABASE_URL ?? "postgres://localhost:5432/onchain-agent",
+          process.env.DATABASE_URL ?? "postgres://localhost:5432/aether_intent",
       });
     }
     return this.sqlDB;
+  }
+
+  getViemClient(): ViemClientAdapter {
+    if (!this._viemClient) {
+      this._viemClient = new ViemClientAdapter({
+        rpcUrl: process.env.AVAX_RPC_URL ?? "https://api.avax-test.network/ext/bc/C/rpc",
+        botPrivateKey: process.env.BOT_PRIVATE_KEY ?? "",
+        chainId: parseInt(process.env.CHAIN_ID ?? "43113", 10),
+      });
+    }
+    return this._viemClient;
+  }
+
+  getTokenRegistryService(): DbTokenRegistryService {
+    if (!this._tokenRegistryService) {
+      this._tokenRegistryService = new DbTokenRegistryService(
+        this.getSqlDB().tokenRegistry,
+      );
+    }
+    return this._tokenRegistryService;
+  }
+
+  getSolverRegistry(): SolverRegistry {
+    if (!this._solverRegistry) {
+      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      this._solverRegistry = new SolverRegistry();
+      this._solverRegistry.register(
+        "claim_rewards",
+        new ClaimRewardsSolver(process.env.REWARD_CONTROLLER_ADDRESS ?? ""),
+      );
+      this._solverRegistry.register(
+        "swap",
+        new TraderJoeSolver(
+          process.env.TRADERJOE_API_URL ?? "https://api.traderjoexyz.com",
+          chainId,
+        ),
+      );
+    }
+    return this._solverRegistry;
+  }
+
+  getSimulator(): RpcSimulator {
+    if (!this._simulator) {
+      this._simulator = new RpcSimulator(this.getViemClient());
+    }
+    return this._simulator;
+  }
+
+  getResultParser(): TxResultParser {
+    if (!this._resultParser) {
+      this._resultParser = new TxResultParser(this.getViemClient());
+    }
+    return this._resultParser;
+  }
+
+  getUserOpBuilder(): UserOperationBuilder {
+    if (!this._userOpBuilder) {
+      this._userOpBuilder = new UserOperationBuilder(
+        this.getViemClient(),
+        process.env.ENTRY_POINT_ADDRESS ?? "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
+        process.env.AVAX_BUNDLER_URL ?? "",
+        process.env.BOT_PRIVATE_KEY ?? "",
+        process.env.TREASURY_ADDRESS ?? "",
+      );
+    }
+    return this._userOpBuilder;
+  }
+
+  getIntentParser(): AnthropicIntentParser {
+    if (!this._intentParser) {
+      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      this._intentParser = new AnthropicIntentParser(
+        process.env.ANTHROPIC_API_KEY ?? "",
+        process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+        this.getTokenRegistryService(),
+        chainId,
+      );
+    }
+    return this._intentParser;
+  }
+
+  getIntentUseCase(): IIntentUseCase {
+    if (!this._intentUseCase) {
+      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const db = this.getSqlDB();
+      this._intentUseCase = new IntentUseCaseImpl(
+        this.getIntentParser(),
+        this.getTokenRegistryService(),
+        this.getSolverRegistry(),
+        this.getUserOpBuilder(),
+        this.getSimulator(),
+        db.intents,
+        db.intentExecutions,
+        db.feeRecords,
+        db.userProfiles,
+        this.getResultParser(),
+        chainId,
+        process.env.TREASURY_ADDRESS ?? "",
+      );
+    }
+    return this._intentUseCase;
   }
 
   getUseCase(): IAssistantUseCase {
     if (!this.useCase) {
       const sqlDB = this.getSqlDB();
 
-      const orchestrator = new OpenAIOrchestrator(
-        process.env.OPENAI_API_KEY ?? "",
-        process.env.OPENAI_MODEL ?? "gpt-4o",
+      const orchestrator = new AnthropicOrchestrator(
+        process.env.ANTHROPIC_API_KEY ?? "",
+        process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
       );
 
       const webSearchService = new TavilyWebSearchService(
         process.env.TAVILY_API_KEY ?? "",
       );
 
-      const registryFactory = (_userId: string): IToolRegistry => {
+      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const intentUseCase = this.getIntentUseCase();
+      const tokenRegistryService = this.getTokenRegistryService();
+      const viemClient = this.getViemClient();
+      const userProfileDB = sqlDB.userProfiles;
+
+      const registryFactory = (userId: string, conversationId: string): IToolRegistry => {
         const r = new ToolRegistryConcrete();
         r.register(new WebSearchTool(webSearchService));
+        r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
+        r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId));
         return r;
       };
 
@@ -56,10 +190,44 @@ export class AssistantInject {
 
   getAuthUseCase(): IAuthUseCase {
     if (!this._authUseCase) {
+      const db = this.getSqlDB();
+      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const botAddress = process.env.BOT_ADDRESS ?? "";
+
+      let smartAccountService: SmartAccountAdapter | undefined;
+      let sessionKeyService: SessionKeyAdapter | undefined;
+
+      if (process.env.BOT_PRIVATE_KEY && process.env.JARVIS_ACCOUNT_FACTORY_ADDRESS) {
+        if (!this._smartAccountService) {
+          this._smartAccountService = new SmartAccountAdapter(
+            this.getViemClient(),
+            process.env.JARVIS_ACCOUNT_FACTORY_ADDRESS,
+            botAddress,
+          );
+        }
+        smartAccountService = this._smartAccountService;
+      }
+
+      if (process.env.BOT_PRIVATE_KEY && process.env.SESSION_KEY_MANAGER_ADDRESS) {
+        if (!this._sessionKeyService) {
+          this._sessionKeyService = new SessionKeyAdapter(
+            this.getViemClient(),
+            process.env.SESSION_KEY_MANAGER_ADDRESS,
+            botAddress,
+          );
+        }
+        sessionKeyService = this._sessionKeyService;
+      }
+
       this._authUseCase = new AuthUseCaseImpl(
-        this.getSqlDB().users,
+        db.users,
         process.env.JWT_SECRET ?? "",
         process.env.JWT_EXPIRES_IN ?? "7d",
+        db.userProfiles,
+        smartAccountService,
+        sessionKeyService,
+        // Default allowed token addresses for Fuji
+        ["0x5425890298aed601595a70AB815c96711a31Bc65", "0xd00ae08403B9bbb9124bB305C09058E32C39A48c"],
       );
     }
     return this._authUseCase;
@@ -67,6 +235,18 @@ export class AssistantInject {
 
   getHttpApiServer(): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
-    return new HttpApiServer(this.getAuthUseCase(), null, port);
+    const db = this.getSqlDB();
+    const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    return new HttpApiServer(
+      this.getAuthUseCase(),
+      null,
+      port,
+      process.env.JWT_SECRET,
+      this.getIntentUseCase(),
+      db.userProfiles,
+      this.getTokenRegistryService(),
+      this.getViemClient(),
+      chainId,
+    );
   }
 }

@@ -3,20 +3,30 @@ import jwt from "jsonwebtoken";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import { USER_STATUSES } from "../../helpers/enums/statuses.enum";
+import { SESSION_KEY_STATUSES } from "../../helpers/enums/sessionKeyStatus.enum";
 import type { IUserDB } from "../interface/output/repository/user.repo";
+import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
 import type {
   IAuthUseCase,
   ILoginInput,
   IRegisterInput,
 } from "../interface/input/auth.interface";
+import type { ISmartAccountService } from "../interface/output/blockchain/smartAccount.interface";
+import type { ISessionKeyService } from "../interface/output/blockchain/sessionKey.interface";
 
 const BCRYPT_ROUNDS = 10;
+const SESSION_KEY_DURATION_SECS = 30 * 24 * 60 * 60; // 30 days
+const DEFAULT_MAX_AMOUNT_PER_TX_USD = 1000;
 
 export class AuthUseCaseImpl implements IAuthUseCase {
   constructor(
     private readonly userDB: IUserDB,
     private readonly jwtSecret: string,
     private readonly jwtExpiresIn: string,
+    private readonly userProfileDB?: IUserProfileDB,
+    private readonly smartAccountService?: ISmartAccountService,
+    private readonly sessionKeyService?: ISessionKeyService,
+    private readonly allowedTokenAddresses?: string[],
   ) {}
 
   async register(input: IRegisterInput): Promise<{ userId: string }> {
@@ -36,6 +46,51 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       createdAtEpoch: now,
       updatedAtEpoch: now,
     });
+
+    // Deploy SCA + grant session key if blockchain services are available
+    if (this.smartAccountService && this.userProfileDB) {
+      try {
+        const { smartAccountAddress } = await this.smartAccountService.deploy(userId);
+
+        let sessionKeyAddress: string | undefined;
+        let sessionKeyStatus = SESSION_KEY_STATUSES.PENDING;
+        const expiresAtEpoch = now + SESSION_KEY_DURATION_SECS;
+
+        if (this.sessionKeyService) {
+          const scope = {
+            maxAmountPerTxUsd: DEFAULT_MAX_AMOUNT_PER_TX_USD,
+            allowedTokenAddresses: this.allowedTokenAddresses ?? [],
+            expiresAtEpoch,
+          };
+          const grantResult = await this.sessionKeyService.grant({ smartAccountAddress, scope });
+          sessionKeyAddress = grantResult.sessionKeyAddress;
+          sessionKeyStatus = SESSION_KEY_STATUSES.ACTIVE;
+        }
+
+        await this.userProfileDB.upsert({
+          userId,
+          smartAccountAddress,
+          sessionKeyAddress: sessionKeyAddress ?? null,
+          sessionKeyScope: JSON.stringify({
+            maxAmountPerTxUsd: DEFAULT_MAX_AMOUNT_PER_TX_USD,
+            allowedTokenAddresses: this.allowedTokenAddresses ?? [],
+            expiresAtEpoch,
+          }),
+          sessionKeyStatus,
+          sessionKeyExpiresAtEpoch: expiresAtEpoch,
+          createdAtEpoch: now,
+          updatedAtEpoch: now,
+        });
+      } catch (err) {
+        // Non-fatal: log and continue — user is created, SCA will be deployed lazily
+        console.error("SCA deployment failed during registration:", err);
+        await this.userProfileDB.upsert({
+          userId,
+          createdAtEpoch: now,
+          updatedAtEpoch: now,
+        });
+      }
+    }
 
     return { userId };
   }

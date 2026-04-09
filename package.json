@@ -39,6 +39,7 @@
     "typescript-eslint": "8.54.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.86.1",
     "@googleapis/calendar": "9.7.0",
     "@googleapis/gmail": "8.0.0",
     "@pinecone-database/pinecone": "7.0.0",
@@ -53,6 +54,7 @@
     "openai": "6.22.0",
     "pg": "8.18.0",
     "uuid": "13.0.0",
+    "viem": "^2.47.10",
     "zod": "4.3.6"
   }
 }

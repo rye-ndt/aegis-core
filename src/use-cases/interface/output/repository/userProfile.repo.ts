@@ -1,0 +1,45 @@
+import type { SESSION_KEY_STATUSES } from "../../../../helpers/enums/sessionKeyStatus.enum";
+
+export interface IUserProfile {
+  userId: string;
+  telegramChatId?: string | null;
+  smartAccountAddress?: string | null;
+  eoaAddress?: string | null;
+  sessionKeyAddress?: string | null;
+  sessionKeyScope?: string | null;
+  sessionKeyStatus?: SESSION_KEY_STATUSES | null;
+  sessionKeyExpiresAtEpoch?: number | null;
+  createdAtEpoch: number;
+  updatedAtEpoch: number;
+}
+
+export interface UserProfileInit {
+  userId: string;
+  telegramChatId?: string | null;
+  smartAccountAddress?: string | null;
+  eoaAddress?: string | null;
+  sessionKeyAddress?: string | null;
+  sessionKeyScope?: string | null;
+  sessionKeyStatus?: SESSION_KEY_STATUSES | null;
+  sessionKeyExpiresAtEpoch?: number | null;
+  createdAtEpoch: number;
+  updatedAtEpoch: number;
+}
+
+export interface UserProfileUpdate {
+  userId: string;
+  telegramChatId?: string | null;
+  smartAccountAddress?: string | null;
+  eoaAddress?: string | null;
+  sessionKeyAddress?: string | null;
+  sessionKeyScope?: string | null;
+  sessionKeyStatus?: SESSION_KEY_STATUSES | null;
+  sessionKeyExpiresAtEpoch?: number | null;
+  updatedAtEpoch: number;
+}
+
+export interface IUserProfileDB {
+  upsert(profile: UserProfileInit): Promise<void>;
+  update(profile: UserProfileUpdate): Promise<void>;
+  findByUserId(userId: string): Promise<IUserProfile | undefined>;
+}
