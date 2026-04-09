@@ -1,4 +1,3 @@
-import { PERSONALITIES } from "../../../../helpers/enums/personalities.enum";
 import { USER_STATUSES } from "../../../../helpers/enums/statuses.enum";
 
 export interface UserInit {
@@ -20,10 +19,7 @@ export interface UserUpdate {
   updatedAtEpoch: number;
 }
 
-export interface IUser extends UserInit {
-  personalities: PERSONALITIES[];
-  secondaryPersonalities: string[];
-}
+export interface IUser extends UserInit {}
 
 export interface IUserDB {
   create(user: UserInit): Promise<void>;

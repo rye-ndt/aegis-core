@@ -13,18 +13,12 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   const inject = new AssistantInject();
   const useCase = inject.getUseCase();
   const sqlDB = inject.getSqlDB();
-  const googleOAuthService = inject.getGoogleOAuthService();
-  const tts = inject.getTTS();
 
   const httpServer = inject.getHttpApiServer();
   httpServer.start();
 
   const handler = new TelegramAssistantHandler(
     useCase,
-    sqlDB.userProfiles,
-    googleOAuthService,
-    tts,
-    inject.getTextGenerator(),
     inject.getAuthUseCase(),
     sqlDB.telegramSessions,
     token,
@@ -32,13 +26,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
 
   const bot = new TelegramBot(token, handler);
 
-  const notificationRunner = inject.getNotificationRunner(bot);
-  notificationRunner.start();
-
-  inject.getCalendarCrawler().start();
-  inject.getDailySummaryCrawler(bot).start();
-
-  console.log("JARVIS Telegram is up and running.");
+  console.log("Onchain Agent Telegram is up and running.");
 
   process.on("SIGINT", async () => {
     console.log("\nShutting down…");

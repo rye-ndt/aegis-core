@@ -2,7 +2,6 @@ import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
-import type { GoogleOAuthService } from "../../output/googleOAuth/googleOAuth.service";
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -20,7 +19,7 @@ export class HttpApiServer {
 
   constructor(
     private readonly authUseCase: IAuthUseCase,
-    private readonly googleOAuthService: GoogleOAuthService,
+    _unused: null,
     private readonly port: number,
   ) {
     this.server = http.createServer((req, res) => {
@@ -41,12 +40,6 @@ export class HttpApiServer {
     }
     if (method === "POST" && url.pathname === "/auth/login") {
       return this.handleLogin(req, res);
-    }
-    if (method === "GET" && url.pathname === "/auth/google") {
-      return this.handleGoogleAuthUrl(req, res);
-    }
-    if (method === "GET" && url.pathname === "/api/auth/google/calendar/callback") {
-      return this.handleGoogleCallback(req, res, url);
     }
 
     res.writeHead(404);
@@ -99,55 +92,6 @@ export class HttpApiServer {
       }
       throw err;
     }
-  }
-
-  private async handleGoogleAuthUrl(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const token = this.extractBearerToken(req);
-    if (!token) {
-      return this.sendJson(res, 401, { error: "Missing authorization token" });
-    }
-
-    let userId: string;
-    try {
-      const validated = await this.authUseCase.validateToken(token);
-      userId = validated.userId;
-    } catch {
-      return this.sendJson(res, 401, { error: "Invalid or expired token" });
-    }
-
-    const url = this.googleOAuthService.generateAuthUrl(userId);
-    return this.sendJson(res, 200, { url });
-  }
-
-  private async handleGoogleCallback(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    url: URL,
-  ): Promise<void> {
-    const code = url.searchParams.get("code");
-    const userId = url.searchParams.get("state");
-
-    if (!code || !userId) {
-      res.writeHead(400);
-      res.end("Missing code or state parameter.");
-      return;
-    }
-
-    try {
-      await this.googleOAuthService.handleCallback(code, userId);
-      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      res.end(`<html><head><meta charset="utf-8"></head><body><h2>Authorization complete.</h2><p>Return to Telegram &mdash; you're all set.</p></body></html>`);
-    } catch (err) {
-      console.error("OAuth callback error:", err);
-      res.writeHead(500);
-      res.end("Authorization failed. The code may be expired. Try again.");
-    }
-  }
-
-  private extractBearerToken(req: http.IncomingMessage): string | null {
-    const auth = req.headers["authorization"];
-    if (!auth || !auth.startsWith("Bearer ")) return null;
-    return auth.slice(7);
   }
 
   private readJson(req: http.IncomingMessage): Promise<unknown> {

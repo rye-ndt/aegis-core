@@ -7,7 +7,6 @@ import type {
   UserInit,
   UserUpdate,
 } from "../../../../../use-cases/interface/output/repository/user.repo";
-import { PERSONALITIES } from "../../../../../helpers/enums/personalities.enum";
 import { USER_STATUSES } from "../../../../../helpers/enums/statuses.enum";
 import { users } from "../schema";
 
@@ -21,8 +20,6 @@ export class DrizzleUserRepo implements IUserDB {
       hashedPassword: user.hashedPassword,
       email: user.email,
       status: user.status,
-      personalities: [],
-      secondaryPersonalities: [],
       createdAtEpoch: user.createdAtEpoch,
       updatedAtEpoch: user.updatedAtEpoch,
     });
@@ -47,7 +44,6 @@ export class DrizzleUserRepo implements IUserDB {
       .from(users)
       .where(eq(users.id, id))
       .limit(1);
-
     if (!rows[0]) return undefined;
     return this.toIUser(rows[0]);
   }
@@ -69,8 +65,6 @@ export class DrizzleUserRepo implements IUserDB {
       hashedPassword: row.hashedPassword,
       email: row.email,
       status: row.status as USER_STATUSES,
-      personalities: row.personalities as PERSONALITIES[],
-      secondaryPersonalities: row.secondaryPersonalities,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,
     };

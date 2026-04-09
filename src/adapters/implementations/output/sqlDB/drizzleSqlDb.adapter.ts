@@ -9,26 +9,12 @@ import { PostgresDB, type PostgresConfig } from "./drizzlePostgres.db";
 import { DrizzleUserRepo } from "./repositories/user.repo";
 import { DrizzleConversationRepo } from "./repositories/conversation.repo";
 import { DrizzleMessageRepo } from "./repositories/message.repo";
-import { DrizzleJarvisConfigRepo } from "./repositories/jarvisConfig.repo";
-import { DrizzleUserMemoryRepo } from "./repositories/userMemory.repo";
-import { DrizzleGoogleOAuthTokenRepo } from "./repositories/googleOAuthToken.repo";
-import { DrizzleTodoItemRepo } from "./repositories/todoItem.repo";
-import { DrizzleUserProfileRepo } from "./repositories/userProfile.repo";
-import { DrizzleEvaluationLogRepo } from "./repositories/evaluationLog.repo";
-import { DrizzleScheduledNotificationRepo } from "./repositories/scheduledNotification.repo";
 import { DrizzleTelegramSessionRepo } from "./repositories/telegramSession.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
   readonly conversations: DrizzleConversationRepo;
   readonly messages: DrizzleMessageRepo;
-  readonly jarvisConfig: DrizzleJarvisConfigRepo;
-  readonly userMemories: DrizzleUserMemoryRepo;
-  readonly googleOAuthTokens: DrizzleGoogleOAuthTokenRepo;
-  readonly todoItems: DrizzleTodoItemRepo;
-  readonly userProfiles: DrizzleUserProfileRepo;
-  readonly evaluationLogs: DrizzleEvaluationLogRepo;
-  readonly scheduledNotifications: DrizzleScheduledNotificationRepo;
   readonly telegramSessions: DrizzleTelegramSessionRepo;
 
   constructor(config: PostgresConfig) {
@@ -36,15 +22,6 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.users = new DrizzleUserRepo(this.db);
     this.conversations = new DrizzleConversationRepo(this.db);
     this.messages = new DrizzleMessageRepo(this.db);
-    this.jarvisConfig = new DrizzleJarvisConfigRepo(this.db);
-    this.userMemories = new DrizzleUserMemoryRepo(this.db);
-    this.googleOAuthTokens = new DrizzleGoogleOAuthTokenRepo(this.db);
-    this.todoItems = new DrizzleTodoItemRepo(this.db);
-    this.userProfiles = new DrizzleUserProfileRepo(this.db);
-    this.evaluationLogs = new DrizzleEvaluationLogRepo(this.db);
-    this.scheduledNotifications = new DrizzleScheduledNotificationRepo(
-      this.db,
-    );
     this.telegramSessions = new DrizzleTelegramSessionRepo(this.db);
   }
 
