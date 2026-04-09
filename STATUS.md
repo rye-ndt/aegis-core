@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-09 (token enrichment)
+> Last updated: 2026-04-09 (dynamic tool registry — parts 1 & 2)
 
 ---
 
@@ -16,7 +16,7 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry, parts 1–2 of 3) 🔄**
 
 ---
 
@@ -53,16 +53,18 @@ src/
 │   │   ├── assistant.usecase.ts    # chat(), listConversations(), getConversation()
 │   │   ├── auth.usecase.ts         # register() → deploys SCA + grants session key
 │   │   ├── intent.usecase.ts       # parseAndExecute() → confirmAndExecute()
-│   │   └── tokenIngestion.usecase.ts # ingest() — fetch → map → upsert token registry
+│   │   ├── tokenIngestion.usecase.ts # ingest() — fetch → map → upsert token registry
+│   │   └── toolRegistration.usecase.ts # register() + list() — Zod validation, collision check
 │   └── interface/
 │       ├── input/                  # IAssistantUseCase, IAuthUseCase, IIntentUseCase,
-│       │                           # ITokenIngestionUseCase
+│       │                           # ITokenIngestionUseCase, IToolRegistrationUseCase
 │       └── output/                 # Outbound ports
 │           ├── blockchain/         # ISmartAccountService, ISessionKeyService,
 │           │                       # IUserOperationBuilder, IPaymasterService
-│           ├── solver/             # ISolver, ISolverRegistry
+│           ├── solver/             # ISolver, ISolverRegistry (async getSolverAsync)
 │           ├── repository/         # 9 repo interfaces (users → feeRecords)
-│           ├── intentParser.interface.ts   # IntentPackage, SimulationReport
+│           ├── intentParser.interface.ts   # IntentPackage (action: string, params?), SimulationReport
+│           ├── toolManifest.types.ts       # ToolManifest Zod schemas + deserializeManifest
 │           ├── simulator.interface.ts
 │           ├── tokenCrawler.interface.ts   # ITokenCrawlerJob, CrawledToken
 │           └── tokenRegistry.interface.ts
@@ -84,9 +86,13 @@ src/
 │           ├── blockchain/        # viemClient, smartAccount, sessionKey,
 │           │                      # userOperation.builder, paymaster
 │           ├── solver/
-│           │   ├── solverRegistry.ts
+│           │   ├── solverRegistry.ts             # async DB fallback via ManifestDrivenSolver
 │           │   ├── static/claimRewards.solver.ts
-│           │   └── restful/traderJoe.solver.ts
+│           │   ├── restful/traderJoe.solver.ts
+│           │   └── manifestSolver/               # dynamic tool execution engine
+│           │       ├── templateEngine.ts         # {{x.y.z}} resolver
+│           │       ├── stepExecutors.ts          # http_get, http_post, abi_encode, erc20_transfer…
+│           │       └── manifestDriven.solver.ts  # ISolver driven by ToolManifest steps
 │           ├── simulator/         # rpc.simulator.ts — viem eth_call simulation
 │           ├── intentParser/      # anthropic.intentParser.ts — LLM → IntentPackage
 │           ├── tokenRegistry/     # db.tokenRegistry.ts
@@ -104,7 +110,7 @@ src/
     ├── enums/                     # TOOL_TYPE, MESSAGE_ROLE, USER_STATUSES,
     │                              # CONVERSATION_STATUSES, INTENT_STATUSES,
     │                              # EXECUTION_STATUSES, SESSION_KEY_STATUSES,
-    │                              # SOLVER_TYPE
+    │                              # SOLVER_TYPE, TOOL_CATEGORY
     ├── time/dateTime.ts           # newCurrentUTCEpoch() — seconds, not ms
     └── uuid.ts                    # newUuid() — v4
 ```
@@ -153,6 +159,52 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
 ---
 
+## System flow — user prompt to on-chain action
+
+This section describes the full journey from the moment a user types a message to the point where a transaction lands on-chain. Each layer hands off to the next; no layer skips another.
+
+### 1. User sends a message
+
+The user types a natural language prompt in Telegram (e.g. *"Swap 100 USDC for AVAX"*) or calls the HTTP API. The **Telegram bot** or **HTTP handler** forwards the text to the **AssistantUseCase**.
+
+### 2. LLM conversation loop
+
+The **AnthropicOrchestrator** sends the message (plus the full conversation history) to Claude. Claude decides whether to answer conversationally or invoke one of its registered tools. For trading actions it invokes `execute_intent`. This loop runs up to `MAX_TOOL_ROUNDS` times — Claude can call web-search, portfolio reads, and intent execution in the same turn.
+
+### 3. Intent parsing
+
+`ExecuteIntentTool` calls **IntentUseCaseImpl.parseAndExecute()**. The first step is parsing: **AnthropicIntentParser** sends the last few messages to Claude in structured-output mode and gets back a strict JSON `IntentPackage` — action, tokens, amount, slippage, confidence. If confidence is below 0.7 the request is rejected immediately.
+
+### 4. Token resolution
+
+The token symbols from the `IntentPackage` (e.g. `"USDC"`, `"AVAX"`) are looked up in the **TokenRegistry** (PostgreSQL). Each symbol resolves to a chain-specific contract address and decimal precision. If a symbol is ambiguous (multiple matches) the Telegram handler shows a disambiguation menu; the user picks a number and the flow restarts.
+
+### 5. Solver selection
+
+**SolverRegistry.getSolverAsync()** looks up the action string. Hardcoded solvers (`swap`, `claim_rewards`) are checked first. If nothing matches, the registry queries the **tool_manifests** table for a dynamic tool whose `toolId` equals the action string — and wraps it in a **ManifestDrivenSolver**.
+
+### 6. Calldata construction
+
+The solver's `buildCalldata()` runs. For a **ManifestDrivenSolver** this executes the tool's step pipeline sequentially: HTTP calls fetch quotes, ABI-encode steps produce calldata, template expressions (`{{intent.amountHuman}}`) resolve against the intent context. The final step must produce `{ to, data, value }` — the raw EVM transaction payload.
+
+### 7. Pre-flight simulation
+
+The calldata is wrapped in a **UserOperation** (ERC-4337) and sent to `eth_call` via **RpcSimulator**. The simulator decodes token deltas and checks for reverts. If the simulation fails, the intent is marked `SIMULATION_FAILED` and the user gets a human-readable explanation — no gas is consumed.
+
+### 8. Confirmation gate
+
+If simulation passes, the intent is saved to the database with status `AWAITING_CONFIRMATION`. The user receives a pre-flight summary: what goes in, what comes out, estimated gas. They must type `/confirm` (Telegram) or call `POST /intent/:id/confirm` (API) to proceed.
+
+### 9. On-chain submission
+
+**UserOpBuilder.submit()** signs the `UserOperation` with the bot's **Session Key** and sends it to the ERC-4337 bundler. The bundler broadcasts it to the network. The builder polls for the receipt until the transaction is mined or times out.
+
+### 10. Fee collection & result
+
+After the transaction lands, a 1% protocol fee is recorded in `fee_records`. **TxResultParser** translates the raw receipt into a human string (*"Swapped 100 USDC → 0.42 AVAX. txHash: 0xabc…"*). The intent status is updated to `COMPLETED`. The result is returned up the call stack and displayed to the user.
+
+---
+
 ## Intent execution flow
 
 ```text
@@ -167,7 +219,7 @@ IntentUseCaseImpl.parseAndExecute()
   1. AnthropicIntentParser.parse()     → IntentPackage (JSON)
   2. TokenRegistry.resolve()           → fill addresses + decimals
   3. Confidence check (< 0.7 → reject)
-  4. SolverRegistry.getSolver("swap")  → TraderJoeSolver
+  4. SolverRegistry.getSolverAsync("swap") → TraderJoeSolver (hardcoded) or ManifestDrivenSolver (DB)
   5. solver.buildCalldata()            → { to, data, value }
   6. UserOpBuilder.build()             → IUserOperation
   7. RpcSimulator.simulate()           → SimulationReport
@@ -201,7 +253,7 @@ IntentUseCaseImpl.confirmAndExecute()
 | `token_registry`    | Symbol → address + decimals per chainId; `deployer_address` nullable  |
 | `intents`           | Parsed intent records with status lifecycle                          |
 | `intent_executions` | Per-attempt execution records with userOpHash + txHash               |
-| `tool_manifests`    | Solver registry with rev-share metadata                              |
+| `tool_manifests`    | Dynamic tool registry — toolId slug, category, steps (JSON), inputSchema, chainIds |
 | `fee_records`       | Audit trail of every 1% protocol fee collected                       |
 
 ---
@@ -256,7 +308,23 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] `validateIntent` wired into `message:text` handler — called after `parse`, inside the same try/catch; history preserved on `MissingFieldsError`/`InvalidFieldError` for multi-turn; only cleared on full validation pass
 - [x] `telegramCli.ts` — wired `tokenRegistryService` and `chainId` into `TelegramAssistantHandler` constructor (were `undefined`)
 
+### Phase 6 — Dynamic Tool Registry 🔄
+- [x] `TOOL_CATEGORY` enum (`erc20_transfer`, `swap`, `contract_interaction`)
+- [x] `ToolManifestSchema` — Zod discriminated-union step schemas + `deserializeManifest()`
+- [x] `IntentPackage.action` widened to `string`; `params?` added; `relevantManifests?` on `IIntentParser.parse()`
+- [x] `tool_manifests` table rewrite — migration `0013_dynamic_tool_registry`; new columns: `tool_id`, `category`, `protocol_name`, `tags`, `priority`, `is_default`, `steps`, `preflight_preview`, `revenue_wallet`, `is_verified`
+- [x] `IToolManifestDB` — new interface: `create`, `findByToolId`, `findById`, `listActive`, `deactivate`, `search()`
+- [x] `DrizzleToolManifestRepo` — full rewrite; `search()` uses `ilike` OR across name/description/protocolName/tags; DB-level chainId filter via ilike
+- [x] `ToolRegistrationUseCase` — Zod validation → reserved-id guard → collision check → abi_encode address validation → serialize → DB create
+- [x] `templateEngine.ts` — `{{x.y.z}}` resolver; `TemplateResolutionError`; no eval
+- [x] `stepExecutors.ts` — `http_get`, `http_post`, `abi_encode`, `calldata_passthrough`, `erc20_transfer` executors; minimal JSONPath (`$.field`, `$.nested.field`)
+- [x] `ManifestDrivenSolver` — implements `ISolver`; sequential step pipeline; `ctx.steps[name]` accumulation
+- [x] `SolverRegistry` — `getSolver` → `getSolverAsync`; hardcoded-first then DB fallback via `ManifestDrivenSolver`
+- [x] `intent.validator.ts` — `manifest?` param; dynamic `inputSchema.required` check when provided
+- [ ] **Part 3** — `AnthropicIntentParser` wiring (`relevantManifests`), `IntentUseCaseImpl` discovery pipeline, HTTP API (`POST /tools`, `GET /tools`), `assistant.di.ts` full wiring
+
 ### Next steps
+- [ ] Implement Part 3 of dynamic-tool-registry-plan
 - [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
 - [ ] Fill `.env` with `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
 - [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash

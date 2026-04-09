@@ -53,21 +53,11 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
   }
 
   async listActive(chainId?: number): Promise<IToolManifestRecord[]> {
-    const rows = await this.db
-      .select()
-      .from(toolManifests)
-      .where(eq(toolManifests.isActive, true));
-    if (chainId == null) return rows.map((r) => this.toRecord(r));
-    return rows
-      .filter((r) => {
-        try {
-          const ids: number[] = JSON.parse(r.chainIds);
-          return ids.includes(chainId);
-        } catch {
-          return false;
-        }
-      })
-      .map((r) => this.toRecord(r));
+    const condition = chainId != null
+      ? and(eq(toolManifests.isActive, true), ilike(toolManifests.chainIds, `%${chainId}%`))
+      : eq(toolManifests.isActive, true);
+    const rows = await this.db.select().from(toolManifests).where(condition);
+    return rows.map((r) => this.toRecord(r));
   }
 
   async deactivate(toolId: string): Promise<void> {

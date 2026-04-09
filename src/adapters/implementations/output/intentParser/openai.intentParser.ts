@@ -58,7 +58,7 @@ export class OpenAIIntentParser implements IIntentParser {
   async parse(
     messages: string[],
     _userId: string,
-    _relevantManifests?: ToolManifest[],   // accepted, ignored
+    _relevantManifests?: ToolManifest[],
   ): Promise<IntentPackage | null> {
     const window = messages.slice(-WINDOW_SIZE);
 

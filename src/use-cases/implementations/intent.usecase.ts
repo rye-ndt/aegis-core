@@ -137,7 +137,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     // 4. Get solver
-    const solver = this.solverRegistry.getSolver(intent.action);
+    const solver = await this.solverRegistry.getSolverAsync(intent.action);
     if (!solver) {
       await this.intentDB.create({
         id: intentId,
@@ -281,7 +281,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const profile = await this.userProfileDB.findByUserId(params.userId);
     const smartAccountAddress = profile?.smartAccountAddress ?? params.userId;
 
-    const solver = this.solverRegistry.getSolver(intentPackage.action);
+    const solver = await this.solverRegistry.getSolverAsync(intentPackage.action);
     if (!solver) {
       await this.intentDB.updateStatus(
         params.intentId,

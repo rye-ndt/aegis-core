@@ -41,7 +41,6 @@ export const CalldataPassthroughStepSchema = z.object({
 export const Erc20TransferStepSchema = z.object({
   kind: z.literal("erc20_transfer"),
   name: z.string(),
-  // params always come from intent.fromToken, intent.recipient, intent.amountRaw
 });
 
 export const ToolStepSchema = z.discriminatedUnion("kind", [

@@ -4,6 +4,7 @@ import type {
   IntentPackage,
   Address,
 } from "../../../../use-cases/interface/output/intentParser.interface";
+import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 
 export class MissingFieldsError extends Error {
   constructor(
@@ -58,22 +59,35 @@ const FIELD_PROMPTS: Partial<Record<keyof IntentPackage, string>> = {
  * Validates a parsed IntentPackage against domain rules.
  * Throws MissingFieldsError, InvalidFieldError, or ConversationLimitError.
  * Mutates `intent.recipient` to the Address branded type on success.
+ * When `manifest` is provided, required fields come from its inputSchema.required.
  */
 export function validateIntent(
   intent: IntentPackage,
   messageCount: number,
+  manifest?: ToolManifest,
 ): void {
   const atLimit = messageCount >= WINDOW_SIZE;
 
-  // Required fields per action
-  const required = REQUIRED_FIELDS[intent.action as INTENT_ACTION] ?? [];
-  const missingFields = required.filter((field) => intent[field] == null);
+  let required: string[];
+  if (manifest) {
+    const schema = manifest.inputSchema as { required?: string[] };
+    required = schema.required ?? [];
+  } else {
+    required = (REQUIRED_FIELDS[intent.action as INTENT_ACTION] ?? []) as string[];
+  }
+
+  const missingFields = required.filter((field) => {
+    const val = (intent as unknown as Record<string, unknown>)[field] ?? intent.params?.[field];
+    return val == null;
+  });
 
   if (missingFields.length > 0) {
     if (atLimit) throw new ConversationLimitError();
-    const descriptions = missingFields.map((f) => FIELD_PROMPTS[f] ?? f);
+    const descriptions = missingFields.map((f) => {
+      return FIELD_PROMPTS[f as keyof IntentPackage] ?? f;
+    });
     throw new MissingFieldsError(
-      missingFields as string[],
+      missingFields,
       `To complete your ${intent.action}, I still need: ${descriptions.join(", ")}.`,
     );
   }
@@ -86,7 +100,6 @@ export function validateIntent(
         `"${intent.recipient}" is not a valid Ethereum address. Please provide a valid 0x... address.`,
       );
     }
-    // Narrow to branded Address type
     (intent as { recipient: Address }).recipient = intent.recipient as Address;
   }
 
