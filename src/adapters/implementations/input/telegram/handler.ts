@@ -8,6 +8,12 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
+import type { IIntentParser } from "../../../../use-cases/interface/output/intentParser.interface";
+import {
+  MissingFieldsError,
+  ConversationLimitError,
+  InvalidFieldError,
+} from "../../output/intentParser/intent.validator";
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
@@ -15,6 +21,7 @@ export class TelegramAssistantHandler {
     number,
     { userId: string; expiresAtEpoch: number }
   >();
+  private intentHistory = new Map<number, string[]>();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
@@ -26,6 +33,7 @@ export class TelegramAssistantHandler {
     private readonly tokenRegistryService?: ITokenRegistryService,
     private readonly viemClient?: ViemClientAdapter,
     private readonly chainId?: number,
+    private readonly intentParser?: IIntentParser,
   ) {}
 
   register(bot: Bot): void {
@@ -174,17 +182,23 @@ export class TelegramAssistantHandler {
       try {
         const profile = await this.userProfileDB?.findByUserId(session.userId);
         if (!profile?.smartAccountAddress) {
-          await ctx.reply("No wallet found. Complete registration to deploy your Smart Contract Account.");
+          await ctx.reply(
+            "No wallet found. Complete registration to deploy your Smart Contract Account.",
+          );
           return;
         }
         const lines = [
           "🔑 Wallet Info",
           `Smart Account: \`${profile.smartAccountAddress}\``,
-          profile.sessionKeyAddress ? `Session Key: \`${profile.sessionKeyAddress}\`` : "Session Key: Not set",
+          profile.sessionKeyAddress
+            ? `Session Key: \`${profile.sessionKeyAddress}\``
+            : "Session Key: Not set",
           `Session Key Status: ${profile.sessionKeyStatus ?? "N/A"}`,
         ];
         if (profile.sessionKeyExpiresAtEpoch) {
-          const expiresDate = new Date(profile.sessionKeyExpiresAtEpoch * 1000).toISOString().split("T")[0];
+          const expiresDate = new Date(profile.sessionKeyExpiresAtEpoch * 1000)
+            .toISOString()
+            .split("T")[0];
           lines.push(`Expires: ${expiresDate}`);
         }
         await this.safeSend(ctx, lines.join("\n"));
@@ -218,7 +232,9 @@ export class TelegramAssistantHandler {
         await this.safeSend(ctx, reply);
       } catch (err) {
         console.error("Error handling photo:", err);
-        await ctx.reply("Sorry, I couldn't process that image. Please try again.");
+        await ctx.reply(
+          "Sorry, I couldn't process that image. Please try again.",
+        );
       }
     });
 
@@ -228,19 +244,47 @@ export class TelegramAssistantHandler {
         await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
-      const conversationId = this.conversations.get(ctx.chat.id);
       await ctx.replyWithChatAction("typing");
       try {
-        const response = await this.assistantUseCase.chat({
-          userId: session.userId,
-          conversationId,
-          message: ctx.message.text,
-        });
-        this.conversations.set(ctx.chat.id, response.conversationId);
-        let reply = response.reply;
-        if (response.toolsUsed.length > 0)
-          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-        await this.safeSend(ctx, reply);
+        // --- INTENT PARSE TEST ---
+        if (!this.intentParser) {
+          await ctx.reply("Intent parser not configured.");
+          return;
+        }
+
+        const chatId = ctx.chat.id;
+        const history = this.intentHistory.get(chatId) ?? [];
+        history.push(ctx.message.text);
+        this.intentHistory.set(chatId, history);
+
+        let intent;
+        try {
+          intent = await this.intentParser.parse(history, session.userId);
+        } catch (parseErr) {
+          if (parseErr instanceof ConversationLimitError) {
+            this.intentHistory.delete(chatId);
+            await ctx.reply(parseErr.message);
+            return;
+          }
+          if (parseErr instanceof MissingFieldsError || parseErr instanceof InvalidFieldError) {
+            await ctx.reply(parseErr.prompt);
+            return;
+          }
+          throw parseErr;
+        }
+
+        // Successful parse — clear history so next intent starts fresh
+        this.intentHistory.delete(chatId);
+
+        if (intent === null) {
+          await ctx.reply("No onchain intent detected.");
+          return;
+        }
+        await this.safeSend(
+          ctx,
+          `Parsed intent:\n\`\`\`json\n${JSON.stringify(intent, null, 2)}\n\`\`\``,
+        );
+        // --- END INTENT PARSE TEST ---
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
@@ -261,7 +305,12 @@ export class TelegramAssistantHandler {
   }
 
   private async fetchPortfolio(userId: string): Promise<string> {
-    if (!this.userProfileDB || !this.tokenRegistryService || !this.viemClient || !this.chainId) {
+    if (
+      !this.userProfileDB ||
+      !this.tokenRegistryService ||
+      !this.viemClient ||
+      !this.chainId
+    ) {
       return "Portfolio service not configured.";
     }
     const profile = await this.userProfileDB.findByUserId(userId);
@@ -282,20 +331,30 @@ export class TelegramAssistantHandler {
       },
     ] as const;
 
-    const rows: string[] = ["💼 Portfolio", `SCA: \`${scaAddress}\``, "", "Token | Balance", "------|-------"];
+    const rows: string[] = [
+      "💼 Portfolio",
+      `SCA: \`${scaAddress}\``,
+      "",
+      "Token | Balance",
+      "------|-------",
+    ];
     for (const token of tokens) {
       let rawBalance: bigint;
       if (token.isNative) {
-        rawBalance = await this.viemClient.publicClient.getBalance({ address: scaAddress });
+        rawBalance = await this.viemClient.publicClient.getBalance({
+          address: scaAddress,
+        });
       } else {
-        rawBalance = await this.viemClient.publicClient.readContract({
+        rawBalance = (await this.viemClient.publicClient.readContract({
           address: token.address as `0x${string}`,
           abi: ERC20_BALANCE_ABI,
           functionName: "balanceOf",
           args: [scaAddress],
-        }) as bigint;
+        })) as bigint;
       }
-      const humanBalance = (Number(rawBalance) / 10 ** token.decimals).toFixed(6);
+      const humanBalance = (Number(rawBalance) / 10 ** token.decimals).toFixed(
+        6,
+      );
       rows.push(`${token.symbol} | ${humanBalance}`);
     }
     return rows.join("\n");
@@ -325,7 +384,10 @@ export class TelegramAssistantHandler {
     return { userId: session.userId };
   }
 
-  private async safeSend(ctx: { reply: (text: string, opts?: object) => Promise<unknown> }, text: string): Promise<void> {
+  private async safeSend(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    text: string,
+  ): Promise<void> {
     try {
       await ctx.reply(text, { parse_mode: "Markdown" });
     } catch {

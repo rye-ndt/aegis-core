@@ -66,11 +66,13 @@ export class SessionKeyAdapter implements ISessionKeyService {
       ],
     });
 
-    const txHash = await this.viemClient.walletClient.sendTransaction({
+    const walletClient = this.viemClient.walletClient;
+    if (!walletClient) throw new Error("BOT_PRIVATE_KEY not configured — cannot grant session key");
+    const txHash = await walletClient.sendTransaction({
       to: this.sessionKeyManagerAddress as `0x${string}`,
       data: callData,
-      account: this.viemClient.walletClient.account!,
-      chain: this.viemClient.walletClient.chain,
+      account: walletClient.account!,
+      chain: walletClient.chain,
     });
 
     await this.viemClient.publicClient.waitForTransactionReceipt({ hash: txHash });
@@ -90,11 +92,13 @@ export class SessionKeyAdapter implements ISessionKeyService {
       ],
     });
 
-    const txHash = await this.viemClient.walletClient.sendTransaction({
+    const walletClient2 = this.viemClient.walletClient;
+    if (!walletClient2) throw new Error("BOT_PRIVATE_KEY not configured — cannot revoke session key");
+    const txHash = await walletClient2.sendTransaction({
       to: this.sessionKeyManagerAddress as `0x${string}`,
       data: callData,
-      account: this.viemClient.walletClient.account!,
-      chain: this.viemClient.walletClient.chain,
+      account: walletClient2.account!,
+      chain: walletClient2.chain,
     });
 
     await this.viemClient.publicClient.waitForTransactionReceipt({ hash: txHash });

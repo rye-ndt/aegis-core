@@ -17,7 +17,15 @@ import type { IIntentDB } from "../interface/output/repository/intent.repo";
 import type { IIntentExecutionDB } from "../interface/output/repository/intentExecution.repo";
 import type { IFeeRecordDB } from "../interface/output/repository/feeRecord.repo";
 import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
+import type { IMessageDB } from "../interface/output/repository/message.repo";
+import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
 import type { IResultParser } from "../../adapters/implementations/output/resultParser/tx.resultParser";
+import {
+  MissingFieldsError,
+  ConversationLimitError,
+  InvalidFieldError,
+  validateIntent,
+} from "../../adapters/implementations/output/intentParser/intent.validator";
 
 const CONFIDENCE_THRESHOLD = 0.7;
 const PLATFORM_FEE_BPS = 80;
@@ -35,6 +43,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly intentExecutionDB: IIntentExecutionDB,
     private readonly feeRecordDB: IFeeRecordDB,
     private readonly userProfileDB: IUserProfileDB,
+    private readonly messageDB: IMessageDB,
     private readonly resultParser: IResultParser,
     private readonly chainId: number,
     private readonly treasuryAddress: string,
@@ -49,32 +58,57 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const now = newCurrentUTCEpoch();
     const intentId = newUuid();
 
-    // 1. Parse intent
-    const intent = await this.intentParser.parse(
-      params.rawInput,
-      params.userId,
+    // 1. Build sliding window of last 10 user messages for this conversation.
+    //    Fetch up to 9 prior user messages and append the current rawInput.
+    const priorMessages = await this.messageDB.findByConversationId(
+      params.conversationId,
     );
+    const priorUserContent = priorMessages
+      .filter((m) => m.role === MESSAGE_ROLE.USER)
+      .slice(-9)
+      .map((m) => m.content);
+    const messages = [...priorUserContent, params.rawInput];
 
-    // 2. Resolve token addresses
-    if (intent.tokenIn) {
-      const resolved = await this.tokenRegistryService.resolve(
-        intent.tokenIn.symbol,
-        this.chainId,
-      );
-      if (resolved) {
-        intent.tokenIn.address = resolved.address;
-        intent.tokenIn.decimals = resolved.decimals;
+    // 2. Parse then validate intent
+    let intent: IntentPackage | null;
+    try {
+      intent = await this.intentParser.parse(messages, params.userId);
+      if (intent !== null) validateIntent(intent, messages.length);
+    } catch (err) {
+      if (err instanceof ConversationLimitError) {
+        // Reset conversation messages so the user starts fresh
+        await this.messageDB.deleteByConversationId(params.conversationId);
+        return {
+          intentId,
+          status: INTENT_STATUSES.REJECTED,
+          humanSummary:
+            err.message +
+            "\n\nYour conversation has been reset. Please send a new complete request.",
+          requiresConfirmation: false,
+        };
       }
+      if (
+        err instanceof MissingFieldsError ||
+        err instanceof InvalidFieldError
+      ) {
+        return {
+          intentId,
+          status: INTENT_STATUSES.REJECTED,
+          humanSummary: err.prompt,
+          requiresConfirmation: false,
+        };
+      }
+      throw err;
     }
-    if (intent.tokenOut) {
-      const resolved = await this.tokenRegistryService.resolve(
-        intent.tokenOut.symbol,
-        this.chainId,
-      );
-      if (resolved) {
-        intent.tokenOut.address = resolved.address;
-        intent.tokenOut.decimals = resolved.decimals;
-      }
+
+    // Handle no onchain intent
+    if (intent === null) {
+      return {
+        intentId,
+        status: INTENT_STATUSES.REJECTED,
+        humanSummary: "No on-chain action detected in your message.",
+        requiresConfirmation: false,
+      };
     }
 
     // 3. Confidence check
@@ -221,9 +255,10 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const now = newCurrentUTCEpoch();
 
     // Support "__latest__" sentinel — find the most recent awaiting confirmation intent
-    let intent = params.intentId === "__latest__"
-      ? await this.intentDB.findPendingByUserId(params.userId)
-      : await this.intentDB.findById(params.intentId);
+    let intent =
+      params.intentId === "__latest__"
+        ? await this.intentDB.findPendingByUserId(params.userId)
+        : await this.intentDB.findById(params.intentId);
 
     if (!intent || intent.userId !== params.userId) {
       return {
@@ -324,7 +359,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
           totalFeeBps: TOTAL_FEE_BPS,
           platformFeeBps: PLATFORM_FEE_BPS,
           contributorFeeBps: CONTRIBUTOR_FEE_BPS,
-          feeTokenAddress: intentPackage.tokenIn?.address ?? "0x",
+          feeTokenAddress: "0x", // TODO: set from resolved tokenIn after token resolution step
           feeAmountRaw: "0",
           platformAddress: this.treasuryAddress,
           txHash,
@@ -407,13 +442,14 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }[intent.action];
     lines.push(`Action: ${actionLabel}`);
 
-    if (intent.tokenIn) {
+    // TODO: restore token details after token resolution step is added
+    if (intent.fromTokenSymbol) {
       lines.push(
-        `You send: ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol}`,
+        `You send: ${intent.amountHuman ?? "?"} ${intent.fromTokenSymbol}`,
       );
     }
-    if (intent.tokenOut) {
-      lines.push(`You receive: ~? ${intent.tokenOut.symbol} (est.)`);
+    if (intent.toTokenSymbol) {
+      lines.push(`You receive: ~? ${intent.toTokenSymbol} (est.)`);
     }
     if (intent.slippageBps) {
       lines.push(`Slippage: ${intent.slippageBps / 100}%`);

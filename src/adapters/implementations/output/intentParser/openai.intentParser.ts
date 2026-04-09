@@ -1,100 +1,93 @@
 import OpenAI from "openai";
+import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
-import type { IIntentParser, IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
-import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
+import type {
+  IIntentParser,
+  IntentPackage,
+} from "../../../../use-cases/interface/output/intentParser.interface";
+import { WINDOW_SIZE } from "./intent.validator";
 
-const IntentPackageSchema = z.object({
-  action: z.nativeEnum(INTENT_ACTION),
-  tokenIn: z
-    .object({
-      symbol: z.string(),
-      address: z.string(),
-      decimals: z.number(),
-      amountHuman: z.string(),
-      amountRaw: z.string(),
-    })
-    .optional(),
-  tokenOut: z
-    .object({
-      symbol: z.string(),
-      address: z.string(),
-      decimals: z.number(),
-    })
-    .optional(),
-  slippageBps: z.number().optional(),
-  recipient: z.string().optional(),
+const IntentSchema = z.object({
+  action: z.enum([
+    INTENT_ACTION.SWAP,
+    INTENT_ACTION.STAKE,
+    INTENT_ACTION.UNSTAKE,
+    INTENT_ACTION.CLAIM_REWARDS,
+    INTENT_ACTION.TRANSFER,
+    INTENT_ACTION.UNKNOWN,
+  ]),
+  fromTokenSymbol: z.string().nullable(),
+  toTokenSymbol: z.string().nullable(),
+  amountHuman: z.string().nullable(),
+  slippageBps: z.number().nullable(),
+  recipient: z.string().nullable(),
   confidence: z.number().min(0).max(1),
-  rawInput: z.string(),
 });
+
+const ResponseSchema = z.object({
+  intent: IntentSchema.nullable(),
+});
+
+const systemPrompt = `You are an intent parser for an Avalanche DeFi trading agent.
+The user may have spread their intent across several messages — extract the combined intent from all messages.
+
+If the user is NOT asking for any on-chain action (e.g. chatting, asking a question, greeting), return: { "intent": null }
+
+If the user IS requesting an on-chain action, extract:
+- action: swap | stake | unstake | claim_rewards | transfer | unknown
+- fromTokenSymbol: token the user wants to spend/send (e.g. "AVAX", "USDC")
+- toTokenSymbol: token the user wants to receive (swaps only)
+- amountHuman: human-readable amount as a string (e.g. "1.5", "100")
+- slippageBps: slippage in basis points if specified; default 50 for swaps
+- recipient: destination Ethereum address (0x...) if specified (transfers only)
+- confidence: 0–1 confidence in the parsed intent
+
+Set fields to null when they cannot be determined. Do not resolve token addresses or decimals.`;
 
 export class OpenAIIntentParser implements IIntentParser {
   private readonly client: OpenAI;
   private readonly model: string;
-  private readonly chainId: number;
 
-  constructor(
-    apiKey: string,
-    private readonly tokenRegistryService: ITokenRegistryService,
-  ) {
+  constructor(apiKey: string) {
     this.client = new OpenAI({ apiKey });
     this.model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
-    this.chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
   }
 
-  async parse(input: string, _userId: string): Promise<IntentPackage> {
-    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
-    const tokenList = tokens
-      .map((t) => `${t.symbol} (address: ${t.address}, decimals: ${t.decimals}, isNative: ${t.isNative})`)
-      .join("\n");
+  async parse(messages: string[], _userId: string): Promise<IntentPackage | null> {
+    const window = messages.slice(-WINDOW_SIZE);
 
-    const systemPrompt = `You are an intent parser for an Avalanche DeFi trading agent.
-Parse the user's message into a structured JSON IntentPackage. Output ONLY valid JSON, no prose.
+    const userContent =
+      window.length === 1
+        ? window[0]
+        : window.map((m, i) => `[Message ${i + 1}]: ${m}`).join("\n");
 
-Verified token list for chainId ${this.chainId}:
-${tokenList}
-
-Only use tokens from the verified list above. If the user references a token not in this list, set action to "unknown" and confidence to 0.
-
-Output format:
-{
-  "action": "swap" | "stake" | "unstake" | "claim_rewards" | "transfer" | "unknown",
-  "tokenIn": { "symbol": string, "address": string, "decimals": number, "amountHuman": string, "amountRaw": string } | undefined,
-  "tokenOut": { "symbol": string, "address": string, "decimals": number } | undefined,
-  "slippageBps": number | undefined,
-  "recipient": string | undefined,
-  "confidence": number (0-1),
-  "rawInput": string
-}
-
-For amountRaw: multiply amountHuman by 10^decimals and express as integer string.
-For native token: use address ${process.env.NATIVE_TOKEN_ADDRESS ?? "0x0000000000000000000000000000000000000000"}.
-Default slippageBps to 50 (0.5%) for swaps if not specified.`;
-
-    const response = await this.client.chat.completions.create({
+    const response = await this.client.chat.completions.parse({
       model: this.model,
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: input },
+        { role: "user", content: userContent },
       ],
-      max_tokens: 1024,
-      response_format: { type: "json_object" },
+      response_format: zodResponseFormat(ResponseSchema, "response"),
     });
 
-    const text = response.choices[0]?.message.content ?? "";
+    const parsed = response.choices[0]?.message.parsed;
+    if (!parsed) throw new Error("No parsed response from OpenAI");
 
-    try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("No JSON found in response");
-      const parsed = JSON.parse(jsonMatch[0]);
-      const validated = IntentPackageSchema.parse({ ...parsed, rawInput: input });
-      return validated as IntentPackage;
-    } catch {
-      return {
-        action: INTENT_ACTION.UNKNOWN,
-        confidence: 0,
-        rawInput: input,
-      };
-    }
+    console.log("[OpenAIIntentParser] parsed:", parsed);
+
+    if (parsed.intent === null) return null;
+
+    const { action, fromTokenSymbol, toTokenSymbol, amountHuman, slippageBps, recipient, confidence } = parsed.intent;
+    return {
+      action: action as INTENT_ACTION,
+      confidence,
+      rawInput: window[window.length - 1],
+      ...(fromTokenSymbol != null && { fromTokenSymbol }),
+      ...(toTokenSymbol != null && { toTokenSymbol }),
+      ...(amountHuman != null && { amountHuman }),
+      ...(slippageBps != null && { slippageBps }),
+      ...(recipient != null && { recipient: recipient as IntentPackage["recipient"] }),
+    };
   }
 }

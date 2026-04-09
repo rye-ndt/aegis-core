@@ -65,11 +65,13 @@ export class SmartAccountAdapter implements ISmartAccountService {
       args: [this.botAddress as `0x${string}`, salt],
     });
 
-    const txHash = await this.viemClient.walletClient.sendTransaction({
+    const walletClient = this.viemClient.walletClient;
+    if (!walletClient) throw new Error("BOT_PRIVATE_KEY not configured — cannot deploy smart account");
+    const txHash = await walletClient.sendTransaction({
       to: this.factoryAddress as `0x${string}`,
       data: callData,
-      account: this.viemClient.walletClient.account!,
-      chain: this.viemClient.walletClient.chain,
+      account: walletClient.account!,
+      chain: walletClient.chain,
     });
 
     await this.viemClient.publicClient.waitForTransactionReceipt({ hash: txHash });

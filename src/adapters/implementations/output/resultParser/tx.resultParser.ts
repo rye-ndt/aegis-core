@@ -42,16 +42,24 @@ export class TxResultParser implements IResultParser {
         return `Transaction failed on-chain. Tx: ${shortTx}`;
       }
 
-      if (intent.action === INTENT_ACTION.SWAP && intent.tokenIn && intent.tokenOut) {
-        return `Success! Swapped ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol} → ${intent.tokenOut.symbol}. Tx: ${shortTx}`;
+      // TODO: restore token details after token resolution step is added
+      // if (intent.action === INTENT_ACTION.SWAP && intent.tokenIn && intent.tokenOut) {
+      //   return `Success! Swapped ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol} → ${intent.tokenOut.symbol}. Tx: ${shortTx}`;
+      // }
+      if (intent.action === INTENT_ACTION.SWAP) {
+        return `Success! Swap completed. Tx: ${shortTx}`;
       }
 
       if (intent.action === INTENT_ACTION.CLAIM_REWARDS) {
         return `Success! Rewards claimed. Tx: ${shortTx}`;
       }
 
-      if (intent.action === INTENT_ACTION.TRANSFER && intent.tokenIn) {
-        return `Success! Transferred ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol}. Tx: ${shortTx}`;
+      // TODO: restore token details after token resolution step is added
+      // if (intent.action === INTENT_ACTION.TRANSFER && intent.tokenIn) {
+      //   return `Success! Transferred ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol}. Tx: ${shortTx}`;
+      // }
+      if (intent.action === INTENT_ACTION.TRANSFER) {
+        return `Success! Transfer completed. Tx: ${shortTx}`;
       }
 
       return `Success! Transaction confirmed. Tx: ${shortTx}`;
