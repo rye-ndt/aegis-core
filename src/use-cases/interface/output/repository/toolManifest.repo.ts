@@ -1,25 +1,38 @@
-import type { SOLVER_TYPE } from "../../../../helpers/enums/solverType.enum";
-
-export interface IToolManifest {
-  id: string;
-  name: string;
-  displayName: string;
-  description: string;
-  version: string;
-  solverType: SOLVER_TYPE;
-  endpointUrl?: string | null;
-  inputSchema: string;
-  outputSchema: string;
-  contributorAddress?: string | null;
-  revShareBps: number;
-  isActive: boolean;
-  chainIds: string;
-  createdAtEpoch: number;
-  updatedAtEpoch: number;
+export interface IToolManifestRecord {
+  id:               string;
+  toolId:           string;
+  category:         string;
+  name:             string;
+  description:      string;
+  protocolName:     string;
+  tags:             string;   // raw JSON string of string[]
+  priority:         number;
+  isDefault:        boolean;
+  inputSchema:      string;   // raw JSON string
+  steps:            string;   // raw JSON string
+  preflightPreview: string | null;
+  revenueWallet:    string | null;
+  isVerified:       boolean;
+  isActive:         boolean;
+  chainIds:         string;   // raw JSON string of number[]
+  createdAtEpoch:   number;
+  updatedAtEpoch:   number;
 }
 
 export interface IToolManifestDB {
-  upsert(manifest: IToolManifest): Promise<void>;
-  findByName(name: string): Promise<IToolManifest | undefined>;
-  listActive(chainId?: number): Promise<IToolManifest[]>;
+  create(manifest: IToolManifestRecord): Promise<void>;
+  findByToolId(toolId: string): Promise<IToolManifestRecord | undefined>;
+  findById(id: string): Promise<IToolManifestRecord | undefined>;
+  listActive(chainId?: number): Promise<IToolManifestRecord[]>;
+  deactivate(toolId: string): Promise<void>;
+
+  /**
+   * Keyword search across name, description, protocolName, and tags (ILIKE).
+   * Results ordered by priority DESC, isDefault DESC.
+   * Only returns isActive=true records.
+   */
+  search(
+    query: string,
+    options: { limit: number; category?: string; chainId?: number },
+  ): Promise<IToolManifestRecord[]>;
 }

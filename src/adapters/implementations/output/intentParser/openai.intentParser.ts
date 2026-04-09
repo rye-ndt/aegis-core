@@ -6,6 +6,7 @@ import type {
   IIntentParser,
   IntentPackage,
 } from "../../../../use-cases/interface/output/intentParser.interface";
+import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { WINDOW_SIZE } from "./intent.validator";
 
 const IntentSchema = z.object({
@@ -54,7 +55,11 @@ export class OpenAIIntentParser implements IIntentParser {
     this.model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
   }
 
-  async parse(messages: string[], _userId: string): Promise<IntentPackage | null> {
+  async parse(
+    messages: string[],
+    _userId: string,
+    _relevantManifests?: ToolManifest[],   // accepted, ignored
+  ): Promise<IntentPackage | null> {
     const window = messages.slice(-WINDOW_SIZE);
 
     const userContent =

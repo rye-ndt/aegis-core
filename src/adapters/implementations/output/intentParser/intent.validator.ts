@@ -66,7 +66,7 @@ export function validateIntent(
   const atLimit = messageCount >= WINDOW_SIZE;
 
   // Required fields per action
-  const required = REQUIRED_FIELDS[intent.action] ?? [];
+  const required = REQUIRED_FIELDS[intent.action as INTENT_ACTION] ?? [];
   const missingFields = required.filter((field) => intent[field] == null);
 
   if (missingFields.length > 0) {

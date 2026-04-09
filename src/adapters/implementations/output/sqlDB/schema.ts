@@ -104,21 +104,24 @@ export const intentExecutions = pgTable("intent_executions", {
 });
 
 export const toolManifests = pgTable("tool_manifests", {
-  id: uuid("id").primaryKey(),
-  name: text("name").notNull().unique(),
-  displayName: text("display_name").notNull(),
-  description: text("description").notNull(),
-  version: text("version").notNull(),
-  solverType: text("solver_type").notNull(),
-  endpointUrl: text("endpoint_url"),
-  inputSchema: text("input_schema").notNull(),
-  outputSchema: text("output_schema").notNull(),
-  contributorAddress: text("contributor_address"),
-  revShareBps: integer("rev_share_bps").notNull().default(0),
-  isActive: boolean("is_active").notNull().default(true),
-  chainIds: text("chain_ids").notNull(),
-  createdAtEpoch: integer("created_at_epoch").notNull(),
-  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+  id:               uuid("id").primaryKey(),
+  toolId:           text("tool_id").notNull().unique(),     // slug, external key
+  category:         text("category").notNull(),              // TOOL_CATEGORY
+  name:             text("name").notNull(),
+  description:      text("description").notNull(),
+  protocolName:     text("protocol_name").notNull(),
+  tags:             text("tags").notNull(),                  // JSON string of string[]
+  priority:         integer("priority").notNull().default(0),
+  isDefault:        boolean("is_default").notNull().default(false),
+  inputSchema:      text("input_schema").notNull(),          // JSON string of JSON Schema
+  steps:            text("steps").notNull(),                 // JSON string of ToolStep[]
+  preflightPreview: text("preflight_preview"),               // JSON string or null
+  revenueWallet:    text("revenue_wallet"),
+  isVerified:       boolean("is_verified").notNull().default(false),
+  isActive:         boolean("is_active").notNull().default(true),
+  chainIds:         text("chain_ids").notNull(),             // JSON string of number[]
+  createdAtEpoch:   integer("created_at_epoch").notNull(),
+  updatedAtEpoch:   integer("updated_at_epoch").notNull(),
 });
 
 export const feeRecords = pgTable("fee_records", {

@@ -1,65 +1,58 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, ilike, or } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
-  IToolManifest,
+  IToolManifestRecord,
   IToolManifestDB,
 } from "../../../../../use-cases/interface/output/repository/toolManifest.repo";
-import { SOLVER_TYPE } from "../../../../../helpers/enums/solverType.enum";
 import { toolManifests } from "../schema";
 
 export class DrizzleToolManifestRepo implements IToolManifestDB {
   constructor(private readonly db: NodePgDatabase) {}
 
-  async upsert(manifest: IToolManifest): Promise<void> {
-    await this.db
-      .insert(toolManifests)
-      .values({
-        id: manifest.id,
-        name: manifest.name,
-        displayName: manifest.displayName,
-        description: manifest.description,
-        version: manifest.version,
-        solverType: manifest.solverType,
-        endpointUrl: manifest.endpointUrl ?? null,
-        inputSchema: manifest.inputSchema,
-        outputSchema: manifest.outputSchema,
-        contributorAddress: manifest.contributorAddress ?? null,
-        revShareBps: manifest.revShareBps,
-        isActive: manifest.isActive,
-        chainIds: manifest.chainIds,
-        createdAtEpoch: manifest.createdAtEpoch,
-        updatedAtEpoch: manifest.updatedAtEpoch,
-      })
-      .onConflictDoUpdate({
-        target: toolManifests.name,
-        set: {
-          displayName: manifest.displayName,
-          description: manifest.description,
-          version: manifest.version,
-          solverType: manifest.solverType,
-          endpointUrl: manifest.endpointUrl ?? null,
-          inputSchema: manifest.inputSchema,
-          outputSchema: manifest.outputSchema,
-          contributorAddress: manifest.contributorAddress ?? null,
-          revShareBps: manifest.revShareBps,
-          isActive: manifest.isActive,
-          chainIds: manifest.chainIds,
-          updatedAtEpoch: manifest.updatedAtEpoch,
-        },
-      });
+  async create(manifest: IToolManifestRecord): Promise<void> {
+    await this.db.insert(toolManifests).values({
+      id:               manifest.id,
+      toolId:           manifest.toolId,
+      category:         manifest.category,
+      name:             manifest.name,
+      description:      manifest.description,
+      protocolName:     manifest.protocolName,
+      tags:             manifest.tags,
+      priority:         manifest.priority,
+      isDefault:        manifest.isDefault,
+      inputSchema:      manifest.inputSchema,
+      steps:            manifest.steps,
+      preflightPreview: manifest.preflightPreview ?? null,
+      revenueWallet:    manifest.revenueWallet ?? null,
+      isVerified:       manifest.isVerified,
+      isActive:         manifest.isActive,
+      chainIds:         manifest.chainIds,
+      createdAtEpoch:   manifest.createdAtEpoch,
+      updatedAtEpoch:   manifest.updatedAtEpoch,
+    });
   }
 
-  async findByName(name: string): Promise<IToolManifest | undefined> {
+  async findByToolId(toolId: string): Promise<IToolManifestRecord | undefined> {
     const rows = await this.db
       .select()
       .from(toolManifests)
-      .where(eq(toolManifests.name, name))
+      .where(eq(toolManifests.toolId, toolId))
       .limit(1);
     if (!rows[0]) return undefined;
     return this.toRecord(rows[0]);
   }
 
-  async listActive(chainId?: number): Promise<IToolManifest[]> {
+  async findById(id: string): Promise<IToolManifestRecord | undefined> {
+    const rows = await this.db
+      .select()
+      .from(toolManifests)
+      .where(eq(toolManifests.id, id))
+      .limit(1);
+    if (!rows[0]) return undefined;
+    return this.toRecord(rows[0]);
+  }
+
+  async listActive(chainId?: number): Promise<IToolManifestRecord[]> {
     const rows = await this.db
       .select()
       .from(toolManifests)
@@ -77,23 +70,62 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
       .map((r) => this.toRecord(r));
   }
 
-  private toRecord(row: typeof toolManifests.$inferSelect): IToolManifest {
+  async deactivate(toolId: string): Promise<void> {
+    await this.db
+      .update(toolManifests)
+      .set({ isActive: false })
+      .where(eq(toolManifests.toolId, toolId));
+  }
+
+  async search(
+    query: string,
+    options: { limit: number; category?: string; chainId?: number },
+  ): Promise<IToolManifestRecord[]> {
+    const pattern = `%${query}%`;
+    const conditions = [
+      eq(toolManifests.isActive, true),
+      or(
+        ilike(toolManifests.name, pattern),
+        ilike(toolManifests.description, pattern),
+        ilike(toolManifests.protocolName, pattern),
+        ilike(toolManifests.tags, pattern),
+      ),
+    ];
+    if (options.category != null) {
+      conditions.push(eq(toolManifests.category, options.category));
+    }
+    if (options.chainId != null) {
+      conditions.push(ilike(toolManifests.chainIds, `%${options.chainId}%`));
+    }
+    const rows = await this.db
+      .select()
+      .from(toolManifests)
+      .where(and(...conditions))
+      .orderBy(desc(toolManifests.priority), desc(toolManifests.isDefault))
+      .limit(options.limit);
+    return rows.map((r) => this.toRecord(r));
+  }
+
+  private toRecord(row: typeof toolManifests.$inferSelect): IToolManifestRecord {
     return {
-      id: row.id,
-      name: row.name,
-      displayName: row.displayName,
-      description: row.description,
-      version: row.version,
-      solverType: row.solverType as SOLVER_TYPE,
-      endpointUrl: row.endpointUrl,
-      inputSchema: row.inputSchema,
-      outputSchema: row.outputSchema,
-      contributorAddress: row.contributorAddress,
-      revShareBps: row.revShareBps,
-      isActive: row.isActive,
-      chainIds: row.chainIds,
-      createdAtEpoch: row.createdAtEpoch,
-      updatedAtEpoch: row.updatedAtEpoch,
+      id:               row.id,
+      toolId:           row.toolId,
+      category:         row.category,
+      name:             row.name,
+      description:      row.description,
+      protocolName:     row.protocolName,
+      tags:             row.tags,
+      priority:         row.priority,
+      isDefault:        row.isDefault,
+      inputSchema:      row.inputSchema,
+      steps:            row.steps,
+      preflightPreview: row.preflightPreview,
+      revenueWallet:    row.revenueWallet,
+      isVerified:       row.isVerified,
+      isActive:         row.isActive,
+      chainIds:         row.chainIds,
+      createdAtEpoch:   row.createdAtEpoch,
+      updatedAtEpoch:   row.updatedAtEpoch,
     };
   }
 }
