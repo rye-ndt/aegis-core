@@ -1,6 +1,7 @@
 import type { ISimulator } from "../../../../use-cases/interface/output/simulator.interface";
 import type { IUserOperation } from "../../../../use-cases/interface/output/blockchain/userOperation.interface";
 import type { IntentPackage, SimulationReport } from "../../../../use-cases/interface/output/intentParser.interface";
+import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
 import type { ViemClientAdapter } from "../blockchain/viemClient";
 
 const ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -49,7 +50,7 @@ export class RpcSimulator implements ISimulator {
     const tokenOutDelta = "0"; // actual output determined post-execution
 
     // Slippage / sanity check
-    if (intent.action === "swap" && !intent.tokenIn) {
+    if (intent.action === INTENT_ACTION.SWAP && !intent.tokenIn) {
       return {
         passed: false,
         tokenInDelta: "0",

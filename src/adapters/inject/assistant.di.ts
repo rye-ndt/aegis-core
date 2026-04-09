@@ -21,7 +21,7 @@ import { SolverRegistry } from "../implementations/output/solver/solverRegistry"
 import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
 import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
 import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator";
-import { AnthropicIntentParser } from "../implementations/output/intentParser/anthropic.intentParser";
+import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
 import { TxResultParser } from "../implementations/output/resultParser/tx.resultParser";
 
@@ -35,7 +35,7 @@ export class AssistantInject {
   private _sessionKeyService: SessionKeyAdapter | null = null;
   private _userOpBuilder: UserOperationBuilder | null = null;
   private _solverRegistry: SolverRegistry | null = null;
-  private _intentParser: AnthropicIntentParser | null = null;
+  private _intentParser: OpenAIIntentParser | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _simulator: RpcSimulator | null = null;
   private _resultParser: TxResultParser | null = null;
@@ -116,14 +116,11 @@ export class AssistantInject {
     return this._userOpBuilder;
   }
 
-  getIntentParser(): AnthropicIntentParser {
+  getIntentParser(): OpenAIIntentParser {
     if (!this._intentParser) {
-      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
-      this._intentParser = new AnthropicIntentParser(
-        process.env.ANTHROPIC_API_KEY ?? "",
-        process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+      this._intentParser = new OpenAIIntentParser(
+        process.env.OPENAI_API_KEY ?? "",
         this.getTokenRegistryService(),
-        chainId,
       );
     }
     return this._intentParser;

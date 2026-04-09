@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { z } from "zod";
 import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
 import type { IIntentParser, IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
@@ -28,16 +28,18 @@ const IntentPackageSchema = z.object({
   rawInput: z.string(),
 });
 
-export class AnthropicIntentParser implements IIntentParser {
-  private readonly client: Anthropic;
+export class OpenAIIntentParser implements IIntentParser {
+  private readonly client: OpenAI;
+  private readonly model: string;
+  private readonly chainId: number;
 
   constructor(
-    private readonly apiKey: string,
-    private readonly model: string,
+    apiKey: string,
     private readonly tokenRegistryService: ITokenRegistryService,
-    private readonly chainId: number,
   ) {
-    this.client = new Anthropic({ apiKey });
+    this.client = new OpenAI({ apiKey });
+    this.model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+    this.chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
   }
 
   async parse(input: string, _userId: string): Promise<IntentPackage> {
@@ -66,17 +68,20 @@ Output format:
 }
 
 For amountRaw: multiply amountHuman by 10^decimals and express as integer string.
-For AVAX: use address 0x0000000000000000000000000000000000000000.
+For native token: use address ${process.env.NATIVE_TOKEN_ADDRESS ?? "0x0000000000000000000000000000000000000000"}.
 Default slippageBps to 50 (0.5%) for swaps if not specified.`;
 
-    const response = await this.client.messages.create({
+    const response = await this.client.chat.completions.create({
       model: this.model,
-      system: systemPrompt,
-      messages: [{ role: "user", content: input }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: input },
+      ],
       max_tokens: 1024,
+      response_format: { type: "json_object" },
     });
 
-    const text = response.content[0]?.type === "text" ? response.content[0].text : "";
+    const text = response.choices[0]?.message.content ?? "";
 
     try {
       const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -84,7 +89,7 @@ Default slippageBps to 50 (0.5%) for swaps if not specified.`;
       const parsed = JSON.parse(jsonMatch[0]);
       const validated = IntentPackageSchema.parse({ ...parsed, rawInput: input });
       return validated as IntentPackage;
-    } catch (err) {
+    } catch {
       return {
         action: INTENT_ACTION.UNKNOWN,
         confidence: 0,

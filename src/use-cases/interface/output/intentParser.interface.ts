@@ -1,5 +1,9 @@
+import { INTENT_ACTION } from "../../../helpers/enums/intentAction.enum";
+
+export { INTENT_ACTION };
+
 export interface IntentPackage {
-  action: "swap" | "stake" | "unstake" | "claim_rewards" | "transfer" | "unknown";
+  action: INTENT_ACTION;
   tokenIn?: {
     symbol: string;
     address: string;

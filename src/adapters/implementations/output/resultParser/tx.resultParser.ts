@@ -1,4 +1,5 @@
 import type { IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
+import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
 import type { ViemClientAdapter } from "../blockchain/viemClient";
 
 const ERC20_ABI = [
@@ -41,15 +42,15 @@ export class TxResultParser implements IResultParser {
         return `Transaction failed on-chain. Tx: ${shortTx}`;
       }
 
-      if (intent.action === "swap" && intent.tokenIn && intent.tokenOut) {
+      if (intent.action === INTENT_ACTION.SWAP && intent.tokenIn && intent.tokenOut) {
         return `Success! Swapped ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol} → ${intent.tokenOut.symbol}. Tx: ${shortTx}`;
       }
 
-      if (intent.action === "claim_rewards") {
+      if (intent.action === INTENT_ACTION.CLAIM_REWARDS) {
         return `Success! Rewards claimed. Tx: ${shortTx}`;
       }
 
-      if (intent.action === "transfer" && intent.tokenIn) {
+      if (intent.action === INTENT_ACTION.TRANSFER && intent.tokenIn) {
         return `Success! Transferred ${intent.tokenIn.amountHuman} ${intent.tokenIn.symbol}. Tx: ${shortTx}`;
       }
 

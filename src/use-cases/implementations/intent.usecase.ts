@@ -1,6 +1,7 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
+import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
 import { EXECUTION_STATUSES } from "../../helpers/enums/executionStatus.enum";
 import type {
   IIntentUseCase,
@@ -79,7 +80,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     // 3. Confidence check
     if (
       intent.confidence < CONFIDENCE_THRESHOLD ||
-      intent.action === "unknown"
+      intent.action === INTENT_ACTION.UNKNOWN
     ) {
       await this.intentDB.create({
         id: intentId,
@@ -382,7 +383,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
         return JSON.parse(i.parsedJson) as IntentPackage;
       } catch {
         return {
-          action: "unknown" as const,
+          action: INTENT_ACTION.UNKNOWN,
           confidence: 0,
           rawInput: i.rawInput,
         };
@@ -397,12 +398,12 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const lines: string[] = ["⚡ Pre-Flight Check", ""];
 
     const actionLabel = {
-      swap: "Swap",
-      stake: "Stake",
-      unstake: "Unstake",
-      claim_rewards: "Claim Rewards",
-      transfer: "Transfer",
-      unknown: "Unknown",
+      [INTENT_ACTION.SWAP]: "Swap",
+      [INTENT_ACTION.STAKE]: "Stake",
+      [INTENT_ACTION.UNSTAKE]: "Unstake",
+      [INTENT_ACTION.CLAIM_REWARDS]: "Claim Rewards",
+      [INTENT_ACTION.TRANSFER]: "Transfer",
+      [INTENT_ACTION.UNKNOWN]: "Unknown",
     }[intent.action];
     lines.push(`Action: ${actionLabel}`);
 
