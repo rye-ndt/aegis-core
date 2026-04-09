@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-09 (token crawler)
+> Last updated: 2026-04-09 (token enrichment)
 
 ---
 
@@ -16,7 +16,7 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅**
 
 ---
 
@@ -239,6 +239,22 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] `TokenCrawlerJob` — driving adapter in `adapters/input/jobs/`; owns `setInterval`; calls use-case only; interval configurable via `TOKEN_CRAWLER_INTERVAL_MS` (default 15 min)
 - [x] DI: `getTokenCrawlerJob()` in `AssistantInject`; `getChainId()` private helper eliminates duplicated `parseInt(CHAIN_ID)`
 - [x] Boot: crawler fires immediately on `npm run dev`, then every 15 min; stopped cleanly on SIGINT
+
+### Phase 5 — Token enrichment ✅
+- [x] `ITokenRegistryDB.searchBySymbol(pattern, chainId)` — case-insensitive ILIKE on both `symbol` and `name` columns (OR); deduplicates by returning all matches
+- [x] `DrizzleTokenRegistryRepo.searchBySymbol` — uses `ilike` + `or` from drizzle-orm; no `toUpperCase` needed since ILIKE handles case
+- [x] `ITokenRegistryService.searchBySymbol` + `DbTokenRegistryService.searchBySymbol` — thin service layer pass-through
+- [x] `TelegramAssistantHandler` rewrite:
+  - `DisambiguationPending` state type + `tokenDisambiguation: Map<number, DisambiguationPending>`
+  - `message:text` handler routes to `handleDisambiguationReply` when disambiguation is pending
+  - `startTokenResolution` — searches both from/to tokens; shows disambiguation prompt if >1 match, errors if 0, resolves immediately if exactly 1
+  - `handleDisambiguationReply` — handles sequential from→to disambiguation; non-numeric reply cancels and prompts retry
+  - `buildDisambiguationPrompt` — plain text numbered list: symbol, name, truncated address, decimals
+  - `buildEnrichedMessage` — Markdown summary with token address/decimals, BigInt `amountRaw` for fromToken, JSON intent block appended
+  - `toRaw()` module-level helper — BigInt string arithmetic, no float precision loss on 18-decimal tokens
+  - `/cancel` also clears `tokenDisambiguation`
+- [x] `validateIntent` wired into `message:text` handler — called after `parse`, inside the same try/catch; history preserved on `MissingFieldsError`/`InvalidFieldError` for multi-turn; only cleared on full validation pass
+- [x] `telegramCli.ts` — wired `tokenRegistryService` and `chainId` into `TelegramAssistantHandler` constructor (were `undefined`)
 
 ### Next steps
 - [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
