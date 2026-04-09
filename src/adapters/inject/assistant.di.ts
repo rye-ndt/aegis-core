@@ -120,7 +120,6 @@ export class AssistantInject {
     if (!this._intentParser) {
       this._intentParser = new OpenAIIntentParser(
         process.env.OPENAI_API_KEY ?? "",
-        this.getTokenRegistryService(),
       );
     }
     return this._intentParser;
@@ -140,6 +139,7 @@ export class AssistantInject {
         db.intentExecutions,
         db.feeRecords,
         db.userProfiles,
+        db.messages,
         this.getResultParser(),
         chainId,
         process.env.TREASURY_ADDRESS ?? "",

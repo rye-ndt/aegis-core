@@ -2,22 +2,16 @@ import { INTENT_ACTION } from "../../../helpers/enums/intentAction.enum";
 
 export { INTENT_ACTION };
 
+/** Branded type — always a checksummed-or-lowercased 0x address */
+export type Address = `0x${string}`;
+
 export interface IntentPackage {
   action: INTENT_ACTION;
-  tokenIn?: {
-    symbol: string;
-    address: string;
-    decimals: number;
-    amountHuman: string;
-    amountRaw: string;
-  };
-  tokenOut?: {
-    symbol: string;
-    address: string;
-    decimals: number;
-  };
+  fromTokenSymbol?: string;
+  toTokenSymbol?: string;
+  amountHuman?: string;
   slippageBps?: number;
-  recipient?: string;
+  recipient?: Address;
   confidence: number;
   rawInput: string;
 }
@@ -32,5 +26,5 @@ export interface SimulationReport {
 }
 
 export interface IIntentParser {
-  parse(input: string, userId: string): Promise<IntentPackage>;
+  parse(messages: string[], userId: string): Promise<IntentPackage | null>;
 }

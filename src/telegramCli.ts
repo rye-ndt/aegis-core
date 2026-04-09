@@ -22,6 +22,12 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     inject.getAuthUseCase(),
     sqlDB.telegramSessions,
     token,
+    undefined, // intentUseCase
+    undefined, // userProfileDB
+    undefined, // tokenRegistryService
+    undefined, // viemClient
+    undefined, // chainId
+    inject.getIntentParser(),
   );
 
   const bot = new TelegramBot(token, handler);
