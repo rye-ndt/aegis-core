@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-09 (token crawler)
 
 ---
 
@@ -16,7 +16,7 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅**
 
 ---
 
@@ -52,9 +52,11 @@ src/
 │   ├── implementations/
 │   │   ├── assistant.usecase.ts    # chat(), listConversations(), getConversation()
 │   │   ├── auth.usecase.ts         # register() → deploys SCA + grants session key
-│   │   └── intent.usecase.ts       # parseAndExecute() → confirmAndExecute()
+│   │   ├── intent.usecase.ts       # parseAndExecute() → confirmAndExecute()
+│   │   └── tokenIngestion.usecase.ts # ingest() — fetch → map → upsert token registry
 │   └── interface/
-│       ├── input/                  # IAssistantUseCase, IAuthUseCase, IIntentUseCase
+│       ├── input/                  # IAssistantUseCase, IAuthUseCase, IIntentUseCase,
+│       │                           # ITokenIngestionUseCase
 │       └── output/                 # Outbound ports
 │           ├── blockchain/         # ISmartAccountService, ISessionKeyService,
 │           │                       # IUserOperationBuilder, IPaymasterService
@@ -62,6 +64,7 @@ src/
 │           ├── repository/         # 9 repo interfaces (users → feeRecords)
 │           ├── intentParser.interface.ts   # IntentPackage, SimulationReport
 │           ├── simulator.interface.ts
+│           ├── tokenCrawler.interface.ts   # ITokenCrawlerJob, CrawledToken
 │           └── tokenRegistry.interface.ts
 │
 ├── adapters/
@@ -71,6 +74,7 @@ src/
 │   └── implementations/
 │       ├── input/
 │       │   ├── http/              # HttpApiServer — /auth/*, /intent/:id, /portfolio, /tokens
+│       │   ├── jobs/              # TokenCrawlerJob — driving adapter, fires on timer
 │       │   └── telegram/          # TelegramBot, TelegramAssistantHandler
 │       │
 │       └── output/
@@ -86,6 +90,7 @@ src/
 │           ├── simulator/         # rpc.simulator.ts — viem eth_call simulation
 │           ├── intentParser/      # anthropic.intentParser.ts — LLM → IntentPackage
 │           ├── tokenRegistry/     # db.tokenRegistry.ts
+│           ├── tokenCrawler/      # pangolin.tokenCrawler.ts (ITokenCrawlerJob)
 │           ├── resultParser/      # tx.resultParser.ts — receipt → human string
 │           ├── webSearch/         # TavilyWebSearchService
 │           ├── tools/
@@ -193,7 +198,7 @@ IntentUseCaseImpl.confirmAndExecute()
 | `conversations`     | Per-user threads — title, status                                     |
 | `messages`          | All turns (user / assistant / tool / assistant_tool_call)            |
 | `user_profiles`     | SCA address, session key address + scope + status                    |
-| `token_registry`    | Verified symbol → address + decimals per chainId                     |
+| `token_registry`    | Symbol → address + decimals per chainId; `deployer_address` nullable  |
 | `intents`           | Parsed intent records with status lifecycle                          |
 | `intent_executions` | Per-attempt execution records with userOpHash + txHash               |
 | `tool_manifests`    | Solver registry with rev-share metadata                              |
@@ -226,8 +231,16 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] Telegram: `/confirm`, `/cancel`, `/portfolio`, `/wallet` commands
 - [x] HTTP API: `/intent/:id`, `/portfolio`, `/tokens` endpoints
 
+### Phase 4 — Token crawler ✅
+- [x] `token_registry` schema extended with `deployer_address` (nullable text); migration `0012_gigantic_psynapse`
+- [x] Port interface `ITokenCrawlerJob` + `CrawledToken` in `use-cases/interface/output/tokenCrawler.interface.ts`
+- [x] `PangolinTokenCrawler` — fetches Pangolin token list, filters by chainId, uppercases symbols; URL overridable via `PANGOLIN_TOKEN_LIST_URL`
+- [x] `TokenIngestionUseCase` — owns business logic: maps `CrawledToken` → `TokenRecordInit`, enforces `isVerified=false`, upserts via `ITokenRegistryDB`
+- [x] `TokenCrawlerJob` — driving adapter in `adapters/input/jobs/`; owns `setInterval`; calls use-case only; interval configurable via `TOKEN_CRAWLER_INTERVAL_MS` (default 15 min)
+- [x] DI: `getTokenCrawlerJob()` in `AssistantInject`; `getChainId()` private helper eliminates duplicated `parseInt(CHAIN_ID)`
+- [x] Boot: crawler fires immediately on `npm run dev`, then every 15 min; stopped cleanly on SIGINT
+
 ### Next steps
-- [ ] `npm run db:generate && npm run db:migrate` — generate migration for new tables
 - [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
 - [ ] Fill `.env` with `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
 - [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash
@@ -258,6 +271,8 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 | `SESSION_KEY_MANAGER_ADDRESS`      | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291` | Session key manager      |
 | `REWARD_CONTROLLER_ADDRESS`        | —                                | Rewards contract for ClaimRewardsSolver   |
 | `TRADERJOE_API_URL`                | `https://api.traderjoexyz.com`   | TraderJoe quote API                       |
+| `PANGOLIN_TOKEN_LIST_URL`          | Pangolin GitHub raw URL          | Override Pangolin token list source       |
+| `TOKEN_CRAWLER_INTERVAL_MS`        | `900000` (15 min)                | How often to re-fetch token list          |
 
 ---
 
@@ -298,6 +313,12 @@ Only add a comment when the code cannot explain itself: unit conversion mismatch
 4. `drizzleSqlDb.adapter.ts` — add property + instantiate.
 5. `assistant.di.ts` — pass `sqlDB.myThings` to whatever needs it.
 6. `npm run db:generate && npm run db:migrate`
+
+### Adding a new token crawler source
+
+1. Create `src/adapters/implementations/output/tokenCrawler/mySource.tokenCrawler.ts` implementing `ITokenCrawlerJob`.
+2. In `AssistantInject.getTokenCrawlerJob()`, swap `new PangolinTokenCrawler()` for the new impl, or compose multiple crawlers behind a `MultiSourceTokenCrawler` that merges results before passing to `TokenIngestionUseCase`.
+3. No other files need to change.
 
 ### Adding a new solver
 

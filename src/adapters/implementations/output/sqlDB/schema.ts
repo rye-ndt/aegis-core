@@ -64,6 +64,7 @@ export const tokenRegistry = pgTable("token_registry", {
   isNative: boolean("is_native").notNull().default(false),
   isVerified: boolean("is_verified").notNull().default(false),
   logoUri: text("logo_uri"),
+  deployerAddress: text("deployer_address"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 }, (t) => ({

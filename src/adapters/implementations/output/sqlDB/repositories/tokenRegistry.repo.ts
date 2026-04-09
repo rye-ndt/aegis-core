@@ -23,6 +23,7 @@ export class DrizzleTokenRegistryRepo implements ITokenRegistryDB {
         isNative: token.isNative ?? false,
         isVerified: token.isVerified ?? false,
         logoUri: token.logoUri ?? null,
+        deployerAddress: token.deployerAddress ?? null,
         createdAtEpoch: token.createdAtEpoch,
         updatedAtEpoch: token.updatedAtEpoch,
       })
@@ -35,6 +36,7 @@ export class DrizzleTokenRegistryRepo implements ITokenRegistryDB {
           isNative: token.isNative ?? false,
           isVerified: token.isVerified ?? false,
           logoUri: token.logoUri ?? null,
+          deployerAddress: token.deployerAddress ?? null,
           updatedAtEpoch: token.updatedAtEpoch,
         },
       });
@@ -69,6 +71,7 @@ export class DrizzleTokenRegistryRepo implements ITokenRegistryDB {
       isNative: row.isNative,
       isVerified: row.isVerified,
       logoUri: row.logoUri,
+      deployerAddress: row.deployerAddress,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,
     };

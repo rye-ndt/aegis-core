@@ -17,6 +17,9 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   const httpServer = inject.getHttpApiServer();
   httpServer.start();
 
+  const tokenCrawlerJob = inject.getTokenCrawlerJob();
+  tokenCrawlerJob.start();
+
   const handler = new TelegramAssistantHandler(
     useCase,
     inject.getAuthUseCase(),
@@ -36,6 +39,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
 
   process.on("SIGINT", async () => {
     console.log("\nShutting down…");
+    tokenCrawlerJob.stop();
     httpServer.stop();
     await bot.stop();
     process.exit(0);

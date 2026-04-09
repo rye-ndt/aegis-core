@@ -24,6 +24,9 @@ import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator"
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
 import { TxResultParser } from "../implementations/output/resultParser/tx.resultParser";
+import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
+import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
+import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -37,8 +40,13 @@ export class AssistantInject {
   private _solverRegistry: SolverRegistry | null = null;
   private _intentParser: OpenAIIntentParser | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
+  private _tokenCrawlerJob: TokenCrawlerJob | null = null;
   private _simulator: RpcSimulator | null = null;
   private _resultParser: TxResultParser | null = null;
+
+  private getChainId(): number {
+    return parseInt(process.env.CHAIN_ID ?? "43113", 10);
+  }
 
   getSqlDB(): DrizzleSqlDB {
     if (!this.sqlDB) {
@@ -55,7 +63,7 @@ export class AssistantInject {
       this._viemClient = new ViemClientAdapter({
         rpcUrl: process.env.AVAX_RPC_URL ?? "https://api.avax-test.network/ext/bc/C/rpc",
         botPrivateKey: process.env.BOT_PRIVATE_KEY ?? "",
-        chainId: parseInt(process.env.CHAIN_ID ?? "43113", 10),
+        chainId: this.getChainId(),
       });
     }
     return this._viemClient;
@@ -70,9 +78,21 @@ export class AssistantInject {
     return this._tokenRegistryService;
   }
 
+  getTokenCrawlerJob(): TokenCrawlerJob {
+    if (!this._tokenCrawlerJob) {
+      const intervalMs = parseInt(process.env.TOKEN_CRAWLER_INTERVAL_MS ?? String(15 * 60 * 1000), 10);
+      const ingestionUseCase = new TokenIngestionUseCase(
+        new PangolinTokenCrawler(),
+        this.getSqlDB().tokenRegistry,
+      );
+      this._tokenCrawlerJob = new TokenCrawlerJob(ingestionUseCase, this.getChainId(), intervalMs);
+    }
+    return this._tokenCrawlerJob;
+  }
+
   getSolverRegistry(): SolverRegistry {
     if (!this._solverRegistry) {
-      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const chainId = this.getChainId();
       this._solverRegistry = new SolverRegistry();
       this._solverRegistry.register(
         "claim_rewards",
@@ -127,7 +147,7 @@ export class AssistantInject {
 
   getIntentUseCase(): IIntentUseCase {
     if (!this._intentUseCase) {
-      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const chainId = this.getChainId();
       const db = this.getSqlDB();
       this._intentUseCase = new IntentUseCaseImpl(
         this.getIntentParser(),
@@ -161,7 +181,7 @@ export class AssistantInject {
         process.env.TAVILY_API_KEY ?? "",
       );
 
-      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const chainId = this.getChainId();
       const intentUseCase = this.getIntentUseCase();
       const tokenRegistryService = this.getTokenRegistryService();
       const viemClient = this.getViemClient();
@@ -188,7 +208,7 @@ export class AssistantInject {
   getAuthUseCase(): IAuthUseCase {
     if (!this._authUseCase) {
       const db = this.getSqlDB();
-      const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+      const chainId = this.getChainId();
       const botAddress = process.env.BOT_ADDRESS ?? "";
 
       let smartAccountService: SmartAccountAdapter | undefined;
@@ -233,7 +253,7 @@ export class AssistantInject {
   getHttpApiServer(): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     const db = this.getSqlDB();
-    const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    const chainId = this.getChainId();
     return new HttpApiServer(
       this.getAuthUseCase(),
       null,

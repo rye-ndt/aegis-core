@@ -8,6 +8,7 @@ export interface ITokenRecord {
   isNative: boolean;
   isVerified: boolean;
   logoUri?: string | null;
+  deployerAddress?: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -22,6 +23,7 @@ export interface TokenRecordInit {
   isNative?: boolean;
   isVerified?: boolean;
   logoUri?: string | null;
+  deployerAddress?: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
