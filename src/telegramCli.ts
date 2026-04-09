@@ -27,9 +27,9 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     token,
     undefined, // intentUseCase
     undefined, // userProfileDB
-    undefined, // tokenRegistryService
+    inject.getTokenRegistryService(),
     undefined, // viemClient
-    undefined, // chainId
+    parseInt(process.env.CHAIN_ID ?? "43113", 10),
     inject.getIntentParser(),
   );
 

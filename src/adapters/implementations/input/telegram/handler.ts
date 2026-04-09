@@ -8,12 +8,31 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
-import type { IIntentParser } from "../../../../use-cases/interface/output/intentParser.interface";
+import type { IIntentParser, IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
+import type { ITokenRecord } from "../../../../use-cases/interface/output/repository/tokenRegistry.repo";
 import {
   MissingFieldsError,
   ConversationLimitError,
   InvalidFieldError,
+  validateIntent,
 } from "../../output/intentParser/intent.validator";
+
+// BigInt string arithmetic — no float precision loss for 18-decimal tokens
+function toRaw(amountHuman: string, decimals: number): string {
+  const [intPart, fracPart = ""] = amountHuman.split(".");
+  const padded = fracPart.padEnd(decimals, "0").slice(0, decimals);
+  const raw = BigInt(intPart) * BigInt(10 ** decimals) + BigInt(padded || "0");
+  return raw.toString();
+}
+
+interface DisambiguationPending {
+  intent: IntentPackage;
+  resolvedFrom: ITokenRecord | null;
+  resolvedTo: ITokenRecord | null;
+  awaitingSlot: "from" | "to";
+  fromCandidates: ITokenRecord[];
+  toCandidates: ITokenRecord[];
+}
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
@@ -22,6 +41,7 @@ export class TelegramAssistantHandler {
     { userId: string; expiresAtEpoch: number }
   >();
   private intentHistory = new Map<number, string[]>();
+  private tokenDisambiguation = new Map<number, DisambiguationPending>();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
@@ -154,6 +174,7 @@ export class TelegramAssistantHandler {
         await ctx.reply("Intent execution not configured.");
         return;
       }
+      this.tokenDisambiguation.delete(ctx.chat.id);
       await ctx.reply("Intent cancelled. No transaction was submitted.");
     });
 
@@ -246,20 +267,29 @@ export class TelegramAssistantHandler {
       }
       await ctx.replyWithChatAction("typing");
       try {
-        // --- INTENT PARSE TEST ---
         if (!this.intentParser) {
           await ctx.reply("Intent parser not configured.");
           return;
         }
 
         const chatId = ctx.chat.id;
+        const text = ctx.message.text.trim();
+
+        if (this.tokenDisambiguation.has(chatId)) {
+          await this.handleDisambiguationReply(ctx, chatId, text, session.userId);
+          return;
+        }
+
         const history = this.intentHistory.get(chatId) ?? [];
-        history.push(ctx.message.text);
+        history.push(text);
         this.intentHistory.set(chatId, history);
 
-        let intent;
+        let intent: IntentPackage | null;
         try {
           intent = await this.intentParser.parse(history, session.userId);
+          if (intent !== null) {
+            validateIntent(intent, history.length);
+          }
         } catch (parseErr) {
           if (parseErr instanceof ConversationLimitError) {
             this.intentHistory.delete(chatId);
@@ -273,23 +303,167 @@ export class TelegramAssistantHandler {
           throw parseErr;
         }
 
-        // Successful parse — clear history so next intent starts fresh
+        // Validation passed — clear history so next intent starts fresh
         this.intentHistory.delete(chatId);
 
         if (intent === null) {
           await ctx.reply("No onchain intent detected.");
           return;
         }
-        await this.safeSend(
-          ctx,
-          `Parsed intent:\n\`\`\`json\n${JSON.stringify(intent, null, 2)}\n\`\`\``,
-        );
-        // --- END INTENT PARSE TEST ---
+
+        await this.startTokenResolution(ctx, chatId, intent);
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
+  }
+
+  private async startTokenResolution(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    intent: IntentPackage,
+  ): Promise<void> {
+    if (!this.tokenRegistryService || !this.chainId) {
+      await ctx.reply("Token registry not configured.");
+      return;
+    }
+
+    let fromCandidates: ITokenRecord[] = [];
+    let toCandidates: ITokenRecord[] = [];
+
+    if (intent.fromTokenSymbol) {
+      fromCandidates = await this.tokenRegistryService.searchBySymbol(intent.fromTokenSymbol, this.chainId);
+      if (fromCandidates.length === 0) {
+        await ctx.reply(`Token not found: ${intent.fromTokenSymbol}. Make sure the token is supported on this chain.`);
+        return;
+      }
+    }
+
+    if (intent.toTokenSymbol) {
+      toCandidates = await this.tokenRegistryService.searchBySymbol(intent.toTokenSymbol, this.chainId);
+      if (toCandidates.length === 0) {
+        await ctx.reply(`Token not found: ${intent.toTokenSymbol}. Make sure the token is supported on this chain.`);
+        return;
+      }
+    }
+
+    const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0] : null;
+    const resolvedTo = toCandidates.length === 1 ? toCandidates[0] : null;
+
+    if (fromCandidates.length > 1) {
+      this.tokenDisambiguation.set(chatId, {
+        intent,
+        resolvedFrom: null,
+        resolvedTo: null,
+        awaitingSlot: "from",
+        fromCandidates,
+        toCandidates,
+      });
+      await ctx.reply(this.buildDisambiguationPrompt("from", intent.fromTokenSymbol!, fromCandidates));
+      return;
+    }
+
+    if (toCandidates.length > 1) {
+      this.tokenDisambiguation.set(chatId, {
+        intent,
+        resolvedFrom,
+        resolvedTo: null,
+        awaitingSlot: "to",
+        fromCandidates,
+        toCandidates,
+      });
+      await ctx.reply(this.buildDisambiguationPrompt("to", intent.toTokenSymbol!, toCandidates));
+      return;
+    }
+
+    await this.safeSend(ctx, this.buildEnrichedMessage(intent, resolvedFrom, resolvedTo));
+  }
+
+  private async handleDisambiguationReply(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    text: string,
+    _userId: string,
+  ): Promise<void> {
+    const pending = this.tokenDisambiguation.get(chatId)!;
+    const candidates = pending.awaitingSlot === "from" ? pending.fromCandidates : pending.toCandidates;
+    const index = parseInt(text, 10);
+
+    if (isNaN(index) || index < 1 || index > candidates.length) {
+      this.tokenDisambiguation.delete(chatId);
+      await ctx.reply("Disambiguation cancelled. Please repeat your request.");
+      return;
+    }
+
+    const selected = candidates[index - 1];
+
+    if (pending.awaitingSlot === "from") {
+      pending.resolvedFrom = selected;
+      if (pending.toCandidates.length > 1) {
+        pending.awaitingSlot = "to";
+        this.tokenDisambiguation.set(chatId, pending);
+        await ctx.reply(this.buildDisambiguationPrompt("to", pending.intent.toTokenSymbol!, pending.toCandidates));
+        return;
+      } else {
+        pending.resolvedTo = pending.toCandidates[0] ?? null;
+      }
+    } else {
+      pending.resolvedTo = selected;
+    }
+
+    this.tokenDisambiguation.delete(chatId);
+    await this.safeSend(ctx, this.buildEnrichedMessage(pending.intent, pending.resolvedFrom, pending.resolvedTo));
+  }
+
+  private buildDisambiguationPrompt(
+    slot: "from" | "to",
+    symbol: string,
+    candidates: ITokenRecord[],
+  ): string {
+    const label = slot === "from" ? "source token" : "destination token";
+    const lines = [`Multiple tokens found for "${symbol}" (${label}). Which one do you mean?`, ""];
+    for (let i = 0; i < candidates.length; i++) {
+      const t = candidates[i];
+      const addr = t.address.slice(0, 6) + "..." + t.address.slice(-4);
+      lines.push(`${i + 1}. ${t.symbol} — ${t.name} — ${addr} (${t.decimals} decimals)`);
+    }
+    lines.push("", "Reply with the number.");
+    return lines.join("\n");
+  }
+
+  private buildEnrichedMessage(
+    intent: IntentPackage,
+    fromToken: ITokenRecord | null,
+    toToken: ITokenRecord | null,
+  ): string {
+    const lines = ["*Intent confirmed*", ""];
+    lines.push(`Action: ${intent.action}`);
+
+    if (fromToken) {
+      lines.push(`From: ${fromToken.symbol} (${fromToken.name})`);
+      lines.push(`  Address: \`${fromToken.address}\``);
+      lines.push(`  Decimals: ${fromToken.decimals}`);
+      if (intent.amountHuman) {
+        // BigInt arithmetic to avoid float precision loss on 18-decimal tokens
+        const raw = toRaw(intent.amountHuman, fromToken.decimals);
+        lines.push(`  Amount: ${intent.amountHuman} ${fromToken.symbol} (${raw} raw)`);
+      }
+    }
+
+    if (toToken) {
+      lines.push(`To: ${toToken.symbol} (${toToken.name})`);
+      lines.push(`  Address: \`${toToken.address}\``);
+      lines.push(`  Decimals: ${toToken.decimals}`);
+    }
+
+    if (intent.slippageBps !== undefined) {
+      lines.push(`Slippage: ${intent.slippageBps / 100}%`);
+    }
+
+    lines.push("", `\`\`\`json\n${JSON.stringify(intent, null, 2)}\n\`\`\``);
+
+    return lines.join("\n");
   }
 
   private async confirmLatestIntent(userId: string): Promise<string> {

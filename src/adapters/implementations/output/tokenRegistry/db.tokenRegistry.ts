@@ -10,6 +10,10 @@ export class DbTokenRegistryService implements ITokenRegistryService {
     return { address: record.address, decimals: record.decimals };
   }
 
+  async searchBySymbol(pattern: string, chainId: number): Promise<ITokenRecord[]> {
+    return this.tokenRegistryDB.searchBySymbol(pattern, chainId);
+  }
+
   async listByChain(chainId: number): Promise<ITokenRecord[]> {
     return this.tokenRegistryDB.listByChain(chainId);
   }

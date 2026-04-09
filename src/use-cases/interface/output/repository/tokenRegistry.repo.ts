@@ -31,5 +31,6 @@ export interface TokenRecordInit {
 export interface ITokenRegistryDB {
   upsert(token: TokenRecordInit): Promise<void>;
   findBySymbolAndChain(symbol: string, chainId: number): Promise<ITokenRecord | undefined>;
+  searchBySymbol(pattern: string, chainId: number): Promise<ITokenRecord[]>;
   listByChain(chainId: number): Promise<ITokenRecord[]>;
 }
