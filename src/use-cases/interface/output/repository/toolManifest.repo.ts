@@ -26,6 +26,9 @@ export interface IToolManifestDB {
   listActive(chainId?: number): Promise<IToolManifestRecord[]>;
   deactivate(toolId: string): Promise<void>;
 
+  /** Batch fetch by toolId. Only returns isActive=true records. */
+  findByToolIds(toolIds: string[]): Promise<IToolManifestRecord[]>;
+
   /**
    * Keyword search across name, description, protocolName, and tags (ILIKE).
    * Results ordered by priority DESC, isDefault DESC.

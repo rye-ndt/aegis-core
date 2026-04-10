@@ -31,10 +31,15 @@ export class PineconeVectorStore implements IVectorStore {
     topK: number,
     filter?: Record<string, string>,
   ): Promise<IVectorQueryResult[]> {
+    // Pinecone v7 requires MongoDB-style operators: { key: { $eq: value } }
+    const pineconeFilter = filter
+      ? Object.fromEntries(Object.entries(filter).map(([k, v]) => [k, { $eq: v }]))
+      : undefined;
+
     const response = await this.index.query({
       vector,
       topK,
-      filter: filter as Record<string, unknown>,
+      filter: pineconeFilter as Record<string, unknown>,
       includeMetadata: true,
     });
 

@@ -1,8 +1,8 @@
-import { and, desc, eq, ilike, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, or, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
-  IToolManifestRecord,
   IToolManifestDB,
+  IToolManifestRecord,
 } from "../../../../../use-cases/interface/output/repository/toolManifest.repo";
 import { toolManifests } from "../schema";
 
@@ -67,6 +67,16 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
       .where(eq(toolManifests.toolId, toolId));
   }
 
+  async findByToolIds(toolIds: string[]): Promise<IToolManifestRecord[]> {
+    if (toolIds.length === 0) return [];
+    const rows = await this.db
+      .select()
+      .from(toolManifests)
+      .where(and(eq(toolManifests.isActive, true), inArray(toolManifests.toolId, toolIds)));
+    return rows.map((r) => this.toRecord(r));
+  }
+
+  // Fallback keyword search used when vector index is unavailable.
   async search(
     query: string,
     options: { limit: number; category?: string; chainId?: number },

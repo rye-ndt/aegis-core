@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
+import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 import type {
   ITool,
   IToolDefinition,
@@ -44,7 +45,7 @@ export class ExecuteIntentTool implements ITool {
       });
       return { success: true, data: result.humanSummary };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message = toErrorMessage(err);
       return { success: false, error: message };
     }
   }

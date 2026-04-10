@@ -1,6 +1,6 @@
-import type { ISolverRegistry } from "../../../../use-cases/interface/output/solver/solverRegistry.interface";
-import type { ISolver } from "../../../../use-cases/interface/output/solver/solver.interface";
 import type { IToolManifestDB, IToolManifestRecord } from "../../../../use-cases/interface/output/repository/toolManifest.repo";
+import type { ISolver } from "../../../../use-cases/interface/output/solver/solver.interface";
+import type { ISolverRegistry } from "../../../../use-cases/interface/output/solver/solverRegistry.interface";
 import { deserializeManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { ManifestDrivenSolver } from "./manifestSolver/manifestDriven.solver";
 

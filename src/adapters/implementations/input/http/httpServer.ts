@@ -9,6 +9,7 @@ import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/i
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import jwt from "jsonwebtoken";
+import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 
 const registerSchema = z.object({
   email: z.string().email(),
@@ -79,6 +80,9 @@ export class HttpApiServer {
     }
     if (method === "GET" && url.pathname === "/tools") {
       return this.handleGetTools(req, res, url);
+    }
+    if (method === "DELETE" && url.pathname.startsWith("/tools/")) {
+      return this.handleDeleteTool(req, res, url);
     }
 
     res.writeHead(404);
@@ -218,6 +222,24 @@ export class HttpApiServer {
         return this.sendJson(res, 409, { error: "Tool ID already registered" });
       }
       throw err;
+    }
+  }
+
+  private async handleDeleteTool(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.toolRegistrationUseCase) return this.sendJson(res, 503, { error: "Tool registration service not available" });
+
+    const toolId = url.pathname.split("/").pop()?.trim();
+    if (!toolId) return this.sendJson(res, 400, { error: "toolId is required" });
+
+    try {
+      await this.toolRegistrationUseCase.deactivate(toolId);
+      return this.sendJson(res, 200, { toolId, deactivated: true });
+    } catch (err) {
+      const message = toErrorMessage(err);
+      const status = message.startsWith("TOOL_NOT_FOUND") ? 404 : 500;
+      return this.sendJson(res, status, { error: message });
     }
   }
 

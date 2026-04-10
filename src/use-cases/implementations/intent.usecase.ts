@@ -1,4 +1,5 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
+import { toErrorMessage } from "../../helpers/errors/toErrorMessage";
 import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
 import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
@@ -27,6 +28,7 @@ import {
   validateIntent,
 } from "../../adapters/implementations/output/intentParser/intent.validator";
 import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
+import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
 
 const CONFIDENCE_THRESHOLD = 0.7;
@@ -50,6 +52,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly chainId: number,
     private readonly treasuryAddress: string,
     private readonly toolManifestDB: IToolManifestDB,
+    private readonly toolIndexService?: IToolIndexService,
   ) {}
 
   async parseAndExecute(params: {
@@ -178,7 +181,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     try {
       calldata = await solver.buildCalldata(intent, smartAccountAddress);
     } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
+      const reason = toErrorMessage(err);
       await this.intentDB.create({
         id: intentId,
         userId: params.userId,
@@ -398,7 +401,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
         txHash,
       };
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = toErrorMessage(err);
       await this.intentDB.updateStatus(
         params.intentId,
         INTENT_STATUSES.FAILED,
@@ -437,6 +440,35 @@ export class IntentUseCaseImpl implements IIntentUseCase {
   }
 
   private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {
+    if (this.toolIndexService) {
+      try {
+        const hits = await this.toolIndexService.search(rawInput, {
+          topK: 20,
+          chainId: this.chainId,
+          minScore: 0.3,
+        });
+
+        if (hits.length > 0) {
+          const toolIds = hits.map((h) => h.toolId);
+          const records = await this.toolManifestDB.findByToolIds(toolIds);
+
+          // Preserve vector score order before resolveConflicts reorders by category.
+          const scoreMap = new Map(hits.map((h) => [h.toolId, h.score]));
+          records.sort((a, b) => (scoreMap.get(b.toolId) ?? 0) - (scoreMap.get(a.toolId) ?? 0));
+
+          return this.resolveConflicts(records, rawInput);
+        }
+
+        // 0 results above threshold means no relevant tool — return empty.
+        // Do not fall back to ILIKE: surfacing unrelated tools is worse than none.
+        return [];
+      } catch (err) {
+        // Vector search failed (network, Pinecone down). Fall through to ILIKE.
+        console.error("[IntentUseCaseImpl] Vector search failed, falling back to ILIKE:", err);
+      }
+    }
+
+    // ILIKE fallback — used when toolIndexService is absent or threw.
     const candidates = await this.toolManifestDB.search(rawInput, {
       limit: 15,
       chainId: this.chainId,

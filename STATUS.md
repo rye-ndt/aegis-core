@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-10 (dynamic tool registry — parts 1, 2 & 3 complete)
+> Last updated: 2026-04-10 (tool RAG indexing — in progress, uncommitted)
 
 ---
 
@@ -16,7 +16,7 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry) ✅**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry) ✅ — Phase 7 (tool RAG indexing) 🚧**
 
 ---
 
@@ -65,6 +65,7 @@ src/
 │           ├── repository/         # 9 repo interfaces (users → feeRecords)
 │           ├── intentParser.interface.ts   # IntentPackage (action: string, params?), SimulationReport
 │           ├── toolManifest.types.ts       # ToolManifest Zod schemas + deserializeManifest
+│           ├── toolIndex.interface.ts      # IToolIndexService (index, search, delete)
 │           ├── simulator.interface.ts
 │           ├── tokenCrawler.interface.ts   # ITokenCrawlerJob, CrawledToken
 │           └── tokenRegistry.interface.ts
@@ -103,6 +104,8 @@ src/
 │           │   ├── webSearch.tool.ts
 │           │   ├── executeIntent.tool.ts   # LLM triggers intent parse+execute
 │           │   └── getPortfolio.tool.ts    # Reads SCA on-chain balances
+│           ├── toolIndex/
+│           │   └── pinecone.toolIndex.ts   # PineconeToolIndexService (IToolIndexService)
 │           ├── toolRegistry.concrete.ts
 │           └── sqlDB/             # DrizzleSqlDB + 10 repositories
 │
@@ -111,6 +114,7 @@ src/
     │                              # CONVERSATION_STATUSES, INTENT_STATUSES,
     │                              # EXECUTION_STATUSES, SESSION_KEY_STATUSES,
     │                              # SOLVER_TYPE, TOOL_CATEGORY
+    ├── errors/toErrorMessage.ts   # toErrorMessage(unknown) → string helper
     ├── time/dateTime.ts           # newCurrentUTCEpoch() — seconds, not ms
     └── uuid.ts                    # newUuid() — v4
 ```
@@ -138,6 +142,8 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 | `GET`  | `/intent/:intentId`| JWT    | Fetch intent + execution status                    |
 | `GET`  | `/portfolio`       | JWT    | On-chain balances for user's SCA                   |
 | `GET`  | `/tokens?chainId=` | None   | List verified tokens for a chain                   |
+| `POST` | `/tools`           | JWT    | Register a dynamic tool manifest                   |
+| `GET`  | `/tools`           | None   | List active tool manifests                         |
 
 ---
 
@@ -323,7 +329,24 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] `intent.validator.ts` — `manifest?` param; dynamic `inputSchema.required` check when provided
 - [x] **Part 3** — `IntentUseCaseImpl` discovery pipeline (`discoverRelevantTools`, `resolveConflicts`), HTTP API (`POST /tools`, `GET /tools`), `assistant.di.ts` full wiring; `OpenAIIntentParser` accepts `relevantManifests?` param (ignored — discovery is use-case responsibility)
 
+### Phase 7 — Tool RAG Indexing 🚧
+> Plan: `constructions/tool-rag-indexing-plan.md`. Changes are in the working tree (uncommitted).
+
+Replaces the naive ILIKE `discoverRelevantTools()` with Pinecone semantic search. Falls back to ILIKE when the index is unavailable.
+
+- [x] `IToolIndexService` — new port: `index(id, toolId, text, category, chainIds)`, `search(query, {topK, chainId?, minScore?})`, `delete(id)`
+- [x] `PineconeToolIndexService` — composes `IEmbeddingService` + `IVectorStore`; client-side chainId post-filter (Pinecone lacks `$in`); fetches `topK × 3` then slices after filtering; `minScore` default 0.3
+- [x] `IToolManifestDB` extended with `findByToolIds(toolIds: string[])` — batch fetch, `isActive=true` only
+- [x] `ToolRegistrationUseCase` — accepts optional `toolIndexService`; calls `index()` after DB create (best-effort; failure logs warning, never blocks registration); `RegisterToolResult` now includes `indexed: boolean`
+- [x] `ToolRegistrationUseCase.deactivate()` — calls `toolIndexService.delete()` after DB deactivation (best-effort)
+- [x] `IntentUseCaseImpl.discoverRelevantTools()` — vector-first: embed query → Pinecone → `findByToolIds` → `resolveConflicts`; falls back to ILIKE only on Pinecone error (not on 0 results)
+- [ ] `DrizzleToolManifestRepo.findByToolIds()` — Drizzle impl of batch fetch (in progress, `toolManifest.repo.ts` modified)
+- [ ] `assistant.di.ts` — wire `PineconeToolIndexService` into `ToolRegistrationUseCase` + `IntentUseCaseImpl` (in progress, `assistant.di.ts` modified)
+- [ ] `PineconeVectorStore` — updated to support `delete(id)` (in progress, `vectorDB/pinecone.ts` modified)
+- [ ] Integration test: `POST /tools` → `indexed: true`; intent message → vector hits returned; `DELETE /tools/:id` → vector removed
+
 ### Next steps
+- [ ] Commit and finish Phase 7 wiring (`assistant.di.ts`, `DrizzleToolManifestRepo.findByToolIds`, `PineconeVectorStore.delete`)
 - [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
 - [ ] Fill `.env` with `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
 - [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash

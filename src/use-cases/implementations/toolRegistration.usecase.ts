@@ -4,12 +4,26 @@ import { newUuid } from "../../helpers/uuid";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import type { IToolRegistrationUseCase, RegisterToolResult } from "../interface/input/toolRegistration.interface";
 import type { IToolManifestDB } from "../interface/output/repository/toolManifest.repo";
+import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { ToolManifestSchema, deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
 
 const RESERVED_ACTIONS = new Set<string>(Object.values(INTENT_ACTION));
 
+function buildEmbeddingText(manifest: ToolManifest): string {
+  return [
+    manifest.name,
+    manifest.description,
+    `Protocol: ${manifest.protocolName}`,
+    `Tags: ${manifest.tags.join(", ")}`,
+    `Category: ${manifest.category}`,
+  ].join(". ");
+}
+
 export class ToolRegistrationUseCase implements IToolRegistrationUseCase {
-  constructor(private readonly toolManifestDB: IToolManifestDB) {}
+  constructor(
+    private readonly toolManifestDB: IToolManifestDB,
+    private readonly toolIndexService?: IToolIndexService,
+  ) {}
 
   async register(manifest: ToolManifest): Promise<RegisterToolResult> {
     // 1. Validate with Zod — throws ZodError on failure
@@ -36,7 +50,7 @@ export class ToolRegistrationUseCase implements IToolRegistrationUseCase {
     const now = newCurrentUTCEpoch();
     const id = newUuid();
 
-    // 5. Serialize JSON fields and create the record
+    // 5. Persist to DB
     await this.toolManifestDB.create({
       id,
       toolId:           manifest.toolId,
@@ -58,7 +72,41 @@ export class ToolRegistrationUseCase implements IToolRegistrationUseCase {
       updatedAtEpoch:   now,
     });
 
-    return { toolId: manifest.toolId, id, createdAt: now };
+    // 6. Index in vector store — best-effort; never blocks registration
+    let indexed = false;
+    if (this.toolIndexService) {
+      try {
+        await this.toolIndexService.index({
+          id,
+          toolId: manifest.toolId,
+          text: buildEmbeddingText(manifest),
+          category: manifest.category,
+          chainIds: manifest.chainIds,
+        });
+        indexed = true;
+      } catch (err) {
+        console.error(`[ToolRegistrationUseCase] Failed to index tool "${manifest.toolId}":`, err);
+      }
+    }
+
+    return { toolId: manifest.toolId, id, createdAt: now, indexed };
+  }
+
+  async deactivate(toolId: string): Promise<void> {
+    const record = await this.toolManifestDB.findByToolId(toolId);
+    if (!record) throw new Error(`TOOL_NOT_FOUND: "${toolId}" does not exist`);
+
+    // DB deactivation first — if vector delete fails, the tool is already inactive
+    // and will be filtered out by findByToolIds (isActive=true guard).
+    await this.toolManifestDB.deactivate(toolId);
+
+    if (this.toolIndexService) {
+      try {
+        await this.toolIndexService.delete(record.id);
+      } catch (err) {
+        console.error(`[ToolRegistrationUseCase] Failed to remove tool "${toolId}" from vector store:`, err);
+      }
+    }
   }
 
   async list(chainId?: number): Promise<ToolManifest[]> {

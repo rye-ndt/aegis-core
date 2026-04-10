@@ -30,6 +30,10 @@ import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pan
 import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
 import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
+import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
+import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
+import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
+import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -47,6 +51,9 @@ export class AssistantInject {
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
   private _simulator: RpcSimulator | null = null;
   private _resultParser: TxResultParser | null = null;
+  private _embeddingService: OpenAIEmbeddingService | null = null;
+  private _toolVectorStore: PineconeVectorStore | null = null;
+  private _toolIndexService: IToolIndexService | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -113,10 +120,44 @@ export class AssistantInject {
     return this._solverRegistry;
   }
 
+  getEmbeddingService(): OpenAIEmbeddingService | null {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return null;
+    if (!this._embeddingService) {
+      this._embeddingService = new OpenAIEmbeddingService(apiKey);
+    }
+    return this._embeddingService;
+  }
+
+  getToolVectorStore(): PineconeVectorStore | null {
+    const apiKey = process.env.PINECONE_API_KEY;
+    const indexName = process.env.PINECONE_INDEX_NAME;
+    if (!apiKey || !indexName) return null;
+    if (!this._toolVectorStore) {
+      this._toolVectorStore = new PineconeVectorStore(
+        apiKey,
+        indexName,
+        process.env.PINECONE_HOST,
+      );
+    }
+    return this._toolVectorStore;
+  }
+
+  getToolIndexService(): IToolIndexService | undefined {
+    const embeddingService = this.getEmbeddingService();
+    const vectorStore = this.getToolVectorStore();
+    if (!embeddingService || !vectorStore) return undefined;
+    if (!this._toolIndexService) {
+      this._toolIndexService = new PineconeToolIndexService(embeddingService, vectorStore);
+    }
+    return this._toolIndexService;
+  }
+
   getToolRegistrationUseCase(): IToolRegistrationUseCase {
     if (!this._toolRegistrationUseCase) {
       this._toolRegistrationUseCase = new ToolRegistrationUseCase(
         this.getSqlDB().toolManifests,
+        this.getToolIndexService(),
       );
     }
     return this._toolRegistrationUseCase;
@@ -177,6 +218,7 @@ export class AssistantInject {
         chainId,
         process.env.TREASURY_ADDRESS ?? "",
         db.toolManifests,
+        this.getToolIndexService(),
       );
     }
     return this._intentUseCase;
