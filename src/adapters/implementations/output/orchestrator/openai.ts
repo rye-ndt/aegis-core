@@ -64,11 +64,13 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
       },
     }));
 
+    console.log(`[OpenAIOrchestrator] calling model=${this.model} messages=${messages.length} tools=${tools.length}`);
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages,
       ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
     });
+    console.log(`[OpenAIOrchestrator] response finish_reason=${response.choices[0]?.finish_reason} promptTokens=${response.usage?.prompt_tokens} completionTokens=${response.usage?.completion_tokens}`);
 
     const choice = response.choices[0];
     const message = choice.message;

@@ -81,21 +81,30 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";
 
+    console.log(`[AssistantUseCase] chat start userId=${input.userId} conversationId=${conversationId} historyLength=${slidingWindow.length - 1} availableTools=[${availableTools.map((t) => t.name).join(", ")}]`);
+
     for (let round = 0; round < maxRounds; round++) {
+      console.log(`[AssistantUseCase] LLM round ${round + 1}/${maxRounds} — sending ${slidingWindow.length} messages`);
       const llmResponse = await this.orchestrator.chat({
         systemPrompt,
         conversationHistory: slidingWindow,
         availableTools,
       });
+      console.log(`[AssistantUseCase] LLM round ${round + 1} response — toolCalls=${llmResponse.toolCalls?.length ?? 0} promptTokens=${llmResponse.usage?.promptTokens ?? "?"} completionTokens=${llmResponse.usage?.completionTokens ?? "?"}`);
 
       if (!llmResponse.toolCalls?.length) {
         finalReply = llmResponse.text ?? "";
+        console.log(`[AssistantUseCase] LLM final reply (no tool calls) length=${finalReply.length}`);
         break;
       }
 
+      console.log(`[AssistantUseCase] executing tools: [${llmResponse.toolCalls.map((tc) => tc.toolName).join(", ")}]`);
       const roundResults = await Promise.all(
         llmResponse.toolCalls.map((tc) => this.executeTool(tc, toolRegistry)),
       );
+      for (const r of roundResults) {
+        console.log(`[AssistantUseCase] tool "${r.toolName}" done success=${r.result.success} latencyMs=${r.latencyMs}`);
+      }
 
       const toolCallsJson = JSON.stringify(llmResponse.toolCalls);
       await Promise.all([
