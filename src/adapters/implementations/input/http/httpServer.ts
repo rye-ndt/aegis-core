@@ -11,17 +11,6 @@ import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 
-const registerSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(8),
-  username: z.string().min(1),
-});
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-
 const ERC20_BALANCE_ABI = [
   {
     name: "balanceOf",
@@ -60,11 +49,8 @@ export class HttpApiServer {
     const url = new URL(req.url ?? "/", base);
     const method = req.method?.toUpperCase();
 
-    if (method === "POST" && url.pathname === "/auth/register") {
-      return this.handleRegister(req, res);
-    }
-    if (method === "POST" && url.pathname === "/auth/login") {
-      return this.handleLogin(req, res);
+    if (method === "POST" && url.pathname === "/auth/privy") {
+      return this.handlePrivyLogin(req, res);
     }
     if (method === "GET" && url.pathname.startsWith("/intent/")) {
       return this.handleGetIntent(req, res, url);
@@ -89,7 +75,7 @@ export class HttpApiServer {
     res.end("Not found");
   }
 
-  private async handleRegister(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async handlePrivyLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     let body: unknown;
     try {
       body = await this.readJson(req);
@@ -97,41 +83,20 @@ export class HttpApiServer {
       return this.sendJson(res, 400, { error: "Invalid JSON" });
     }
 
-    const parsed = registerSchema.safeParse(body);
+    const parsed = z.object({ privyToken: z.string().min(1) }).safeParse(body);
     if (!parsed.success) {
-      return this.sendJson(res, 400, { error: parsed.error.issues[0]?.message ?? "Invalid input" });
+      return this.sendJson(res, 400, { error: "privyToken is required" });
     }
 
     try {
-      const result = await this.authUseCase.register(parsed.data);
-      return this.sendJson(res, 201, result);
-    } catch (err) {
-      if (err instanceof Error && err.message === "EMAIL_TAKEN") {
-        return this.sendJson(res, 409, { error: "Email already registered" });
-      }
-      throw err;
-    }
-  }
-
-  private async handleLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    let body: unknown;
-    try {
-      body = await this.readJson(req);
-    } catch {
-      return this.sendJson(res, 400, { error: "Invalid JSON" });
-    }
-
-    const parsed = loginSchema.safeParse(body);
-    if (!parsed.success) {
-      return this.sendJson(res, 400, { error: parsed.error.issues[0]?.message ?? "Invalid input" });
-    }
-
-    try {
-      const result = await this.authUseCase.login(parsed.data);
+      const result = await this.authUseCase.loginWithPrivy({ privyToken: parsed.data.privyToken });
       return this.sendJson(res, 200, result);
     } catch (err) {
-      if (err instanceof Error && err.message === "INVALID_CREDENTIALS") {
-        return this.sendJson(res, 401, { error: "Invalid email or password" });
+      if (
+        err instanceof Error &&
+        (err.message === "PRIVY_NOT_CONFIGURED" || err.message.toLowerCase().includes("invalid"))
+      ) {
+        return this.sendJson(res, 401, { error: "Invalid or expired Privy token" });
       }
       throw err;
     }

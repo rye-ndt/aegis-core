@@ -17,8 +17,9 @@ export class DrizzleUserRepo implements IUserDB {
     await this.db.insert(users).values({
       id: user.id,
       userName: user.userName,
-      hashedPassword: user.hashedPassword,
+      hashedPassword: user.hashedPassword ?? null,
       email: user.email,
+      privyDid: user.privyDid ?? null,
       status: user.status,
       createdAtEpoch: user.createdAtEpoch,
       updatedAtEpoch: user.updatedAtEpoch,
@@ -58,12 +59,23 @@ export class DrizzleUserRepo implements IUserDB {
     return this.toIUser(rows[0]);
   }
 
+  async findByPrivyDid(privyDid: string): Promise<IUser | null> {
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(eq(users.privyDid, privyDid))
+      .limit(1);
+    if (!rows[0]) return null;
+    return this.toIUser(rows[0]);
+  }
+
   private toIUser(row: typeof users.$inferSelect): IUser {
     return {
       id: row.id,
       userName: row.userName,
-      hashedPassword: row.hashedPassword,
+      hashedPassword: row.hashedPassword ?? undefined,
       email: row.email,
+      privyDid: row.privyDid ?? undefined,
       status: row.status as USER_STATUSES,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,

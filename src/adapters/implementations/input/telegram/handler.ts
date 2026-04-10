@@ -1,4 +1,5 @@
 import type { Bot } from "grammy";
+import { InlineKeyboard } from "grammy";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
@@ -68,6 +69,7 @@ export class TelegramAssistantHandler {
     private readonly intentParser?: IIntentParser,
     private readonly toolManifestDB?: IToolManifestDB,
     private readonly toolIndexService?: IToolIndexService,
+    private readonly apiBaseUrl?: string,
   ) {}
 
   register(bot: Bot): void {
@@ -79,8 +81,10 @@ export class TelegramAssistantHandler {
     bot.command("start", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
+        const keyboard = new InlineKeyboard().text("Sign in with Google", "auth:login");
         await ctx.reply(
-          "Welcome to the Onchain Agent.\n\nAuthenticate first: call POST /auth/login to get a token, then send /auth <token> here.",
+          "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
+          { reply_markup: keyboard },
         );
         return;
       }
@@ -89,27 +93,42 @@ export class TelegramAssistantHandler {
       );
     });
 
+    bot.callbackQuery("auth:login", async (ctx) => {
+      await ctx.answerCallbackQuery();
+      await ctx.reply(
+        [
+          "To authenticate:",
+          "",
+          "1. Open the *Aegis* mini app",
+          "2. Sign in with Google",
+          "3. Tap *Copy* next to your Agent Auth Token",
+          "4. Send it here with: `/auth <token>`",
+        ].join("\n"),
+        { parse_mode: "Markdown" },
+      );
+    });
+
     bot.command("auth", async (ctx) => {
-      const token = ctx.match?.trim();
-      if (!token) {
+      const privyToken = ctx.match?.trim();
+      if (!privyToken) {
         await ctx.reply(
-          "Usage: /auth <your_token>\n\nGet a token via POST /auth/login.",
+          "Usage: /auth <privy_token>\n\nGet your token from the Aegis mini app after signing in with Google.",
         );
         return;
       }
       try {
         const { userId, expiresAtEpoch } =
-          await this.authUseCase.validateToken(token);
+          await this.authUseCase.loginWithPrivy({ privyToken });
         await this.telegramSessions.upsert({
           telegramChatId: String(ctx.chat.id),
           userId,
           expiresAtEpoch,
         });
         this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
-        await ctx.reply("Authenticated. You can now use the Onchain Agent.");
+        await ctx.reply("Authenticated with Google via Privy. You can now use the Onchain Agent.");
       } catch {
         await ctx.reply(
-          "Invalid or expired token. Get a fresh token via POST /auth/login.",
+          "Invalid or expired token. Open the Aegis mini app and copy a fresh token.",
         );
       }
     });
@@ -240,6 +259,36 @@ export class TelegramAssistantHandler {
       } catch (err) {
         console.error("Error fetching wallet:", err);
         await ctx.reply("Sorry, couldn't fetch wallet info. Please try again.");
+      }
+    });
+
+    bot.on("message:web_app_data", async (ctx) => {
+      const raw = ctx.message.web_app_data?.data;
+      if (!raw) return;
+      let privyToken: string | undefined;
+      try {
+        const parsed = JSON.parse(raw);
+        privyToken = parsed?.privyToken;
+      } catch {
+        await ctx.reply("Could not parse mini app data.");
+        return;
+      }
+      if (!privyToken) {
+        await ctx.reply("No token received from mini app.");
+        return;
+      }
+      try {
+        const { userId, expiresAtEpoch } =
+          await this.authUseCase.loginWithPrivy({ privyToken });
+        await this.telegramSessions.upsert({
+          telegramChatId: String(ctx.chat.id),
+          userId,
+          expiresAtEpoch,
+        });
+        this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
+        await ctx.reply("Authenticated with Google. You can now use the Onchain Agent.");
+      } catch {
+        await ctx.reply("Authentication failed. Please try again from the mini app.");
       }
     });
 
