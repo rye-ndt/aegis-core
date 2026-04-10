@@ -8,10 +8,16 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
-import type { IIntentParser, IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
+import type {
+  IIntentParser,
+  IntentPackage,
+} from "../../../../use-cases/interface/output/intentParser.interface";
 import type { ITokenRecord } from "../../../../use-cases/interface/output/repository/tokenRegistry.repo";
 import type { IToolManifestDB } from "../../../../use-cases/interface/output/repository/toolManifest.repo";
-import { deserializeManifest, type ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
+import {
+  deserializeManifest,
+  type ToolManifest,
+} from "../../../../use-cases/interface/output/toolManifest.types";
 import { ManifestDrivenSolver } from "../../output/solver/manifestSolver/manifestDriven.solver";
 import {
   MissingFieldsError,
@@ -266,76 +272,129 @@ export class TelegramAssistantHandler {
     });
 
     bot.on("message:text", async (ctx) => {
+      // Step 1: Require a valid session before doing anything
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
         await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
+
       await ctx.replyWithChatAction("typing");
+
+      if (!this.intentParser) {
+        await ctx.reply("Intent parser not configured.");
+        return;
+      }
+
+      const chatId = ctx.chat.id;
+      const text = ctx.message.text.trim();
+
       try {
-        if (!this.intentParser) {
-          await ctx.reply("Intent parser not configured.");
-          return;
-        }
-
-        const chatId = ctx.chat.id;
-        const text = ctx.message.text.trim();
-
+        // Step 2: If the user is mid-disambiguation (choosing between token matches),
+        //         route to that handler and stop — no intent parsing needed
         if (this.tokenDisambiguation.has(chatId)) {
           await this.handleDisambiguationReply(ctx, chatId, text, session.userId);
           return;
         }
 
-        const history = this.intentHistory.get(chatId) ?? [];
-        history.push(text);
-        this.intentHistory.set(chatId, history);
+        // Step 3: Accumulate the message into history and attempt to parse a
+        //         structured intent. Throws MissingFieldsError / InvalidFieldError
+        //         when the intent is incomplete, or ConversationLimitError when
+        //         the conversation has gone on too long without resolving.
+        const { intent, manifest } = await this.parseIntentWithHistory(
+          chatId,
+          text,
+          session.userId,
+        );
 
-        let intent: IntentPackage | null;
-        let manifest: ToolManifest | undefined;
-        try {
-          intent = await this.intentParser.parse(history, session.userId);
-          if (intent !== null) {
-            // Enrich: look up tool manifest by action (skip if not found)
-            if (this.toolManifestDB) {
-              const record = await this.toolManifestDB.findByToolId(intent.action);
-              if (record) manifest = deserializeManifest(record);
-            }
-            validateIntent(intent, history.length, manifest);
-          }
-        } catch (parseErr) {
-          if (parseErr instanceof ConversationLimitError) {
-            this.intentHistory.delete(chatId);
-            await ctx.reply(parseErr.message);
-            return;
-          }
-          if (parseErr instanceof MissingFieldsError || parseErr instanceof InvalidFieldError) {
-            await ctx.reply(parseErr.prompt);
-            return;
-          }
-          throw parseErr;
-        }
-
-        // Validation passed — clear history so next intent starts fresh
-        this.intentHistory.delete(chatId);
-
+        // Step 4: Route on whether the parser extracted a structured intent
         if (intent === null) {
-          const conversationId = this.conversations.get(chatId);
-          const response = await this.assistantUseCase.chat({
-            userId: session.userId,
-            conversationId,
-            message: text,
-          });
-          this.conversations.set(chatId, response.conversationId);
-          await this.safeSend(ctx, response.reply);
+          // No on-chain action detected — fall back to conversational assistant
+          await this.handleFallbackChat(ctx, chatId, text, session.userId);
+        } else {
+          // Structured intent found — resolve token addresses and show confirmation
+          await this.startTokenResolution(ctx, chatId, intent, manifest);
+        }
+      } catch (err) {
+        if (err instanceof ConversationLimitError) {
+          await ctx.reply(err.message);
           return;
         }
-
-        await this.startTokenResolution(ctx, chatId, intent, manifest);
-      } catch (err) {
+        if (err instanceof MissingFieldsError || err instanceof InvalidFieldError) {
+          await ctx.reply(err.prompt);
+          return;
+        }
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
+  }
+
+  /**
+   * Appends the incoming message to this chat's history, then asks the intent
+   * parser to extract a structured intent from the full history. If an intent
+   * is found, enriches it with a matching tool manifest before validating.
+   *
+   * Throws ConversationLimitError, MissingFieldsError, or InvalidFieldError —
+   * callers are expected to handle each case with an appropriate user reply.
+   */
+  private async parseIntentWithHistory(
+    chatId: number,
+    text: string,
+    userId: string,
+  ): Promise<{ intent: IntentPackage | null; manifest: ToolManifest | undefined }> {
+    const history = this.intentHistory.get(chatId) ?? [];
+    history.push(text);
+    this.intentHistory.set(chatId, history);
+
+    let intent: IntentPackage | null;
+    let manifest: ToolManifest | undefined;
+
+    try {
+      intent = await this.intentParser!.parse(history, userId);
+
+      if (intent !== null) {
+        // Enrich: look up the tool manifest for this action (optional — skip if absent)
+        if (this.toolManifestDB) {
+          const record = await this.toolManifestDB.findByToolId(intent.action);
+          if (record) manifest = deserializeManifest(record);
+        }
+        // Validate completeness; throws if required fields are still missing
+        validateIntent(intent, history.length, manifest);
+      }
+    } catch (err) {
+      if (err instanceof ConversationLimitError) {
+        // Conversation exceeded the allowed turn limit — reset so next message starts fresh
+        this.intentHistory.delete(chatId);
+      }
+      throw err;
+    }
+
+    // Intent is complete and valid — clear history for the next intent
+    this.intentHistory.delete(chatId);
+
+    return { intent, manifest };
+  }
+
+  /**
+   * Handles messages that carried no structured on-chain intent.
+   * Forwards the text to the conversational assistant and tracks the
+   * conversation ID so follow-up messages maintain context.
+   */
+  private async handleFallbackChat(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    text: string,
+    userId: string,
+  ): Promise<void> {
+    const conversationId = this.conversations.get(chatId);
+    const response = await this.assistantUseCase.chat({
+      userId,
+      conversationId,
+      message: text,
+    });
+    this.conversations.set(chatId, response.conversationId);
+    await this.safeSend(ctx, response.reply);
   }
 
   private async startTokenResolution(
@@ -353,17 +412,27 @@ export class TelegramAssistantHandler {
     let toCandidates: ITokenRecord[] = [];
 
     if (intent.fromTokenSymbol) {
-      fromCandidates = await this.tokenRegistryService.searchBySymbol(intent.fromTokenSymbol, this.chainId);
+      fromCandidates = await this.tokenRegistryService.searchBySymbol(
+        intent.fromTokenSymbol,
+        this.chainId,
+      );
       if (fromCandidates.length === 0) {
-        await ctx.reply(`Token not found: ${intent.fromTokenSymbol}. Make sure the token is supported on this chain.`);
+        await ctx.reply(
+          `Token not found: ${intent.fromTokenSymbol}. Make sure the token is supported on this chain.`,
+        );
         return;
       }
     }
 
     if (intent.toTokenSymbol) {
-      toCandidates = await this.tokenRegistryService.searchBySymbol(intent.toTokenSymbol, this.chainId);
+      toCandidates = await this.tokenRegistryService.searchBySymbol(
+        intent.toTokenSymbol,
+        this.chainId,
+      );
       if (toCandidates.length === 0) {
-        await ctx.reply(`Token not found: ${intent.toTokenSymbol}. Make sure the token is supported on this chain.`);
+        await ctx.reply(
+          `Token not found: ${intent.toTokenSymbol}. Make sure the token is supported on this chain.`,
+        );
         return;
       }
     }
@@ -381,7 +450,13 @@ export class TelegramAssistantHandler {
         toCandidates,
         manifest,
       });
-      await ctx.reply(this.buildDisambiguationPrompt("from", intent.fromTokenSymbol!, fromCandidates));
+      await ctx.reply(
+        this.buildDisambiguationPrompt(
+          "from",
+          intent.fromTokenSymbol!,
+          fromCandidates,
+        ),
+      );
       return;
     }
 
@@ -395,11 +470,25 @@ export class TelegramAssistantHandler {
         toCandidates,
         manifest,
       });
-      await ctx.reply(this.buildDisambiguationPrompt("to", intent.toTokenSymbol!, toCandidates));
+      await ctx.reply(
+        this.buildDisambiguationPrompt(
+          "to",
+          intent.toTokenSymbol!,
+          toCandidates,
+        ),
+      );
       return;
     }
 
-    await this.safeSend(ctx, await this.buildEnrichedMessage(intent, resolvedFrom, resolvedTo, manifest));
+    await this.safeSend(
+      ctx,
+      await this.buildEnrichedMessage(
+        intent,
+        resolvedFrom,
+        resolvedTo,
+        manifest,
+      ),
+    );
   }
 
   private async handleDisambiguationReply(
@@ -409,7 +498,10 @@ export class TelegramAssistantHandler {
     _userId: string,
   ): Promise<void> {
     const pending = this.tokenDisambiguation.get(chatId)!;
-    const candidates = pending.awaitingSlot === "from" ? pending.fromCandidates : pending.toCandidates;
+    const candidates =
+      pending.awaitingSlot === "from"
+        ? pending.fromCandidates
+        : pending.toCandidates;
     const index = parseInt(text, 10);
 
     if (isNaN(index) || index < 1 || index > candidates.length) {
@@ -425,7 +517,13 @@ export class TelegramAssistantHandler {
       if (pending.toCandidates.length > 1) {
         pending.awaitingSlot = "to";
         this.tokenDisambiguation.set(chatId, pending);
-        await ctx.reply(this.buildDisambiguationPrompt("to", pending.intent.toTokenSymbol!, pending.toCandidates));
+        await ctx.reply(
+          this.buildDisambiguationPrompt(
+            "to",
+            pending.intent.toTokenSymbol!,
+            pending.toCandidates,
+          ),
+        );
         return;
       } else {
         pending.resolvedTo = pending.toCandidates[0] ?? null;
@@ -435,7 +533,15 @@ export class TelegramAssistantHandler {
     }
 
     this.tokenDisambiguation.delete(chatId);
-    await this.safeSend(ctx, await this.buildEnrichedMessage(pending.intent, pending.resolvedFrom, pending.resolvedTo, pending.manifest));
+    await this.safeSend(
+      ctx,
+      await this.buildEnrichedMessage(
+        pending.intent,
+        pending.resolvedFrom,
+        pending.resolvedTo,
+        pending.manifest,
+      ),
+    );
   }
 
   private buildDisambiguationPrompt(
@@ -444,11 +550,16 @@ export class TelegramAssistantHandler {
     candidates: ITokenRecord[],
   ): string {
     const label = slot === "from" ? "source token" : "destination token";
-    const lines = [`Multiple tokens found for "${symbol}" (${label}). Which one do you mean?`, ""];
+    const lines = [
+      `Multiple tokens found for "${symbol}" (${label}). Which one do you mean?`,
+      "",
+    ];
     for (let i = 0; i < candidates.length; i++) {
       const t = candidates[i];
       const addr = t.address.slice(0, 6) + "..." + t.address.slice(-4);
-      lines.push(`${i + 1}. ${t.symbol} — ${t.name} — ${addr} (${t.decimals} decimals)`);
+      lines.push(
+        `${i + 1}. ${t.symbol} — ${t.name} — ${addr} (${t.decimals} decimals)`,
+      );
     }
     lines.push("", "Reply with the number.");
     return lines.join("\n");
@@ -470,7 +581,9 @@ export class TelegramAssistantHandler {
       if (intent.amountHuman) {
         // BigInt arithmetic to avoid float precision loss on 18-decimal tokens
         const raw = toRaw(intent.amountHuman, fromToken.decimals);
-        lines.push(`  Amount: ${intent.amountHuman} ${fromToken.symbol} (${raw} raw)`);
+        lines.push(
+          `  Amount: ${intent.amountHuman} ${fromToken.symbol} (${raw} raw)`,
+        );
       }
     }
 
@@ -493,9 +606,10 @@ export class TelegramAssistantHandler {
 
       // Build calldata preview using the manifest's step pipeline
       try {
-        const amountRaw = fromToken && intent.amountHuman
-          ? toRaw(intent.amountHuman, fromToken.decimals)
-          : undefined;
+        const amountRaw =
+          fromToken && intent.amountHuman
+            ? toRaw(intent.amountHuman, fromToken.decimals)
+            : undefined;
         const enrichedIntent: IntentPackage = {
           ...intent,
           params: {
@@ -511,7 +625,10 @@ export class TelegramAssistantHandler {
         lines.push(`Value: ${calldata.value}`);
         lines.push(`\`\`\`\n${calldata.data}\n\`\`\``);
       } catch (err) {
-        lines.push("", `_Calldata preview unavailable: ${(err as Error).message}_`);
+        lines.push(
+          "",
+          `_Calldata preview unavailable: ${(err as Error).message}_`,
+        );
       }
     } else {
       lines.push("", "_No tool manifest found in registry for this action._");
