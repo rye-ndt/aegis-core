@@ -5,7 +5,7 @@ export type { TemplateContext };
 
 type StepOutput = Record<string, string>;
 
-// Minimal JSONPath resolver — supports $.field and $.nested.field only
+// JSONPath resolver — supports $.field, $.nested.field, and $.arr[0].field
 function jsonPathGet(data: unknown, path: string): string {
   if (!path.startsWith("$.")) throw new Error(`Unsupported JSONPath: "${path}"`);
   const parts = path.slice(2).split(".");
@@ -14,7 +14,14 @@ function jsonPathGet(data: unknown, path: string): string {
     if (current == null || typeof current !== "object") {
       throw new Error(`JSONPath "${path}" not found in response`);
     }
-    current = (current as Record<string, unknown>)[part];
+    const arrayMatch = part.match(/^(.+?)\[(\d+)\]$/);
+    if (arrayMatch) {
+      current = (current as Record<string, unknown>)[arrayMatch[1]];
+      if (!Array.isArray(current)) throw new Error(`JSONPath "${path}": "${arrayMatch[1]}" is not an array`);
+      current = current[parseInt(arrayMatch[2], 10)];
+    } else {
+      current = (current as Record<string, unknown>)[part];
+    }
   }
   if (current == null) throw new Error(`JSONPath "${path}" resolved to null`);
   return String(current);
