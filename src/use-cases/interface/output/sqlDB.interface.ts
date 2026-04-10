@@ -12,12 +12,6 @@ export interface IPostgresDB {
   close(): Promise<void>;
 }
 
-export interface ITransaction {
-  run<T>(fn: (tx: ISqlDB) => Promise<T>): Promise<T>;
-  commit(): Promise<void>;
-  rollback(): Promise<void>;
-}
-
 export interface ISqlDB extends IPostgresDB {
   users?: IUserDB;
   conversations?: IConversationDB;
@@ -28,5 +22,4 @@ export interface ISqlDB extends IPostgresDB {
   intentExecutions?: IIntentExecutionDB;
   toolManifests?: IToolManifestDB;
   feeRecords?: IFeeRecordDB;
-  beginTransaction(): Promise<ITransaction>;
 }

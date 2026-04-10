@@ -69,7 +69,6 @@ export class TelegramAssistantHandler {
     private readonly intentParser?: IIntentParser,
     private readonly toolManifestDB?: IToolManifestDB,
     private readonly toolIndexService?: IToolIndexService,
-    private readonly apiBaseUrl?: string,
   ) {}
 
   register(bot: Bot): void {
