@@ -1,5 +1,3 @@
-DROP TABLE IF EXISTS "tool_manifests";
---> statement-breakpoint
 CREATE TABLE "tool_manifests" (
 	"id" uuid PRIMARY KEY NOT NULL,
 	"tool_id" text NOT NULL,
@@ -21,3 +19,11 @@ CREATE TABLE "tool_manifests" (
 	"updated_at_epoch" integer NOT NULL,
 	CONSTRAINT "tool_manifests_tool_id_unique" UNIQUE("tool_id")
 );
+--> statement-breakpoint
+ALTER TABLE "token_registry" DROP CONSTRAINT "token_registry_symbol_chain_id_key";--> statement-breakpoint
+ALTER TABLE "users" DROP COLUMN "personalities";--> statement-breakpoint
+ALTER TABLE "users" DROP COLUMN "secondary_personalities";--> statement-breakpoint
+ALTER TABLE "user_profiles" DROP COLUMN "display_name";--> statement-breakpoint
+ALTER TABLE "user_profiles" DROP COLUMN "personalities";--> statement-breakpoint
+ALTER TABLE "user_profiles" DROP COLUMN "wake_up_hour";--> statement-breakpoint
+ALTER TABLE "token_registry" ADD CONSTRAINT "token_registry_symbol_chain_id_unique" UNIQUE("symbol","chain_id");

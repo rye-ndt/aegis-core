@@ -10,6 +10,9 @@ import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
 import type { IIntentParser, IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
 import type { ITokenRecord } from "../../../../use-cases/interface/output/repository/tokenRegistry.repo";
+import type { IToolManifestDB } from "../../../../use-cases/interface/output/repository/toolManifest.repo";
+import { deserializeManifest, type ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
+import { ManifestDrivenSolver } from "../../output/solver/manifestSolver/manifestDriven.solver";
 import {
   MissingFieldsError,
   ConversationLimitError,
@@ -17,11 +20,12 @@ import {
   validateIntent,
 } from "../../output/intentParser/intent.validator";
 
-// BigInt string arithmetic — no float precision loss for 18-decimal tokens
+// BigInt string arithmetic — no float precision loss at any decimal count
 function toRaw(amountHuman: string, decimals: number): string {
   const [intPart, fracPart = ""] = amountHuman.split(".");
   const padded = fracPart.padEnd(decimals, "0").slice(0, decimals);
-  const raw = BigInt(intPart) * BigInt(10 ** decimals) + BigInt(padded || "0");
+  const scale = 10n ** BigInt(decimals);
+  const raw = BigInt(intPart) * scale + BigInt(padded || "0");
   return raw.toString();
 }
 
@@ -32,6 +36,7 @@ interface DisambiguationPending {
   awaitingSlot: "from" | "to";
   fromCandidates: ITokenRecord[];
   toCandidates: ITokenRecord[];
+  manifest?: ToolManifest;
 }
 
 export class TelegramAssistantHandler {
@@ -54,6 +59,7 @@ export class TelegramAssistantHandler {
     private readonly viemClient?: ViemClientAdapter,
     private readonly chainId?: number,
     private readonly intentParser?: IIntentParser,
+    private readonly toolManifestDB?: IToolManifestDB,
   ) {}
 
   register(bot: Bot): void {
@@ -285,10 +291,16 @@ export class TelegramAssistantHandler {
         this.intentHistory.set(chatId, history);
 
         let intent: IntentPackage | null;
+        let manifest: ToolManifest | undefined;
         try {
           intent = await this.intentParser.parse(history, session.userId);
           if (intent !== null) {
-            validateIntent(intent, history.length);
+            // Enrich: look up tool manifest by action (skip if not found)
+            if (this.toolManifestDB) {
+              const record = await this.toolManifestDB.findByToolId(intent.action);
+              if (record) manifest = deserializeManifest(record);
+            }
+            validateIntent(intent, history.length, manifest);
           }
         } catch (parseErr) {
           if (parseErr instanceof ConversationLimitError) {
@@ -307,11 +319,18 @@ export class TelegramAssistantHandler {
         this.intentHistory.delete(chatId);
 
         if (intent === null) {
-          await ctx.reply("No onchain intent detected.");
+          const conversationId = this.conversations.get(chatId);
+          const response = await this.assistantUseCase.chat({
+            userId: session.userId,
+            conversationId,
+            message: text,
+          });
+          this.conversations.set(chatId, response.conversationId);
+          await this.safeSend(ctx, response.reply);
           return;
         }
 
-        await this.startTokenResolution(ctx, chatId, intent);
+        await this.startTokenResolution(ctx, chatId, intent, manifest);
       } catch (err) {
         console.error("Error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
@@ -323,6 +342,7 @@ export class TelegramAssistantHandler {
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
     intent: IntentPackage,
+    manifest?: ToolManifest,
   ): Promise<void> {
     if (!this.tokenRegistryService || !this.chainId) {
       await ctx.reply("Token registry not configured.");
@@ -359,6 +379,7 @@ export class TelegramAssistantHandler {
         awaitingSlot: "from",
         fromCandidates,
         toCandidates,
+        manifest,
       });
       await ctx.reply(this.buildDisambiguationPrompt("from", intent.fromTokenSymbol!, fromCandidates));
       return;
@@ -372,12 +393,13 @@ export class TelegramAssistantHandler {
         awaitingSlot: "to",
         fromCandidates,
         toCandidates,
+        manifest,
       });
       await ctx.reply(this.buildDisambiguationPrompt("to", intent.toTokenSymbol!, toCandidates));
       return;
     }
 
-    await this.safeSend(ctx, this.buildEnrichedMessage(intent, resolvedFrom, resolvedTo));
+    await this.safeSend(ctx, await this.buildEnrichedMessage(intent, resolvedFrom, resolvedTo, manifest));
   }
 
   private async handleDisambiguationReply(
@@ -413,7 +435,7 @@ export class TelegramAssistantHandler {
     }
 
     this.tokenDisambiguation.delete(chatId);
-    await this.safeSend(ctx, this.buildEnrichedMessage(pending.intent, pending.resolvedFrom, pending.resolvedTo));
+    await this.safeSend(ctx, await this.buildEnrichedMessage(pending.intent, pending.resolvedFrom, pending.resolvedTo, pending.manifest));
   }
 
   private buildDisambiguationPrompt(
@@ -432,11 +454,12 @@ export class TelegramAssistantHandler {
     return lines.join("\n");
   }
 
-  private buildEnrichedMessage(
+  private async buildEnrichedMessage(
     intent: IntentPackage,
     fromToken: ITokenRecord | null,
     toToken: ITokenRecord | null,
-  ): string {
+    manifest?: ToolManifest,
+  ): Promise<string> {
     const lines = ["*Intent confirmed*", ""];
     lines.push(`Action: ${intent.action}`);
 
@@ -459,6 +482,39 @@ export class TelegramAssistantHandler {
 
     if (intent.slippageBps !== undefined) {
       lines.push(`Slippage: ${intent.slippageBps / 100}%`);
+    }
+
+    if (manifest) {
+      lines.push("", "*Tool matched*");
+      lines.push(`Name: ${manifest.name}`);
+      lines.push(`Protocol: ${manifest.protocolName}`);
+      lines.push(`Category: ${manifest.category}`);
+      lines.push(`Description: ${manifest.description}`);
+
+      // Build calldata preview using the manifest's step pipeline
+      try {
+        const amountRaw = fromToken && intent.amountHuman
+          ? toRaw(intent.amountHuman, fromToken.decimals)
+          : undefined;
+        const enrichedIntent: IntentPackage = {
+          ...intent,
+          params: {
+            ...(intent.params ?? {}),
+            ...(fromToken && { tokenAddress: fromToken.address }),
+            ...(amountRaw !== undefined && { amountRaw }),
+          },
+        };
+        const solver = new ManifestDrivenSolver(manifest);
+        const calldata = await solver.buildCalldata(enrichedIntent, "");
+        lines.push("", "*Calldata*");
+        lines.push(`To: \`${calldata.to}\``);
+        lines.push(`Value: ${calldata.value}`);
+        lines.push(`\`\`\`\n${calldata.data}\n\`\`\``);
+      } catch (err) {
+        lines.push("", `_Calldata preview unavailable: ${(err as Error).message}_`);
+      }
+    } else {
+      lines.push("", "_No tool manifest found in registry for this action._");
     }
 
     lines.push("", `\`\`\`json\n${JSON.stringify(intent, null, 2)}\n\`\`\``);

@@ -18,7 +18,7 @@ const IntentSchema = z.object({
   amountHuman: z.string().nullable(),
   slippageBps: z.number().nullable(),
   recipient: z.string().nullable(),
-  params: z.record(z.string(), z.unknown()).nullable(),
+  params: z.object({}).catchall(z.union([z.string(), z.number(), z.boolean(), z.null()])).nullable(),
   confidence: z.number().min(0).max(1),
   isOnChainAction: z.boolean(),
 });
