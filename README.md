@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-09 (dynamic tool registry — parts 1 & 2)
+> Last updated: 2026-04-10 (tool RAG indexing — in progress, uncommitted)
 
 ---
 
@@ -16,4 +16,4 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry, parts 1–2 of 3) 🔄**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry) ✅ — Phase 7 (tool RAG indexing) 🚧**
