@@ -22,11 +22,14 @@ import { ClaimRewardsSolver } from "../implementations/output/solver/static/clai
 import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
 import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator";
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
+import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
+import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
 import { TxResultParser } from "../implementations/output/resultParser/tx.resultParser";
 import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
 import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
+import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -39,6 +42,7 @@ export class AssistantInject {
   private _userOpBuilder: UserOperationBuilder | null = null;
   private _solverRegistry: SolverRegistry | null = null;
   private _intentParser: OpenAIIntentParser | null = null;
+  private _toolRegistrationUseCase: IToolRegistrationUseCase | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
   private _simulator: RpcSimulator | null = null;
@@ -93,13 +97,13 @@ export class AssistantInject {
   getSolverRegistry(): SolverRegistry {
     if (!this._solverRegistry) {
       const chainId = this.getChainId();
-      this._solverRegistry = new SolverRegistry();
+      this._solverRegistry = new SolverRegistry([], this.getSqlDB().toolManifests);
       this._solverRegistry.register(
-        "claim_rewards",
+        INTENT_ACTION.CLAIM_REWARDS,
         new ClaimRewardsSolver(process.env.REWARD_CONTROLLER_ADDRESS ?? ""),
       );
       this._solverRegistry.register(
-        "swap",
+        INTENT_ACTION.SWAP,
         new TraderJoeSolver(
           process.env.TRADERJOE_API_URL ?? "https://api.traderjoexyz.com",
           chainId,
@@ -107,6 +111,15 @@ export class AssistantInject {
       );
     }
     return this._solverRegistry;
+  }
+
+  getToolRegistrationUseCase(): IToolRegistrationUseCase {
+    if (!this._toolRegistrationUseCase) {
+      this._toolRegistrationUseCase = new ToolRegistrationUseCase(
+        this.getSqlDB().toolManifests,
+      );
+    }
+    return this._toolRegistrationUseCase;
   }
 
   getSimulator(): RpcSimulator {
@@ -163,6 +176,7 @@ export class AssistantInject {
         this.getResultParser(),
         chainId,
         process.env.TREASURY_ADDRESS ?? "",
+        db.toolManifests,
       );
     }
     return this._intentUseCase;
@@ -264,6 +278,7 @@ export class AssistantInject {
       this.getTokenRegistryService(),
       this.getViemClient(),
       chainId,
+      this.getToolRegistrationUseCase(),
     );
   }
 }

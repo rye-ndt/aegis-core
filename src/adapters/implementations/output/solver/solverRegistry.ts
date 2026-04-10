@@ -35,9 +35,4 @@ export class SolverRegistry implements ISolverRegistry {
   register(action: string, solver: ISolver): void {
     this.hardcoded.set(action, solver);
   }
-
-  // Deprecated sync alias — used by IntentUseCaseImpl until Part 3 wiring
-  getSolver(action: string): ISolver | undefined {
-    return this.hardcoded.get(action);
-  }
 }

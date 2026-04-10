@@ -26,6 +26,8 @@ import {
   InvalidFieldError,
   validateIntent,
 } from "../../adapters/implementations/output/intentParser/intent.validator";
+import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
+import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
 
 const CONFIDENCE_THRESHOLD = 0.7;
 const PLATFORM_FEE_BPS = 80;
@@ -47,6 +49,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly resultParser: IResultParser,
     private readonly chainId: number,
     private readonly treasuryAddress: string,
+    private readonly toolManifestDB: IToolManifestDB,
   ) {}
 
   async parseAndExecute(params: {
@@ -69,11 +72,18 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       .map((m) => m.content);
     const messages = [...priorUserContent, params.rawInput];
 
-    // 2. Parse then validate intent
+    // 2. Discover relevant dynamic tools and parse intent
+    const relevantManifests = await this.discoverRelevantTools(params.rawInput);
+
     let intent: IntentPackage | null;
     try {
-      intent = await this.intentParser.parse(messages, params.userId);
-      if (intent !== null) validateIntent(intent, messages.length);
+      intent = await this.intentParser.parse(messages, params.userId, relevantManifests);
+
+      let manifest: ToolManifest | undefined;
+      if (intent !== null && !Object.values(INTENT_ACTION).includes(intent.action as INTENT_ACTION)) {
+        manifest = relevantManifests.find((m) => m.toolId === intent!.action);
+      }
+      if (intent !== null) validateIntent(intent, messages.length, manifest);
     } catch (err) {
       if (err instanceof ConversationLimitError) {
         // Reset conversation messages so the user starts fresh
@@ -424,6 +434,47 @@ export class IntentUseCaseImpl implements IIntentUseCase {
         };
       }
     });
+  }
+
+  private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {
+    const candidates = await this.toolManifestDB.search(rawInput, {
+      limit: 15,
+      chainId: this.chainId,
+    });
+    return this.resolveConflicts(candidates, rawInput);
+  }
+
+  private resolveConflicts(
+    candidates: IToolManifestRecord[],
+    rawInput: string,
+  ): ToolManifest[] {
+    const byCategory = new Map<string, IToolManifestRecord[]>();
+    for (const record of candidates) {
+      const bucket = byCategory.get(record.category) ?? [];
+      bucket.push(record);
+      byCategory.set(record.category, bucket);
+    }
+
+    const resolved: IToolManifestRecord[] = [];
+    const lowerInput = rawInput.toLowerCase();
+
+    for (const [, bucket] of byCategory) {
+      if (bucket.length === 1) {
+        resolved.push(bucket[0]!);
+        continue;
+      }
+      const protocolMatch = bucket.find(
+        (t) => lowerInput.includes(t.protocolName.toLowerCase()),
+      );
+      if (protocolMatch) {
+        resolved.push(protocolMatch);
+        continue;
+      }
+      const winner = bucket.find((t) => t.isDefault) ?? bucket[0];
+      if (winner) resolved.push(winner);
+    }
+
+    return resolved.slice(0, 8).map(deserializeManifest);
   }
 
   private buildPreFlightSummary(

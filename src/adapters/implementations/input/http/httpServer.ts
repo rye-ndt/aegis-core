@@ -5,6 +5,8 @@ import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.in
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
+import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/input/toolRegistration.interface";
+import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import jwt from "jsonwebtoken";
 
@@ -42,6 +44,7 @@ export class HttpApiServer {
     private readonly tokenRegistryService?: ITokenRegistryService,
     private readonly viemClient?: ViemClientAdapter,
     private readonly chainId?: number,
+    private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -70,6 +73,12 @@ export class HttpApiServer {
     }
     if (method === "GET" && url.pathname === "/tokens") {
       return this.handleGetTokens(req, res, url);
+    }
+    if (method === "POST" && url.pathname === "/tools") {
+      return this.handlePostTools(req, res);
+    }
+    if (method === "GET" && url.pathname === "/tools") {
+      return this.handleGetTools(req, res, url);
     }
 
     res.writeHead(404);
@@ -182,6 +191,45 @@ export class HttpApiServer {
     const chainId = chainIdStr ? parseInt(chainIdStr, 10) : (this.chainId ?? 43113);
     const tokens = await this.tokenRegistryService.listByChain(chainId);
     return this.sendJson(res, 200, { tokens });
+  }
+
+  private async handlePostTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (!this.toolRegistrationUseCase) {
+      return this.sendJson(res, 503, { error: "Tool registration service not available" });
+    }
+
+    let body: unknown;
+    try {
+      body = await this.readJson(req);
+    } catch {
+      return this.sendJson(res, 400, { error: "Invalid JSON" });
+    }
+
+    const parsed = ToolManifestSchema.safeParse(body);
+    if (!parsed.success) {
+      return this.sendJson(res, 400, { error: "Invalid manifest", details: parsed.error.issues });
+    }
+
+    try {
+      const result = await this.toolRegistrationUseCase.register(parsed.data);
+      return this.sendJson(res, 201, result);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("TOOL_ID_TAKEN")) {
+        return this.sendJson(res, 409, { error: "Tool ID already registered" });
+      }
+      throw err;
+    }
+  }
+
+  private async handleGetTools(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    if (!this.toolRegistrationUseCase) {
+      return this.sendJson(res, 503, { error: "Tool registration service not available" });
+    }
+
+    const chainIdStr = url.searchParams.get("chainId");
+    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : undefined;
+    const tools = await this.toolRegistrationUseCase.list(chainId);
+    return this.sendJson(res, 200, { tools });
   }
 
   private extractUserId(req: http.IncomingMessage): string | null {

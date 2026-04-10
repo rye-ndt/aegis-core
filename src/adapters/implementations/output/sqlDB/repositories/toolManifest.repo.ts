@@ -1,4 +1,4 @@
-import { and, desc, eq, ilike, or } from "drizzle-orm";
+import { and, desc, eq, ilike, or, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   IToolManifestRecord,
@@ -53,10 +53,10 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
   }
 
   async listActive(chainId?: number): Promise<IToolManifestRecord[]> {
-    const condition = chainId != null
-      ? and(eq(toolManifests.isActive, true), ilike(toolManifests.chainIds, `%${chainId}%`))
-      : eq(toolManifests.isActive, true);
-    const rows = await this.db.select().from(toolManifests).where(condition);
+    const conditions: SQL[] = [eq(toolManifests.isActive, true)];
+    const chainCondition = this.chainIdCondition(chainId);
+    if (chainCondition) conditions.push(chainCondition);
+    const rows = await this.db.select().from(toolManifests).where(and(...conditions));
     return rows.map((r) => this.toRecord(r));
   }
 
@@ -84,9 +84,8 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
     if (options.category != null) {
       conditions.push(eq(toolManifests.category, options.category));
     }
-    if (options.chainId != null) {
-      conditions.push(ilike(toolManifests.chainIds, `%${options.chainId}%`));
-    }
+    const chainCondition = this.chainIdCondition(options.chainId);
+    if (chainCondition) conditions.push(chainCondition);
     const rows = await this.db
       .select()
       .from(toolManifests)
@@ -94,6 +93,10 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
       .orderBy(desc(toolManifests.priority), desc(toolManifests.isDefault))
       .limit(options.limit);
     return rows.map((r) => this.toRecord(r));
+  }
+
+  private chainIdCondition(chainId: number | undefined): SQL | undefined {
+    return chainId != null ? ilike(toolManifests.chainIds, `%${chainId}%`) : undefined;
   }
 
   private toRecord(row: typeof toolManifests.$inferSelect): IToolManifestRecord {

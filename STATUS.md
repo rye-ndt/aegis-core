@@ -1,6 +1,6 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-09 (dynamic tool registry — parts 1 & 2)
+> Last updated: 2026-04-10 (dynamic tool registry — parts 1, 2 & 3 complete)
 
 ---
 
@@ -16,7 +16,7 @@ The user never holds a private key. The bot's Master Session Key signs `UserOper
 
 A fully wired intent-based AI trading agent on Telegram backed by Hexagonal Architecture. Users authenticate via JWT (register/login via HTTP API, then `/auth <token>` in Telegram). The agent can answer questions, execute web searches, parse trading intents, simulate them via ERC-4337 UserOperations, and submit them on-chain via Session Keys.
 
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry, parts 1–2 of 3) 🔄**
+**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry) ✅**
 
 ---
 
@@ -308,7 +308,7 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] `validateIntent` wired into `message:text` handler — called after `parse`, inside the same try/catch; history preserved on `MissingFieldsError`/`InvalidFieldError` for multi-turn; only cleared on full validation pass
 - [x] `telegramCli.ts` — wired `tokenRegistryService` and `chainId` into `TelegramAssistantHandler` constructor (were `undefined`)
 
-### Phase 6 — Dynamic Tool Registry 🔄
+### Phase 6 — Dynamic Tool Registry ✅
 - [x] `TOOL_CATEGORY` enum (`erc20_transfer`, `swap`, `contract_interaction`)
 - [x] `ToolManifestSchema` — Zod discriminated-union step schemas + `deserializeManifest()`
 - [x] `IntentPackage.action` widened to `string`; `params?` added; `relevantManifests?` on `IIntentParser.parse()`
@@ -321,10 +321,9 @@ Removed: RLHF data logging, AGS reward logic, evaluation logs, user memory (vect
 - [x] `ManifestDrivenSolver` — implements `ISolver`; sequential step pipeline; `ctx.steps[name]` accumulation
 - [x] `SolverRegistry` — `getSolver` → `getSolverAsync`; hardcoded-first then DB fallback via `ManifestDrivenSolver`
 - [x] `intent.validator.ts` — `manifest?` param; dynamic `inputSchema.required` check when provided
-- [ ] **Part 3** — `AnthropicIntentParser` wiring (`relevantManifests`), `IntentUseCaseImpl` discovery pipeline, HTTP API (`POST /tools`, `GET /tools`), `assistant.di.ts` full wiring
+- [x] **Part 3** — `IntentUseCaseImpl` discovery pipeline (`discoverRelevantTools`, `resolveConflicts`), HTTP API (`POST /tools`, `GET /tools`), `assistant.di.ts` full wiring; `OpenAIIntentParser` accepts `relevantManifests?` param (ignored — discovery is use-case responsibility)
 
 ### Next steps
-- [ ] Implement Part 3 of dynamic-tool-registry-plan
 - [ ] Run `drizzle/seed/tokenRegistry.ts` — seed AVAX/WAVAX/USDC for Fuji
 - [ ] Fill `.env` with `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
 - [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash
