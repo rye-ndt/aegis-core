@@ -1,6 +1,6 @@
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
-import { AnthropicOrchestrator } from "../implementations/output/orchestrator/anthropic";
+import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
 import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
@@ -228,9 +228,9 @@ export class AssistantInject {
     if (!this.useCase) {
       const sqlDB = this.getSqlDB();
 
-      const orchestrator = new AnthropicOrchestrator(
-        process.env.ANTHROPIC_API_KEY ?? "",
-        process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
+      const orchestrator = new OpenAIOrchestrator(
+        process.env.OPENAI_API_KEY ?? "",
+        process.env.OPENAI_MODEL ?? "gpt-4o",
       );
 
       const webSearchService = new TavilyWebSearchService(

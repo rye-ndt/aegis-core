@@ -18,6 +18,7 @@ import {
   deserializeManifest,
   type ToolManifest,
 } from "../../../../use-cases/interface/output/toolManifest.types";
+import type { IToolIndexService } from "../../../../use-cases/interface/output/toolIndex.interface";
 import { ManifestDrivenSolver } from "../../output/solver/manifestSolver/manifestDriven.solver";
 import {
   MissingFieldsError,
@@ -66,6 +67,7 @@ export class TelegramAssistantHandler {
     private readonly chainId?: number,
     private readonly intentParser?: IIntentParser,
     private readonly toolManifestDB?: IToolManifestDB,
+    private readonly toolIndexService?: IToolIndexService,
   ) {}
 
   register(bot: Bot): void {
@@ -289,11 +291,23 @@ export class TelegramAssistantHandler {
       const chatId = ctx.chat.id;
       const text = ctx.message.text.trim();
 
+      console.log(
+        `[Handler] message received chatId=${chatId} userId=${session.userId} text="${text}"`,
+      );
+
       try {
         // Step 2: If the user is mid-disambiguation (choosing between token matches),
         //         route to that handler and stop — no intent parsing needed
         if (this.tokenDisambiguation.has(chatId)) {
-          await this.handleDisambiguationReply(ctx, chatId, text, session.userId);
+          console.log(
+            `[Handler] disambiguation active for chatId=${chatId}, routing to disambiguationReply`,
+          );
+          await this.handleDisambiguationReply(
+            ctx,
+            chatId,
+            text,
+            session.userId,
+          );
           return;
         }
 
@@ -301,18 +315,26 @@ export class TelegramAssistantHandler {
         //         structured intent. Throws MissingFieldsError / InvalidFieldError
         //         when the intent is incomplete, or ConversationLimitError when
         //         the conversation has gone on too long without resolving.
+        console.log(`[Handler] parsing intent from history...`);
         const { intent, manifest } = await this.parseIntentWithHistory(
           chatId,
           text,
           session.userId,
         );
+        console.log(
+          `[Handler] intent parsed: ${intent === null ? "null (no on-chain action)" : `action=${intent.action} confidence=${intent.confidence}`}${manifest ? ` manifest=${manifest.toolId}` : ""}`,
+        );
 
         // Step 4: Route on whether the parser extracted a structured intent
         if (intent === null) {
           // No on-chain action detected — fall back to conversational assistant
+          console.log(`[Handler] routing to fallback chat`);
           await this.handleFallbackChat(ctx, chatId, text, session.userId);
         } else {
           // Structured intent found — resolve token addresses and show confirmation
+          console.log(
+            `[Handler] routing to token resolution fromToken="${intent.fromTokenSymbol}" toToken="${intent.toTokenSymbol}"`,
+          );
           await this.startTokenResolution(ctx, chatId, intent, manifest);
         }
       } catch (err) {
@@ -320,7 +342,10 @@ export class TelegramAssistantHandler {
           await ctx.reply(err.message);
           return;
         }
-        if (err instanceof MissingFieldsError || err instanceof InvalidFieldError) {
+        if (
+          err instanceof MissingFieldsError ||
+          err instanceof InvalidFieldError
+        ) {
           await ctx.reply(err.prompt);
           return;
         }
@@ -342,7 +367,10 @@ export class TelegramAssistantHandler {
     chatId: number,
     text: string,
     userId: string,
-  ): Promise<{ intent: IntentPackage | null; manifest: ToolManifest | undefined }> {
+  ): Promise<{
+    intent: IntentPackage | null;
+    manifest: ToolManifest | undefined;
+  }> {
     const history = this.intentHistory.get(chatId) ?? [];
     history.push(text);
     this.intentHistory.set(chatId, history);
@@ -351,14 +379,28 @@ export class TelegramAssistantHandler {
     let manifest: ToolManifest | undefined;
 
     try {
-      intent = await this.intentParser!.parse(history, userId);
+      // Discover relevant tool manifests BEFORE calling the intent parser so the
+      // LLM prompt includes dynamic toolIds (e.g. "relay_swap") and can set
+      // action = toolId instead of falling back to a built-in action name.
+      // Always use history[0] (the original intent phrase) as the query — subsequent
+      // messages are clarifying answers (addresses, numbers) that produce bad vector hits.
+      const relevantManifests = await this.discoverManifests(history[0]);
+      console.log(
+        `[Handler] discovered ${relevantManifests.length} manifests for prompt: [${relevantManifests.map((m) => m.toolId).join(", ")}]`,
+      );
+
+      intent = await this.intentParser!.parse(
+        history,
+        userId,
+        relevantManifests,
+      );
 
       if (intent !== null) {
-        // Enrich: look up the tool manifest for this action (optional — skip if absent)
-        if (this.toolManifestDB) {
-          const record = await this.toolManifestDB.findByToolId(intent.action);
-          if (record) manifest = deserializeManifest(record);
-        }
+        // Manifest for this action — exact match (toolId set by LLM from the prompt)
+        manifest = relevantManifests.find((m) => m.toolId === intent!.action);
+        console.log(
+          `[Handler] manifest for action="${intent.action}" → ${manifest ? manifest.toolId : "not found in discovered set"}`,
+        );
         // Validate completeness; throws if required fields are still missing
         validateIntent(intent, history.length, manifest);
       }
@@ -388,12 +430,18 @@ export class TelegramAssistantHandler {
     userId: string,
   ): Promise<void> {
     const conversationId = this.conversations.get(chatId);
+    console.log(
+      `[Handler] fallback chat userId=${userId} conversationId=${conversationId ?? "new"}`,
+    );
     const response = await this.assistantUseCase.chat({
       userId,
       conversationId,
       message: text,
     });
     this.conversations.set(chatId, response.conversationId);
+    console.log(
+      `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}] replyLength=${response.reply.length}`,
+    );
     await this.safeSend(ctx, response.reply);
   }
 
@@ -412,9 +460,15 @@ export class TelegramAssistantHandler {
     let toCandidates: ITokenRecord[] = [];
 
     if (intent.fromTokenSymbol) {
+      console.log(
+        `[Handler] searching token registry for fromToken="${intent.fromTokenSymbol}" chainId=${this.chainId}`,
+      );
       fromCandidates = await this.tokenRegistryService.searchBySymbol(
         intent.fromTokenSymbol,
         this.chainId,
+      );
+      console.log(
+        `[Handler] fromToken candidates: ${fromCandidates.length} — ${fromCandidates.map((t) => t.symbol).join(", ") || "none"}`,
       );
       if (fromCandidates.length === 0) {
         await ctx.reply(
@@ -425,9 +479,15 @@ export class TelegramAssistantHandler {
     }
 
     if (intent.toTokenSymbol) {
+      console.log(
+        `[Handler] searching token registry for toToken="${intent.toTokenSymbol}" chainId=${this.chainId}`,
+      );
       toCandidates = await this.tokenRegistryService.searchBySymbol(
         intent.toTokenSymbol,
         this.chainId,
+      );
+      console.log(
+        `[Handler] toToken candidates: ${toCandidates.length} — ${toCandidates.map((t) => t.symbol).join(", ") || "none"}`,
       );
       if (toCandidates.length === 0) {
         await ctx.reply(
@@ -439,8 +499,12 @@ export class TelegramAssistantHandler {
 
     const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0] : null;
     const resolvedTo = toCandidates.length === 1 ? toCandidates[0] : null;
+    console.log(
+      `[Handler] token resolution — from=${resolvedFrom?.symbol ?? "ambiguous/null"} to=${resolvedTo?.symbol ?? "ambiguous/null"}`,
+    );
 
     if (fromCandidates.length > 1) {
+      console.log(`[Handler] fromToken ambiguous, starting disambiguation`);
       this.tokenDisambiguation.set(chatId, {
         intent,
         resolvedFrom: null,
@@ -461,6 +525,7 @@ export class TelegramAssistantHandler {
     }
 
     if (toCandidates.length > 1) {
+      console.log(`[Handler] toToken ambiguous, starting disambiguation`);
       this.tokenDisambiguation.set(chatId, {
         intent,
         resolvedFrom,
@@ -502,15 +567,31 @@ export class TelegramAssistantHandler {
       pending.awaitingSlot === "from"
         ? pending.fromCandidates
         : pending.toCandidates;
-    const index = parseInt(text, 10);
 
-    if (isNaN(index) || index < 1 || index > candidates.length) {
+    console.log(
+      `[Handler] disambiguation reply chatId=${chatId} slot=${pending.awaitingSlot} input="${text}" candidates=[${candidates.map((c) => c.symbol).join(", ")}]`,
+    );
+
+    let selected: ITokenRecord | undefined;
+    const index = parseInt(text, 10);
+    if (!isNaN(index) && index >= 1 && index <= candidates.length) {
+      selected = candidates[index - 1];
+    } else {
+      const normalized = text.trim().toUpperCase();
+      selected = candidates.find((c) => c.symbol.toUpperCase() === normalized);
+    }
+
+    if (!selected) {
+      console.log(
+        `[Handler] disambiguation failed — no match for "${text}", cancelling`,
+      );
       this.tokenDisambiguation.delete(chatId);
       await ctx.reply("Disambiguation cancelled. Please repeat your request.");
       return;
     }
-
-    const selected = candidates[index - 1];
+    console.log(
+      `[Handler] disambiguation resolved slot=${pending.awaitingSlot} → ${selected.symbol} (${selected.address})`,
+    );
 
     if (pending.awaitingSlot === "from") {
       pending.resolvedFrom = selected;
@@ -542,6 +623,59 @@ export class TelegramAssistantHandler {
         pending.manifest,
       ),
     );
+  }
+
+  /**
+   * Discovers relevant tool manifests for the given query text.
+   * Uses vector search (Pinecone) when available, falls back to ILIKE.
+   * Mirrors IntentUseCaseImpl.discoverRelevantTools.
+   */
+  private async discoverManifests(query: string): Promise<ToolManifest[]> {
+    if (!this.toolManifestDB) return [];
+
+    if (this.toolIndexService) {
+      try {
+        console.log(
+          `[Handler] vector search for manifests query="${query.slice(0, 80)}"`,
+        );
+        const hits = await this.toolIndexService.search(query, {
+          topK: 10,
+          chainId: this.chainId,
+          minScore: 0.3,
+        });
+        console.log(
+          `[Handler] vector hits: [${hits.map((h) => `${h.toolId}(${h.score.toFixed(2)})`).join(", ")}]`,
+        );
+        if (hits.length > 0) {
+          const toolIds = hits.map((h) => h.toolId);
+          const records = await this.toolManifestDB.findByToolIds(toolIds);
+          console.log(
+            `[Handler] loaded ${records.length} manifests from DB via vector hits`,
+          );
+          return records.map(deserializeManifest);
+        }
+        console.log(`[Handler] vector search: 0 hits above threshold`);
+        return [];
+      } catch (err) {
+        console.error(
+          `[Handler] vector search failed, falling back to ILIKE:`,
+          err,
+        );
+      }
+    }
+
+    // ILIKE fallback
+    console.log(
+      `[Handler] ILIKE manifest search query="${query.slice(0, 80)}"`,
+    );
+    const candidates = await this.toolManifestDB.search(query, {
+      limit: 8,
+      chainId: this.chainId,
+    });
+    console.log(
+      `[Handler] ILIKE candidates: [${candidates.map((c) => c.toolId).join(", ")}]`,
+    );
+    return candidates.map(deserializeManifest);
   }
 
   private buildDisambiguationPrompt(

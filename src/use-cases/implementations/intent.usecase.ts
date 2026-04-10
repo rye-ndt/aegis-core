@@ -76,11 +76,14 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const messages = [...priorUserContent, params.rawInput];
 
     // 2. Discover relevant dynamic tools and parse intent
+    console.log(`[IntentUseCase] parseAndExecute userId=${params.userId} input="${params.rawInput.slice(0, 80)}"`);
     const relevantManifests = await this.discoverRelevantTools(params.rawInput);
 
     let intent: IntentPackage | null;
     try {
+      console.log(`[IntentUseCase] calling intentParser with ${messages.length} messages and ${relevantManifests.length} manifests`);
       intent = await this.intentParser.parse(messages, params.userId, relevantManifests);
+      console.log(`[IntentUseCase] intentParser result: ${intent === null ? "null" : `action=${intent.action} confidence=${intent.confidence}`}`);
 
       let manifest: ToolManifest | undefined;
       if (intent !== null && !Object.values(INTENT_ACTION).includes(intent.action as INTENT_ACTION)) {
@@ -125,6 +128,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     // 3. Confidence check
+    console.log(`[IntentUseCase] confidence check: ${intent.confidence} (threshold ${CONFIDENCE_THRESHOLD}) action=${intent.action}`);
     if (
       intent.confidence < CONFIDENCE_THRESHOLD ||
       intent.action === INTENT_ACTION.UNKNOWN
@@ -150,7 +154,9 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     // 4. Get solver
+    console.log(`[IntentUseCase] looking up solver for action="${intent.action}"`);
     const solver = await this.solverRegistry.getSolverAsync(intent.action);
+    console.log(`[IntentUseCase] solver: ${solver ? solver.name : "none found"}`);
     if (!solver) {
       await this.intentDB.create({
         id: intentId,
@@ -177,9 +183,11 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const smartAccountAddress = profile?.smartAccountAddress ?? params.userId;
 
     // 6. Build calldata
+    console.log(`[IntentUseCase] building calldata sca=${smartAccountAddress}`);
     let calldata: { to: string; data: string; value: string };
     try {
       calldata = await solver.buildCalldata(intent, smartAccountAddress);
+      console.log(`[IntentUseCase] calldata built to=${calldata.to} value=${calldata.value} dataLen=${calldata.data.length}`);
     } catch (err) {
       const reason = toErrorMessage(err);
       await this.intentDB.create({
@@ -210,11 +218,13 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     });
 
     // 8. Simulate
+    console.log(`[IntentUseCase] simulating UserOperation...`);
     const simulationReport = await this.simulator.simulate({
       userOp,
       intent,
       chainId: this.chainId,
     });
+    console.log(`[IntentUseCase] simulation result: passed=${simulationReport.passed} gasEstimate=${simulationReport.gasEstimate} warnings=[${simulationReport.warnings.join(", ")}]`);
 
     if (!simulationReport.passed) {
       await this.intentDB.create({
@@ -442,30 +452,38 @@ export class IntentUseCaseImpl implements IIntentUseCase {
   private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {
     if (this.toolIndexService) {
       try {
+        console.log(`[IntentUseCase] vector search query="${rawInput.slice(0, 80)}" chainId=${this.chainId}`);
         const hits = await this.toolIndexService.search(rawInput, {
           topK: 20,
           chainId: this.chainId,
           minScore: 0.3,
         });
+        console.log(`[IntentUseCase] vector search returned ${hits.length} hits: [${hits.map((h) => `${h.toolId}(${h.score.toFixed(2)})`).join(", ")}]`);
 
         if (hits.length > 0) {
           const toolIds = hits.map((h) => h.toolId);
           const records = await this.toolManifestDB.findByToolIds(toolIds);
+          console.log(`[IntentUseCase] loaded ${records.length} manifests from DB for vector hits`);
 
           // Preserve vector score order before resolveConflicts reorders by category.
           const scoreMap = new Map(hits.map((h) => [h.toolId, h.score]));
           records.sort((a, b) => (scoreMap.get(b.toolId) ?? 0) - (scoreMap.get(a.toolId) ?? 0));
 
-          return this.resolveConflicts(records, rawInput);
+          const resolved = this.resolveConflicts(records, rawInput);
+          console.log(`[IntentUseCase] resolved tools (vector): [${resolved.map((t) => t.toolId).join(", ")}]`);
+          return resolved;
         }
 
         // 0 results above threshold means no relevant tool — return empty.
         // Do not fall back to ILIKE: surfacing unrelated tools is worse than none.
+        console.log(`[IntentUseCase] vector search: 0 results above threshold, returning empty`);
         return [];
       } catch (err) {
         // Vector search failed (network, Pinecone down). Fall through to ILIKE.
-        console.error("[IntentUseCaseImpl] Vector search failed, falling back to ILIKE:", err);
+        console.error("[IntentUseCase] vector search failed, falling back to ILIKE:", err);
       }
+    } else {
+      console.log(`[IntentUseCase] no toolIndexService configured, using ILIKE fallback`);
     }
 
     // ILIKE fallback — used when toolIndexService is absent or threw.
@@ -473,7 +491,10 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       limit: 15,
       chainId: this.chainId,
     });
-    return this.resolveConflicts(candidates, rawInput);
+    console.log(`[IntentUseCase] ILIKE fallback returned ${candidates.length} candidates: [${candidates.map((c) => c.toolId).join(", ")}]`);
+    const resolved = this.resolveConflicts(candidates, rawInput);
+    console.log(`[IntentUseCase] resolved tools (ILIKE): [${resolved.map((t) => t.toolId).join(", ")}]`);
+    return resolved;
   }
 
   private resolveConflicts(
