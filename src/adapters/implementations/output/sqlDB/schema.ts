@@ -3,8 +3,9 @@ import { boolean, integer, pgTable, text, uuid, unique } from "drizzle-orm/pg-co
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
   userName: text("user_name").notNull(),
-  hashedPassword: text("hashed_password").notNull(),
+  hashedPassword: text("hashed_password"),
   email: text("email").notNull().unique(),
+  privyDid: text("privy_did").unique(),
   status: text("status").notNull(),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),

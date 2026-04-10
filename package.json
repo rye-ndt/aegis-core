@@ -43,6 +43,7 @@
     "@googleapis/calendar": "9.7.0",
     "@googleapis/gmail": "8.0.0",
     "@pinecone-database/pinecone": "7.0.0",
+    "@privy-io/server-auth": "^1.32.5",
     "@tavily/core": "^0.7.2",
     "bcryptjs": "^3.0.3",
     "dotenv": "17.3.1",

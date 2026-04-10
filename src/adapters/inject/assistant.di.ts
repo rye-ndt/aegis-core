@@ -34,6 +34,7 @@ import { OpenAIEmbeddingService } from "../implementations/output/embedding/open
 import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
 import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
+import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -54,6 +55,7 @@ export class AssistantInject {
   private _embeddingService: OpenAIEmbeddingService | null = null;
   private _toolVectorStore: PineconeVectorStore | null = null;
   private _toolIndexService: IToolIndexService | null = null;
+  private _privyAuthService: PrivyServerAuthAdapter | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -141,6 +143,16 @@ export class AssistantInject {
       );
     }
     return this._toolVectorStore;
+  }
+
+  getPrivyAuthService(): PrivyServerAuthAdapter | undefined {
+    const appId = process.env.PRIVY_APP_ID;
+    const appSecret = process.env.PRIVY_APP_SECRET;
+    if (!appId || !appSecret) return undefined;
+    if (!this._privyAuthService) {
+      this._privyAuthService = new PrivyServerAuthAdapter(appId, appSecret);
+    }
+    return this._privyAuthService;
   }
 
   getToolIndexService(): IToolIndexService | undefined {
@@ -301,6 +313,7 @@ export class AssistantInject {
         sessionKeyService,
         // Default allowed token addresses for Fuji
         ["0x5425890298aed601595a70AB815c96711a31Bc65", "0xd00ae08403B9bbb9124bB305C09058E32C39A48c"],
+        this.getPrivyAuthService(),
       );
     }
     return this._authUseCase;
