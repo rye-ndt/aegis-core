@@ -6,6 +6,7 @@ import type { IIntentUseCase } from "../../../../use-cases/interface/input/inten
 import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
 import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/input/toolRegistration.interface";
 import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/input/sessionDelegation.interface";
+import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -37,6 +38,7 @@ export class HttpApiServer {
     private readonly portfolioUseCase?: IPortfolioUseCase,
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
     private readonly sessionDelegationUseCase?: ISessionDelegationUseCase,
+    private readonly pendingDelegationRepo?: IPendingDelegationDB,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -87,6 +89,13 @@ export class HttpApiServer {
     }
     if (method === 'GET' && url.pathname === '/permissions') {
       return this.handleGetPermissions(req, res, url);
+    }
+    if (method === 'GET' && url.pathname === '/delegation/pending') {
+      return this.handleGetPendingDelegation(req, res);
+    }
+    if (method === 'POST' && /^\/delegation\/[^/]+\/signed$/.test(url.pathname)) {
+      const id = url.pathname.split('/')[2] ?? '';
+      return this.handlePostDelegationSigned(req, res, id);
     }
 
     res.writeHead(404);
@@ -265,6 +274,47 @@ export class HttpApiServer {
     }
 
     return this.sendJson(res, 200, record);
+  }
+
+  private async handleGetPendingDelegation(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+    if (!this.pendingDelegationRepo) {
+      return this.sendJson(res, 503, { error: 'Delegation service not available' });
+    }
+
+    const record = await this.pendingDelegationRepo.findLatestByUserId(userId);
+    if (!record || record.status !== 'pending') {
+      return this.sendJson(res, 404, { error: 'No pending delegation' });
+    }
+
+    return this.sendJson(res, 200, {
+      id: record.id,
+      zerodevMessage: record.zerodevMessage,
+    });
+  }
+
+  private async handlePostDelegationSigned(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    id: string,
+  ): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+    if (!this.pendingDelegationRepo) {
+      return this.sendJson(res, 503, { error: 'Delegation service not available' });
+    }
+    if (!id) return this.sendJson(res, 400, { error: 'Delegation ID required' });
+
+    try {
+      await this.pendingDelegationRepo.markSigned(id);
+      return this.sendJson(res, 200, { id, signed: true });
+    } catch (err) {
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
   }
 
   private extractUserId(req: http.IncomingMessage): string | null {

@@ -1,0 +1,4 @@
+export enum ZERODEV_MESSAGE_TYPE {
+  ERC20_SPEND = 'ERC20_SPEND',
+  // future: NATIVE_SPEND, CALL_CONTRACT, ...
+}
