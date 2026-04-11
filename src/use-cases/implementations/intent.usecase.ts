@@ -4,6 +4,8 @@ import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
 import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
 import { EXECUTION_STATUSES } from "../../helpers/enums/executionStatus.enum";
+import { USER_INTENT_TYPE } from "../../helpers/enums/userIntentType.enum";
+import { toRaw } from "../../helpers/bigint";
 import type {
   IIntentUseCase,
   IntentExecutionResult,
@@ -28,6 +30,8 @@ import { validateIntent } from "../../adapters/implementations/output/intentPars
 import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
 import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
+import type { IIntentClassifier } from "../interface/output/intentClassifier.interface";
+import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
 
 const CONFIDENCE_THRESHOLD = 0.7;
 const PLATFORM_FEE_BPS = 80;
@@ -50,7 +54,9 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly chainId: number,
     private readonly treasuryAddress: string,
     private readonly toolManifestDB: IToolManifestDB,
-    private readonly toolIndexService?: IToolIndexService,
+    private readonly toolIndexService: IToolIndexService | undefined,
+    private readonly intentClassifier: IIntentClassifier,
+    private readonly schemaCompiler: ISchemaCompiler,
   ) {}
 
   async parseAndExecute(params: {
@@ -466,6 +472,74 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     manifest: ToolManifest,
   ): Promise<{ to: string; data: string; value: string } | null> {
     return this.solverRegistry.buildFromManifest(manifest, intent, '');
+  }
+
+  async classifyIntent(messages: string[]): Promise<USER_INTENT_TYPE> {
+    return this.intentClassifier.classify(messages);
+  }
+
+  async selectTool(
+    intentType: USER_INTENT_TYPE,
+    messages: string[],
+  ): Promise<{ toolId: string; manifest: ToolManifest } | null> {
+    const query = `${intentType} ${messages.join(" ")}`;
+    const manifests = await this.discoverRelevantTools(query);
+    if (manifests.length === 0) return null;
+    // Trust RAG score order — top result is the best match
+    const top = manifests[0]!;
+    console.log(`[IntentUseCase] selectTool → ${top.toolId} (${manifests.length} candidates)`);
+    return { toolId: top.toolId, manifest: top };
+  }
+
+  async compileSchema(opts: {
+    manifest: ToolManifest;
+    messages: string[];
+    userId: string;
+    partialParams: Record<string, unknown>;
+  }): Promise<CompileResult> {
+    const profile = await this.userProfileDB.findByUserId(opts.userId);
+    const autoFilled: Record<string, unknown> = {
+      scaAddress: profile?.smartAccountAddress ?? "",
+    };
+    return this.schemaCompiler.compile({
+      manifest: opts.manifest,
+      messages: opts.messages,
+      autoFilled,
+      partialParams: opts.partialParams,
+    });
+  }
+
+  async buildRequestBody(opts: {
+    manifest: ToolManifest;
+    params: Record<string, unknown>;
+    resolvedFrom: ITokenRecord | null;
+    resolvedTo: ITokenRecord | null;
+    userId: string;
+    amountHuman?: string;
+  }): Promise<{ to: string; data: string; value: string }> {
+    const { manifest, resolvedFrom, resolvedTo, userId, amountHuman } = opts;
+    const params = { ...opts.params };
+
+    if (resolvedFrom) params.tokenAddress = resolvedFrom.address;
+    if (amountHuman && resolvedFrom) params.amountRaw = toRaw(amountHuman, resolvedFrom.decimals);
+    if (resolvedTo) params.toTokenAddress = resolvedTo.address;
+
+    const profile = await this.userProfileDB.findByUserId(userId);
+    const scaAddress = profile?.smartAccountAddress ?? "";
+
+    const intentPackage: IntentPackage = {
+      action: manifest.toolId,
+      params: params as Record<string, string | number | boolean | null>,
+      confidence: 1,
+      rawInput: "",
+    };
+
+    const solver = await this.solverRegistry.getSolverAsync(manifest.toolId);
+    if (!solver) throw new Error(`No solver for toolId: ${manifest.toolId}`);
+
+    const calldata = await solver.buildCalldata(intentPackage, scaAddress);
+    if (!calldata.to) throw new Error("Incomplete calldata");
+    return calldata;
   }
 
   private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {

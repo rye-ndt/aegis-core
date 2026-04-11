@@ -1,38 +1,36 @@
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { toRaw } from "../../../../helpers/bigint";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
 import {
-  MissingFieldsError,
-  ConversationLimitError,
-  InvalidFieldError,
-  type ParseFromHistoryResult,
   type ITokenRecord,
   type ToolManifest,
 } from "../../../../use-cases/interface/input/intent.interface";
-import type { IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
+import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
 
-// BigInt string arithmetic — no float precision loss at any decimal count
-function toRaw(amountHuman: string, decimals: number): string {
-  const [intPart, fracPart = ""] = amountHuman.split(".");
-  const padded = fracPart.padEnd(decimals, "0").slice(0, decimals);
-  const scale = 10n ** BigInt(decimals);
-  const raw = BigInt(intPart) * scale + BigInt(padded || "0");
-  return raw.toString();
-}
+type OrchestratorStage = "compile" | "token_disambig";
 
 interface DisambiguationPending {
-  intent: IntentPackage;
   resolvedFrom: ITokenRecord | null;
   resolvedTo: ITokenRecord | null;
   awaitingSlot: "from" | "to";
   fromCandidates: ITokenRecord[];
   toCandidates: ITokenRecord[];
-  manifest?: ToolManifest;
+}
+
+interface OrchestratorSession {
+  stage: OrchestratorStage;
+  conversationId: string;
+  messages: string[];
+  manifest: ToolManifest;
+  partialParams: Record<string, unknown>;
+  tokenSymbols: { from?: string; to?: string };
+  disambiguation?: DisambiguationPending;
 }
 
 export class TelegramAssistantHandler {
@@ -41,8 +39,7 @@ export class TelegramAssistantHandler {
     number,
     { userId: string; expiresAtEpoch: number }
   >();
-  private intentHistory = new Map<number, string[]>();
-  private tokenDisambiguation = new Map<number, DisambiguationPending>();
+  private orchestratorSessions = new Map<number, OrchestratorSession>();
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
@@ -51,6 +48,10 @@ export class TelegramAssistantHandler {
     private readonly botToken?: string,
     private readonly intentUseCase?: IIntentUseCase,
     private readonly portfolioUseCase?: IPortfolioUseCase,
+    private readonly chainId: number = parseInt(
+      process.env.CHAIN_ID ?? "43113",
+      10,
+    ),
   ) {}
 
   register(bot: Bot): void {
@@ -62,7 +63,10 @@ export class TelegramAssistantHandler {
     bot.command("start", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
-        const keyboard = new InlineKeyboard().text("Sign in with Google", "auth:login");
+        const keyboard = new InlineKeyboard().text(
+          "Sign in with Google",
+          "auth:login",
+        );
         await ctx.reply(
           "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
           { reply_markup: keyboard },
@@ -106,7 +110,9 @@ export class TelegramAssistantHandler {
           expiresAtEpoch,
         });
         this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
-        await ctx.reply("Authenticated with Google via Privy. You can now use the Onchain Agent.");
+        await ctx.reply(
+          "Authenticated with Google via Privy. You can now use the Onchain Agent.",
+        );
       } catch {
         await ctx.reply(
           "Invalid or expired token. Open the Aegis mini app and copy a fresh token.",
@@ -183,7 +189,7 @@ export class TelegramAssistantHandler {
         await ctx.reply("Intent execution not configured.");
         return;
       }
-      this.tokenDisambiguation.delete(ctx.chat.id);
+      this.orchestratorSessions.delete(ctx.chat.id);
       await ctx.reply("Intent cancelled. No transaction was submitted.");
     });
 
@@ -262,9 +268,13 @@ export class TelegramAssistantHandler {
           expiresAtEpoch,
         });
         this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
-        await ctx.reply("Authenticated with Google. You can now use the Onchain Agent.");
+        await ctx.reply(
+          "Authenticated with Google. You can now use the Onchain Agent.",
+        );
       } catch {
-        await ctx.reply("Authentication failed. Please try again from the mini app.");
+        await ctx.reply(
+          "Authentication failed. Please try again from the mini app.",
+        );
       }
     });
 
@@ -299,7 +309,6 @@ export class TelegramAssistantHandler {
     });
 
     bot.on("message:text", async (ctx) => {
-      // Step 1: Require a valid session before doing anything
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
         await ctx.reply("Please authenticate first. Use /auth <token>.");
@@ -315,107 +324,120 @@ export class TelegramAssistantHandler {
 
       const chatId = ctx.chat.id;
       const text = ctx.message.text.trim();
+      const userId = session.userId;
 
       console.log(
-        `[Handler] message received chatId=${chatId} userId=${session.userId} text="${text}"`,
+        `[Handler] message chatId=${chatId} userId=${userId} text="${text}"`,
       );
 
       try {
-        // Step 2: If the user is mid-disambiguation (choosing between token matches),
-        //         route to that handler and stop — no intent parsing needed
-        if (this.tokenDisambiguation.has(chatId)) {
+        const existing = this.orchestratorSessions.get(chatId);
+
+        // Route token_disambig replies
+        if (existing?.stage === "token_disambig") {
           console.log(
-            `[Handler] disambiguation active for chatId=${chatId}, routing to disambiguationReply`,
+            `[Handler] token_disambig active, routing to handleDisambiguationReply`,
           );
           await this.handleDisambiguationReply(
             ctx,
             chatId,
             text,
-            session.userId,
+            userId,
+            existing,
           );
           return;
         }
 
-        // Step 3: Accumulate the message into history and attempt to parse a
-        //         structured intent. Throws MissingFieldsError / InvalidFieldError
-        //         when the intent is incomplete, or ConversationLimitError when
-        //         the conversation has gone on too long without resolving.
-        console.log(`[Handler] parsing intent from history...`);
-        const { intent, manifest } = await this.parseIntentWithHistory(
-          chatId,
-          text,
-          session.userId,
-        );
-        console.log(
-          `[Handler] intent parsed: ${intent === null ? "null (no on-chain action)" : `action=${intent.action} confidence=${intent.confidence}`}${manifest ? ` manifest=${manifest.toolId}` : ""}`,
-        );
+        // First message of this intent — classify + select tool
+        if (!existing) {
+          console.log(`[Handler] no session, classifying intent...`);
+          const intentType = await this.intentUseCase.classifyIntent([text]);
+          console.log(`[Handler] intentType=${intentType}`);
 
-        // Step 4: Route on whether the parser extracted a structured intent
-        if (intent === null) {
-          // No on-chain action detected — fall back to conversational assistant
-          console.log(`[Handler] routing to fallback chat`);
-          await this.handleFallbackChat(ctx, chatId, text, session.userId);
-        } else {
-          // Structured intent found — resolve token addresses and show confirmation
+          if (
+            intentType === USER_INTENT_TYPE.RETRIEVE_BALANCE ||
+            intentType === USER_INTENT_TYPE.UNKNOWN
+          ) {
+            await this.handleFallbackChat(ctx, chatId, text, userId);
+            return;
+          }
+
+          const toolResult = await this.intentUseCase.selectTool(intentType, [
+            text,
+          ]);
+          if (!toolResult) {
+            console.log(`[Handler] no tool found, falling back to chat`);
+            await this.handleFallbackChat(ctx, chatId, text, userId);
+            return;
+          }
+
           console.log(
-            `[Handler] routing to token resolution fromToken="${intent.fromTokenSymbol}" toToken="${intent.toTokenSymbol}"`,
+            `[Handler] selected tool=${toolResult.toolId}, compiling schema...`,
           );
-          await this.startTokenResolution(ctx, chatId, intent, manifest);
+          const compileResult = await this.intentUseCase.compileSchema({
+            manifest: toolResult.manifest,
+            messages: [text],
+            userId,
+            partialParams: {},
+          });
+
+          const newSession: OrchestratorSession = {
+            stage: "compile",
+            conversationId: this.conversations.get(chatId) ?? "",
+            messages: [text],
+            manifest: toolResult.manifest,
+            partialParams: compileResult.params,
+            tokenSymbols: compileResult.tokenSymbols,
+          };
+
+          if (compileResult.missingQuestion) {
+            this.orchestratorSessions.set(chatId, newSession);
+            await ctx.reply(compileResult.missingQuestion);
+            return;
+          }
+
+          await this.resolveTokensAndFinish(ctx, chatId, userId, newSession);
+          return;
+        }
+
+        // Continuing compile loop
+        if (existing.stage === "compile") {
+          existing.messages.push(text);
+          console.log(
+            `[Handler] compile stage, messages=${existing.messages.length}`,
+          );
+
+          const compileResult = await this.intentUseCase.compileSchema({
+            manifest: existing.manifest,
+            messages: existing.messages,
+            userId,
+            partialParams: existing.partialParams,
+          });
+
+          existing.partialParams = {
+            ...existing.partialParams,
+            ...compileResult.params,
+          };
+          existing.tokenSymbols = {
+            ...existing.tokenSymbols,
+            ...compileResult.tokenSymbols,
+          };
+
+          if (compileResult.missingQuestion) {
+            this.orchestratorSessions.set(chatId, existing);
+            await ctx.reply(compileResult.missingQuestion);
+            return;
+          }
+
+          await this.resolveTokensAndFinish(ctx, chatId, userId, existing);
         }
       } catch (err) {
-        if (err instanceof ConversationLimitError) {
-          await ctx.reply(err.message);
-          return;
-        }
-        if (
-          err instanceof MissingFieldsError ||
-          err instanceof InvalidFieldError
-        ) {
-          await ctx.reply(err.prompt);
-          return;
-        }
-        console.error("Error handling message:", err);
+        console.error("[Handler] error handling message:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
   }
 
-  /**
-   * Appends the incoming message to this chat's history, then delegates to the
-   * intent use case which discovers relevant manifests, parses the intent, and
-   * validates completeness. Clears the history on success.
-   *
-   * Throws ConversationLimitError, MissingFieldsError, or InvalidFieldError —
-   * callers are expected to handle each case with an appropriate user reply.
-   */
-  private async parseIntentWithHistory(
-    chatId: number,
-    text: string,
-    userId: string,
-  ): Promise<ParseFromHistoryResult> {
-    const history = this.intentHistory.get(chatId) ?? [];
-    history.push(text);
-    this.intentHistory.set(chatId, history);
-
-    try {
-      const result = await this.intentUseCase!.parseFromHistory(history, userId);
-      // Intent resolved — clear history for the next intent
-      this.intentHistory.delete(chatId);
-      return result;
-    } catch (err) {
-      if (err instanceof ConversationLimitError) {
-        // Conversation exceeded the allowed turn limit — reset so next message starts fresh
-        this.intentHistory.delete(chatId);
-      }
-      throw err;
-    }
-  }
-
-  /**
-   * Handles messages that carried no structured on-chain intent.
-   * Forwards the text to the conversational assistant and tracks the
-   * conversation ID so follow-up messages maintain context.
-   */
   private async handleFallbackChat(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
@@ -433,85 +455,73 @@ export class TelegramAssistantHandler {
     });
     this.conversations.set(chatId, response.conversationId);
     console.log(
-      `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}] replyLength=${response.reply.length}`,
+      `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}]`,
     );
     await this.safeSend(ctx, response.reply);
   }
 
-  private async startTokenResolution(
+  private async resolveTokensAndFinish(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
-    intent: IntentPackage,
-    manifest?: ToolManifest,
+    userId: string,
+    session: OrchestratorSession,
   ): Promise<void> {
-    if (!this.intentUseCase) {
-      await ctx.reply("Token registry not configured.");
-      return;
-    }
-
-    const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    const chainId = this.chainId;
     let fromCandidates: ITokenRecord[] = [];
     let toCandidates: ITokenRecord[] = [];
 
-    if (intent.fromTokenSymbol) {
-      console.log(
-        `[Handler] searching token registry for fromToken="${intent.fromTokenSymbol}" chainId=${chainId}`,
-      );
-      fromCandidates = await this.intentUseCase.searchTokens(
-        intent.fromTokenSymbol,
+    if (session.tokenSymbols.from) {
+      fromCandidates = await this.intentUseCase!.searchTokens(
+        session.tokenSymbols.from,
         chainId,
       );
       console.log(
-        `[Handler] fromToken candidates: ${fromCandidates.length} — ${fromCandidates.map((t) => t.symbol).join(", ") || "none"}`,
+        `[Handler] fromToken "${session.tokenSymbols.from}" candidates: ${fromCandidates.length}`,
       );
       if (fromCandidates.length === 0) {
         await ctx.reply(
-          `Token not found: ${intent.fromTokenSymbol}. Make sure the token is supported on this chain.`,
+          `Token not found: ${session.tokenSymbols.from}. Make sure it is supported on this chain.`,
         );
+        this.orchestratorSessions.delete(chatId);
         return;
       }
     }
 
-    if (intent.toTokenSymbol) {
-      console.log(
-        `[Handler] searching token registry for toToken="${intent.toTokenSymbol}" chainId=${chainId}`,
-      );
-      toCandidates = await this.intentUseCase.searchTokens(
-        intent.toTokenSymbol,
+    if (session.tokenSymbols.to) {
+      toCandidates = await this.intentUseCase!.searchTokens(
+        session.tokenSymbols.to,
         chainId,
       );
       console.log(
-        `[Handler] toToken candidates: ${toCandidates.length} — ${toCandidates.map((t) => t.symbol).join(", ") || "none"}`,
+        `[Handler] toToken "${session.tokenSymbols.to}" candidates: ${toCandidates.length}`,
       );
       if (toCandidates.length === 0) {
         await ctx.reply(
-          `Token not found: ${intent.toTokenSymbol}. Make sure the token is supported on this chain.`,
+          `Token not found: ${session.tokenSymbols.to}. Make sure it is supported on this chain.`,
         );
+        this.orchestratorSessions.delete(chatId);
         return;
       }
     }
 
-    const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0] : null;
-    const resolvedTo = toCandidates.length === 1 ? toCandidates[0] : null;
-    console.log(
-      `[Handler] token resolution — from=${resolvedFrom?.symbol ?? "ambiguous/null"} to=${resolvedTo?.symbol ?? "ambiguous/null"}`,
-    );
+    const resolvedFrom =
+      fromCandidates.length === 1 ? fromCandidates[0]! : null;
+    const resolvedTo = toCandidates.length === 1 ? toCandidates[0]! : null;
 
     if (fromCandidates.length > 1) {
-      console.log(`[Handler] fromToken ambiguous, starting disambiguation`);
-      this.tokenDisambiguation.set(chatId, {
-        intent,
+      session.stage = "token_disambig";
+      session.disambiguation = {
         resolvedFrom: null,
         resolvedTo: null,
         awaitingSlot: "from",
         fromCandidates,
         toCandidates,
-        manifest,
-      });
+      };
+      this.orchestratorSessions.set(chatId, session);
       await ctx.reply(
         this.buildDisambiguationPrompt(
           "from",
-          intent.fromTokenSymbol!,
+          session.tokenSymbols.from!,
           fromCandidates,
         ),
       );
@@ -519,34 +529,32 @@ export class TelegramAssistantHandler {
     }
 
     if (toCandidates.length > 1) {
-      console.log(`[Handler] toToken ambiguous, starting disambiguation`);
-      this.tokenDisambiguation.set(chatId, {
-        intent,
+      session.stage = "token_disambig";
+      session.disambiguation = {
         resolvedFrom,
         resolvedTo: null,
         awaitingSlot: "to",
         fromCandidates,
         toCandidates,
-        manifest,
-      });
+      };
+      this.orchestratorSessions.set(chatId, session);
       await ctx.reply(
         this.buildDisambiguationPrompt(
           "to",
-          intent.toTokenSymbol!,
+          session.tokenSymbols.to!,
           toCandidates,
         ),
       );
       return;
     }
 
-    await this.safeSend(
+    await this.buildAndShowConfirmation(
       ctx,
-      await this.buildEnrichedMessage(
-        intent,
-        resolvedFrom,
-        resolvedTo,
-        manifest,
-      ),
+      chatId,
+      userId,
+      session,
+      resolvedFrom,
+      resolvedTo,
     );
   }
 
@@ -554,16 +562,22 @@ export class TelegramAssistantHandler {
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
     text: string,
-    _userId: string,
+    userId: string,
+    session: OrchestratorSession,
   ): Promise<void> {
-    const pending = this.tokenDisambiguation.get(chatId)!;
+    const pending = session.disambiguation;
+    if (!pending) {
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply("Session error. Please start over.");
+      return;
+    }
     const candidates =
       pending.awaitingSlot === "from"
         ? pending.fromCandidates
         : pending.toCandidates;
 
     console.log(
-      `[Handler] disambiguation reply chatId=${chatId} slot=${pending.awaitingSlot} input="${text}" candidates=[${candidates.map((c) => c.symbol).join(", ")}]`,
+      `[Handler] disambig reply slot=${pending.awaitingSlot} input="${text}" candidates=[${candidates.map((c) => c.symbol).join(", ")}]`,
     );
 
     let selected: ITokenRecord | undefined;
@@ -576,47 +590,121 @@ export class TelegramAssistantHandler {
     }
 
     if (!selected) {
-      console.log(
-        `[Handler] disambiguation failed — no match for "${text}", cancelling`,
-      );
-      this.tokenDisambiguation.delete(chatId);
+      this.orchestratorSessions.delete(chatId);
       await ctx.reply("Disambiguation cancelled. Please repeat your request.");
       return;
     }
+
     console.log(
-      `[Handler] disambiguation resolved slot=${pending.awaitingSlot} → ${selected.symbol} (${selected.address})`,
+      `[Handler] disambig resolved slot=${pending.awaitingSlot} → ${selected.symbol} (${selected.address})`,
     );
 
     if (pending.awaitingSlot === "from") {
       pending.resolvedFrom = selected;
       if (pending.toCandidates.length > 1) {
         pending.awaitingSlot = "to";
-        this.tokenDisambiguation.set(chatId, pending);
+        this.orchestratorSessions.set(chatId, session);
         await ctx.reply(
           this.buildDisambiguationPrompt(
             "to",
-            pending.intent.toTokenSymbol!,
+            session.tokenSymbols.to!,
             pending.toCandidates,
           ),
         );
         return;
-      } else {
-        pending.resolvedTo = pending.toCandidates[0] ?? null;
       }
+      pending.resolvedTo = pending.toCandidates[0] ?? null;
     } else {
       pending.resolvedTo = selected;
     }
 
-    this.tokenDisambiguation.delete(chatId);
-    await this.safeSend(
+    await this.buildAndShowConfirmation(
       ctx,
-      await this.buildEnrichedMessage(
-        pending.intent,
-        pending.resolvedFrom,
-        pending.resolvedTo,
-        pending.manifest,
-      ),
+      chatId,
+      userId,
+      session,
+      pending.resolvedFrom,
+      pending.resolvedTo,
     );
+  }
+
+  private async buildAndShowConfirmation(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    session: OrchestratorSession,
+    resolvedFrom: ITokenRecord | null,
+    resolvedTo: ITokenRecord | null,
+  ): Promise<void> {
+    try {
+      const calldata = await this.intentUseCase!.buildRequestBody({
+        manifest: session.manifest,
+        params: session.partialParams,
+        resolvedFrom,
+        resolvedTo,
+        userId,
+        amountHuman: session.partialParams.amountHuman as string | undefined,
+      });
+      this.orchestratorSessions.delete(chatId);
+      await this.safeSend(
+        ctx,
+        this.buildConfirmationMessage(
+          session,
+          calldata,
+          resolvedFrom,
+          resolvedTo,
+        ),
+      );
+    } catch (err) {
+      console.error("[Handler] buildRequestBody error:", err);
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(
+        `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private buildConfirmationMessage(
+    session: OrchestratorSession,
+    calldata: { to: string; data: string; value: string },
+    fromToken: ITokenRecord | null,
+    toToken: ITokenRecord | null,
+  ): string {
+    const { manifest, partialParams } = session;
+    const lines = ["*Intent confirmed*", ""];
+
+    lines.push(`Action: ${manifest.name}`);
+    lines.push(`Protocol: ${manifest.protocolName}`);
+
+    if (fromToken) {
+      lines.push(`From: ${fromToken.symbol} (${fromToken.name})`);
+      lines.push(`  Address: \`${fromToken.address}\``);
+      lines.push(`  Decimals: ${fromToken.decimals}`);
+      const amountHuman = partialParams.amountHuman as string | undefined;
+      if (amountHuman) {
+        const raw = toRaw(amountHuman, fromToken.decimals);
+        lines.push(`  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`);
+      }
+    }
+
+    if (toToken) {
+      lines.push(`To: ${toToken.symbol} (${toToken.name})`);
+      lines.push(`  Address: \`${toToken.address}\``);
+      lines.push(`  Decimals: ${toToken.decimals}`);
+    }
+
+    lines.push("", "*Calldata*");
+    lines.push(`To: \`${calldata.to}\``);
+    lines.push(`Value: ${calldata.value}`);
+    lines.push(`\`\`\`\n${calldata.data}\n\`\`\``);
+
+    lines.push(
+      "",
+      `\`\`\`json\n${JSON.stringify(partialParams, null, 2)}\n\`\`\``,
+    );
+    lines.push("", "Type /confirm to execute or /cancel to abort.");
+
+    return lines.join("\n");
   }
 
   private buildDisambiguationPrompt(
@@ -630,83 +718,13 @@ export class TelegramAssistantHandler {
       "",
     ];
     for (let i = 0; i < candidates.length; i++) {
-      const t = candidates[i];
+      const t = candidates[i]!;
       const addr = t.address.slice(0, 6) + "..." + t.address.slice(-4);
       lines.push(
         `${i + 1}. ${t.symbol} — ${t.name} — ${addr} (${t.decimals} decimals)`,
       );
     }
     lines.push("", "Reply with the number.");
-    return lines.join("\n");
-  }
-
-  private async buildEnrichedMessage(
-    intent: IntentPackage,
-    fromToken: ITokenRecord | null,
-    toToken: ITokenRecord | null,
-    manifest?: ToolManifest,
-  ): Promise<string> {
-    const lines = ["*Intent confirmed*", ""];
-    lines.push(`Action: ${intent.action}`);
-
-    if (fromToken) {
-      lines.push(`From: ${fromToken.symbol} (${fromToken.name})`);
-      lines.push(`  Address: \`${fromToken.address}\``);
-      lines.push(`  Decimals: ${fromToken.decimals}`);
-      if (intent.amountHuman) {
-        // BigInt arithmetic to avoid float precision loss on 18-decimal tokens
-        const raw = toRaw(intent.amountHuman, fromToken.decimals);
-        lines.push(
-          `  Amount: ${intent.amountHuman} ${fromToken.symbol} (${raw} raw)`,
-        );
-      }
-    }
-
-    if (toToken) {
-      lines.push(`To: ${toToken.symbol} (${toToken.name})`);
-      lines.push(`  Address: \`${toToken.address}\``);
-      lines.push(`  Decimals: ${toToken.decimals}`);
-    }
-
-    if (intent.slippageBps !== undefined) {
-      lines.push(`Slippage: ${intent.slippageBps / 100}%`);
-    }
-
-    if (manifest) {
-      lines.push("", "*Tool matched*");
-      lines.push(`Name: ${manifest.name}`);
-      lines.push(`Protocol: ${manifest.protocolName}`);
-      lines.push(`Category: ${manifest.category}`);
-      lines.push(`Description: ${manifest.description}`);
-
-      // Build calldata preview via the use case (keeps ManifestDrivenSolver in the adapter layer)
-      const amountRaw =
-        fromToken && intent.amountHuman
-          ? toRaw(intent.amountHuman, fromToken.decimals)
-          : undefined;
-      const enrichedIntent: IntentPackage = {
-        ...intent,
-        params: {
-          ...(intent.params ?? {}),
-          ...(fromToken && { tokenAddress: fromToken.address }),
-          ...(amountRaw !== undefined && { amountRaw }),
-        },
-      };
-      const calldata = await this.intentUseCase?.previewCalldata(enrichedIntent, manifest);
-      if (calldata) {
-        lines.push("", "*Calldata*");
-        lines.push(`To: \`${calldata.to}\``);
-        lines.push(`Value: ${calldata.value}`);
-        lines.push(`\`\`\`\n${calldata.data}\n\`\`\``);
-      } else {
-        lines.push("", "_Calldata preview unavailable_");
-      }
-    } else {
-      lines.push("", "_No tool manifest found in registry for this action._");
-    }
-
-    lines.push("", `\`\`\`json\n${JSON.stringify(intent, null, 2)}\n\`\`\``);
-
     return lines.join("\n");
   }
 

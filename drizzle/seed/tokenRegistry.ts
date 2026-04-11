@@ -3,7 +3,7 @@
  * Run with: npx ts-node drizzle/seed/tokenRegistry.ts
  */
 import { drizzle } from "drizzle-orm/node-postgres";
-import { Pool } from "pg";
+import { Pool } from "../../node_modules/@types/pg";
 import { tokenRegistry } from "../../src/adapters/implementations/output/sqlDB/schema";
 import { v4 as uuidv4 } from "uuid";
 
@@ -38,7 +38,8 @@ const TOKENS = [
 
 async function seed() {
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL ?? "postgres://localhost:5432/aether_intent",
+    connectionString:
+      process.env.DATABASE_URL ?? "postgres://localhost:5432/aether_intent",
   });
   const db = drizzle({ client: pool });
 
