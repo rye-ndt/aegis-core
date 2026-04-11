@@ -22,6 +22,8 @@ import { ClaimRewardsSolver } from "../implementations/output/solver/static/clai
 import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
 import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator";
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
+import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
+import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
 import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
 import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
@@ -53,6 +55,8 @@ export class AssistantInject {
   private _userOpBuilder: UserOperationBuilder | null = null;
   private _solverRegistry: SolverRegistry | null = null;
   private _intentParser: OpenAIIntentParser | null = null;
+  private _intentClassifier: OpenAIIntentClassifier | null = null;
+  private _schemaCompiler: OpenAISchemaCompiler | null = null;
   private _toolRegistrationUseCase: IToolRegistrationUseCase | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
@@ -220,6 +224,24 @@ export class AssistantInject {
     return this._intentParser;
   }
 
+  getIntentClassifier(): OpenAIIntentClassifier {
+    if (!this._intentClassifier) {
+      this._intentClassifier = new OpenAIIntentClassifier(
+        process.env.OPENAI_API_KEY ?? "",
+      );
+    }
+    return this._intentClassifier;
+  }
+
+  getSchemaCompiler(): OpenAISchemaCompiler {
+    if (!this._schemaCompiler) {
+      this._schemaCompiler = new OpenAISchemaCompiler(
+        process.env.OPENAI_API_KEY ?? "",
+      );
+    }
+    return this._schemaCompiler;
+  }
+
   getIntentUseCase(): IIntentUseCase {
     if (!this._intentUseCase) {
       const chainId = this.getChainId();
@@ -240,6 +262,8 @@ export class AssistantInject {
         process.env.TREASURY_ADDRESS ?? "",
         db.toolManifests,
         this.getToolIndexService(),
+        this.getIntentClassifier(),
+        this.getSchemaCompiler(),
       );
     }
     return this._intentUseCase;
