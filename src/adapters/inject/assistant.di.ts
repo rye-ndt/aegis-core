@@ -43,6 +43,8 @@ import { PortfolioUseCaseImpl } from '../../use-cases/implementations/portfolio.
 import type { IPortfolioUseCase } from '../../use-cases/interface/input/portfolio.interface';
 import { SessionDelegationUseCaseImpl } from '../../use-cases/implementations/sessionDelegation.usecase';
 import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/sessionDelegation.interface';
+import { DelegationRequestBuilder } from '../implementations/output/delegation/delegationRequestBuilder';
+import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -69,6 +71,7 @@ export class AssistantInject {
   private _sessionDelegationCache: ISessionDelegationCache | null = null;
   private _portfolioUseCase: IPortfolioUseCase | null = null;
   private _sessionDelegationUseCase: ISessionDelegationUseCase | null = null;
+  private _delegationRequestBuilder: DelegationRequestBuilder | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -382,6 +385,13 @@ export class AssistantInject {
     return this._sessionDelegationUseCase;
   }
 
+  getDelegationRequestBuilder(): IDelegationRequestBuilder {
+    if (!this._delegationRequestBuilder) {
+      this._delegationRequestBuilder = new DelegationRequestBuilder();
+    }
+    return this._delegationRequestBuilder;
+  }
+
   getHttpApiServer(): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
@@ -393,6 +403,7 @@ export class AssistantInject {
       this.getPortfolioUseCase(),
       this.getToolRegistrationUseCase(),
       this.getSessionDelegationUseCase(),
+      this.getSqlDB().pendingDelegations,
     );
   }
 }

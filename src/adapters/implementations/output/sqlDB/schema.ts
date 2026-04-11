@@ -1,4 +1,4 @@
-import { boolean, integer, pgTable, text, uuid, unique } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, text, uuid, unique } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -123,6 +123,15 @@ export const toolManifests = pgTable("tool_manifests", {
   chainIds:         text("chain_ids").notNull(),
   createdAtEpoch:   integer("created_at_epoch").notNull(),
   updatedAtEpoch:   integer("updated_at_epoch").notNull(),
+});
+
+export const pendingDelegations = pgTable("pending_delegations", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  zerodevMessage: jsonb("zerodev_message").notNull(),
+  status: text("status").notNull(),           // 'pending' | 'signed' | 'expired'
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  expiresAtEpoch: integer("expires_at_epoch").notNull(),
 });
 
 export const feeRecords = pgTable("fee_records", {

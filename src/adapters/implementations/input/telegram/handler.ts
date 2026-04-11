@@ -12,6 +12,11 @@ import {
   type ToolManifest,
 } from "../../../../use-cases/interface/input/intent.interface";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
+import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
+import type { ZerodevMessage } from "../../../../use-cases/interface/output/delegation/zerodevMessage.types";
+import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
 
 type OrchestratorStage = "compile" | "token_disambig";
 
@@ -52,6 +57,9 @@ export class TelegramAssistantHandler {
       process.env.CHAIN_ID ?? "43113",
       10,
     ),
+    private readonly userProfileRepo?: IUserProfileDB,
+    private readonly pendingDelegationRepo?: IPendingDelegationDB,
+    private readonly delegationBuilder?: IDelegationRequestBuilder,
   ) {}
 
   register(bot: Bot): void {
@@ -645,6 +653,9 @@ export class TelegramAssistantHandler {
         userId,
         amountHuman: session.partialParams.amountHuman as string | undefined,
       });
+
+      await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
+
       this.orchestratorSessions.delete(chatId);
       await this.safeSend(
         ctx,
@@ -662,6 +673,60 @@ export class TelegramAssistantHandler {
         `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  private async tryCreateDelegationRequest(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    userId: string,
+    session: OrchestratorSession,
+    resolvedFrom: ITokenRecord | null,
+  ): Promise<void> {
+    if (
+      !this.delegationBuilder ||
+      !this.pendingDelegationRepo ||
+      !this.userProfileRepo ||
+      !resolvedFrom ||
+      resolvedFrom.isNative ||
+      !session.partialParams.amountHuman
+    ) return;
+
+    try {
+      const profile = await this.userProfileRepo.findByUserId(userId);
+      if (!profile?.sessionKeyAddress) return;
+
+      const amountRaw = toRaw(
+        session.partialParams.amountHuman as string,
+        resolvedFrom.decimals,
+      );
+      const delegationMsg = this.delegationBuilder.buildErc20Spend({
+        sessionKeyAddress: profile.sessionKeyAddress,
+        target: resolvedFrom.address,
+        valueLimit: amountRaw,
+        chainId: this.chainId,
+      });
+      await this.pendingDelegationRepo.create({ userId, zerodevMessage: delegationMsg });
+      await ctx.reply(this.buildDelegationPrompt(delegationMsg));
+    } catch (err) {
+      // Non-fatal — log and continue to show the confirmation message
+      console.error('[Handler] delegation request error:', err);
+    }
+  }
+
+  private buildDelegationPrompt(msg: ZerodevMessage): string {
+    if (msg.type === ZERODEV_MESSAGE_TYPE.ERC20_SPEND) {
+      const expiresDate = new Date(msg.validUntil * 1000).toISOString().split('T')[0];
+      return [
+        '🔐 *Delegation Request*',
+        '',
+        'The bot is requesting permission to spend tokens on your behalf.',
+        `Token: \`${msg.target}\``,
+        `Max amount: ${msg.valueLimit} (raw)`,
+        `Expires: ${expiresDate}`,
+        '',
+        'Open the Aegis app to approve or dismiss this request.',
+      ].join('\n');
+    }
+    return '🔐 Delegation request pending. Open the Aegis app to review.';
   }
 
   private buildConfirmationMessage(
