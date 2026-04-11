@@ -1,9 +1,9 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { toErrorMessage } from "../../helpers/errors/toErrorMessage";
+import { extractAddressFields } from "../../helpers/schema/addressFields";
 import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
 import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
-import { EXECUTION_STATUSES } from "../../helpers/enums/executionStatus.enum";
 import { USER_INTENT_TYPE } from "../../helpers/enums/userIntentType.enum";
 import { toRaw } from "../../helpers/bigint";
 import type {
@@ -16,15 +16,10 @@ import type { IIntentParser } from "../interface/output/intentParser.interface";
 import type { ITokenRecord } from "../interface/output/repository/tokenRegistry.repo";
 import type { ITokenRegistryService } from "../interface/output/tokenRegistry.interface";
 import type { ISolverRegistry } from "../interface/output/solver/solverRegistry.interface";
-import type { IUserOperationBuilder } from "../interface/output/blockchain/userOperation.interface";
-import type { ISimulator } from "../interface/output/simulator.interface";
 import type { IIntentDB } from "../interface/output/repository/intent.repo";
-import type { IIntentExecutionDB } from "../interface/output/repository/intentExecution.repo";
-import type { IFeeRecordDB } from "../interface/output/repository/feeRecord.repo";
 import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
 import type { IMessageDB } from "../interface/output/repository/message.repo";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
-import type { IResultParser } from "../../adapters/implementations/output/resultParser/tx.resultParser";
 import { MissingFieldsError, ConversationLimitError, InvalidFieldError } from "../interface/input/intent.errors";
 import { validateIntent } from "../../adapters/implementations/output/intentParser/intent.validator";
 import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
@@ -34,25 +29,16 @@ import type { IIntentClassifier } from "../interface/output/intentClassifier.int
 import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
 
 const CONFIDENCE_THRESHOLD = 0.7;
-const PLATFORM_FEE_BPS = 80;
-const CONTRIBUTOR_FEE_BPS = 20;
-const TOTAL_FEE_BPS = 100;
 
 export class IntentUseCaseImpl implements IIntentUseCase {
   constructor(
     private readonly intentParser: IIntentParser,
     private readonly tokenRegistryService: ITokenRegistryService,
     private readonly solverRegistry: ISolverRegistry,
-    private readonly userOpBuilder: IUserOperationBuilder,
-    private readonly simulator: ISimulator,
     private readonly intentDB: IIntentDB,
-    private readonly intentExecutionDB: IIntentExecutionDB,
-    private readonly feeRecordDB: IFeeRecordDB,
     private readonly userProfileDB: IUserProfileDB,
     private readonly messageDB: IMessageDB,
-    private readonly resultParser: IResultParser,
     private readonly chainId: number,
-    private readonly treasuryAddress: string,
     private readonly toolManifestDB: IToolManifestDB,
     private readonly toolIndexService: IToolIndexService | undefined,
     private readonly intentClassifier: IIntentClassifier,
@@ -69,7 +55,6 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const intentId = newUuid();
 
     // 1. Build sliding window of last 10 user messages for this conversation.
-    //    Fetch up to 9 prior user messages and append the current rawInput.
     const priorMessages = await this.messageDB.findByConversationId(
       params.conversationId,
     );
@@ -96,7 +81,6 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       if (intent !== null) validateIntent(intent, messages.length, manifest);
     } catch (err) {
       if (err instanceof ConversationLimitError) {
-        // Reset conversation messages so the user starts fresh
         await this.messageDB.deleteByConversationId(params.conversationId);
         return {
           intentId,
@@ -121,7 +105,6 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       throw err;
     }
 
-    // Handle no onchain intent
     if (intent === null) {
       return {
         intentId,
@@ -182,15 +165,15 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       };
     }
 
-    // 5. Get user's SCA address
+    // 5. Get user's address (EOA from profile if available)
     const profile = await this.userProfileDB.findByUserId(params.userId);
-    const smartAccountAddress = profile?.smartAccountAddress ?? params.userId;
+    const userAddress = profile?.eoaAddress ?? "";
 
     // 6. Build calldata
-    console.log(`[IntentUseCase] building calldata sca=${smartAccountAddress}`);
+    console.log(`[IntentUseCase] building calldata userAddress=${userAddress}`);
     let calldata: { to: string; data: string; value: string };
     try {
-      calldata = await solver.buildCalldata(intent, smartAccountAddress);
+      calldata = await solver.buildCalldata(intent, userAddress);
       console.log(`[IntentUseCase] calldata built to=${calldata.to} value=${calldata.value} dataLen=${calldata.data.length}`);
     } catch (err) {
       const reason = toErrorMessage(err);
@@ -214,45 +197,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       };
     }
 
-    // 7. Build UserOperation (unsigned)
-    const userOp = await this.userOpBuilder.build({
-      smartAccountAddress,
-      callData: calldata.data,
-      sessionKey: { privateKey: "", address: "" }, // populated by builder from env
-    });
-
-    // 8. Simulate
-    console.log(`[IntentUseCase] simulating UserOperation...`);
-    const simulationReport = await this.simulator.simulate({
-      userOp,
-      intent,
-      chainId: this.chainId,
-    });
-    console.log(`[IntentUseCase] simulation result: passed=${simulationReport.passed} gasEstimate=${simulationReport.gasEstimate} warnings=[${simulationReport.warnings.join(", ")}]`);
-
-    if (!simulationReport.passed) {
-      await this.intentDB.create({
-        id: intentId,
-        userId: params.userId,
-        conversationId: params.conversationId,
-        messageId: params.messageId,
-        rawInput: params.rawInput,
-        parsedJson: JSON.stringify(intent),
-        status: INTENT_STATUSES.SIMULATION_FAILED,
-        rejectionReason: simulationReport.warnings.join("; "),
-        createdAtEpoch: now,
-        updatedAtEpoch: now,
-      });
-      return {
-        intentId,
-        status: INTENT_STATUSES.SIMULATION_FAILED,
-        simulationReport,
-        humanSummary: `Pre-flight simulation failed:\n${simulationReport.warnings.join("\n")}`,
-        requiresConfirmation: false,
-      };
-    }
-
-    // 9. Save as awaiting confirmation
+    // 7. Save intent record
     await this.intentDB.create({
       id: intentId,
       userId: params.userId,
@@ -265,13 +210,13 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       updatedAtEpoch: now,
     });
 
-    const humanSummary = this.buildPreFlightSummary(intent, simulationReport);
+    const humanSummary = this.buildCalldataSummary(intent, calldata);
     return {
       intentId,
       status: INTENT_STATUSES.AWAITING_CONFIRMATION,
-      simulationReport,
+      calldata,
       humanSummary,
-      requiresConfirmation: true,
+      requiresConfirmation: false,
     };
   }
 
@@ -279,163 +224,12 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     intentId: string;
     userId: string;
   }): Promise<IntentExecutionResult> {
-    const now = newCurrentUTCEpoch();
-
-    // Support "__latest__" sentinel — find the most recent awaiting confirmation intent
-    let intent =
-      params.intentId === "__latest__"
-        ? await this.intentDB.findPendingByUserId(params.userId)
-        : await this.intentDB.findById(params.intentId);
-
-    if (!intent || intent.userId !== params.userId) {
-      return {
-        intentId: params.intentId,
-        status: INTENT_STATUSES.REJECTED,
-        humanSummary: "No pending intent found. Send a trading request first.",
-        requiresConfirmation: false,
-      };
-    }
-    if (intent.status !== INTENT_STATUSES.AWAITING_CONFIRMATION) {
-      return {
-        intentId: params.intentId,
-        status: intent.status,
-        humanSummary: `This intent is already in status: ${intent.status}`,
-        requiresConfirmation: false,
-      };
-    }
-
-    const intentPackage: IntentPackage = JSON.parse(intent.parsedJson);
-    const profile = await this.userProfileDB.findByUserId(params.userId);
-    const smartAccountAddress = profile?.smartAccountAddress ?? params.userId;
-
-    const solver = await this.solverRegistry.getSolverAsync(intentPackage.action);
-    if (!solver) {
-      await this.intentDB.updateStatus(
-        params.intentId,
-        INTENT_STATUSES.FAILED,
-        "No solver available",
-      );
-      return {
-        intentId: params.intentId,
-        status: INTENT_STATUSES.FAILED,
-        humanSummary: "Execution failed: no solver available.",
-        requiresConfirmation: false,
-      };
-    }
-
-    await this.intentDB.updateStatus(
-      params.intentId,
-      INTENT_STATUSES.EXECUTING,
-    );
-    const executionId = newUuid();
-
-    try {
-      const calldata = await solver.buildCalldata(
-        intentPackage,
-        smartAccountAddress,
-      );
-      const userOp = await this.userOpBuilder.build({
-        smartAccountAddress,
-        callData: calldata.data,
-        sessionKey: { privateKey: "", address: "" },
-      });
-
-      const simulationReport = await this.simulator.simulate({
-        userOp,
-        intent: intentPackage,
-        chainId: this.chainId,
-      });
-
-      await this.intentExecutionDB.create({
-        id: executionId,
-        intentId: params.intentId,
-        userId: params.userId,
-        smartAccountAddress,
-        solverUsed: solver.name,
-        simulationPassed: simulationReport.passed,
-        simulationResult: JSON.stringify(simulationReport),
-        status: EXECUTION_STATUSES.SUBMITTING,
-        createdAtEpoch: now,
-        updatedAtEpoch: now,
-      });
-
-      const { userOpHash } = await this.userOpBuilder.submit(userOp);
-      await this.intentExecutionDB.update(executionId, {
-        userOpHash,
-        status: EXECUTION_STATUSES.SUBMITTED,
-        updatedAtEpoch: newCurrentUTCEpoch(),
-      });
-
-      const { txHash, success } =
-        await this.userOpBuilder.waitForReceipt(userOpHash);
-      const finalStatus = success
-        ? EXECUTION_STATUSES.CONFIRMED
-        : EXECUTION_STATUSES.FAILED;
-
-      await this.intentExecutionDB.update(executionId, {
-        txHash,
-        status: finalStatus,
-        updatedAtEpoch: newCurrentUTCEpoch(),
-      });
-
-      if (success) {
-        await this.feeRecordDB.create({
-          id: newUuid(),
-          executionId,
-          userId: params.userId,
-          totalFeeBps: TOTAL_FEE_BPS,
-          platformFeeBps: PLATFORM_FEE_BPS,
-          contributorFeeBps: CONTRIBUTOR_FEE_BPS,
-          feeTokenAddress: "0x", // TODO: set from resolved tokenIn after token resolution step
-          feeAmountRaw: "0",
-          platformAddress: this.treasuryAddress,
-          txHash,
-          chainId: this.chainId,
-          createdAtEpoch: newCurrentUTCEpoch(),
-        });
-      }
-
-      await this.intentDB.updateStatus(
-        params.intentId,
-        success ? INTENT_STATUSES.COMPLETED : INTENT_STATUSES.FAILED,
-      );
-
-      const humanSummary = await this.resultParser.parse({
-        txHash,
-        intent: intentPackage,
-        chainId: this.chainId,
-      });
-
-      return {
-        intentId: params.intentId,
-        status: success ? INTENT_STATUSES.COMPLETED : INTENT_STATUSES.FAILED,
-        humanSummary,
-        requiresConfirmation: false,
-        executionId,
-        txHash,
-      };
-    } catch (err) {
-      const errorMessage = toErrorMessage(err);
-      await this.intentDB.updateStatus(
-        params.intentId,
-        INTENT_STATUSES.FAILED,
-        errorMessage,
-      );
-      await this.intentExecutionDB
-        .update(executionId, {
-          status: EXECUTION_STATUSES.FAILED,
-          errorMessage,
-          updatedAtEpoch: newCurrentUTCEpoch(),
-        })
-        .catch(() => {});
-      return {
-        intentId: params.intentId,
-        status: INTENT_STATUSES.FAILED,
-        humanSummary: `Execution failed: ${errorMessage}`,
-        requiresConfirmation: false,
-        executionId,
-      };
-    }
+    return {
+      intentId: params.intentId,
+      status: INTENT_STATUSES.REJECTED,
+      humanSummary: "Transaction execution is handled by the Aegis app. Please open the app to sign and submit.",
+      requiresConfirmation: false,
+    };
   }
 
   async getHistory(userId: string): Promise<IntentPackage[]> {
@@ -485,7 +279,6 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const query = `${intentType} ${messages.join(" ")}`;
     const manifests = await this.discoverRelevantTools(query);
     if (manifests.length === 0) return null;
-    // Trust RAG score order — top result is the best match
     const top = manifests[0]!;
     console.log(`[IntentUseCase] selectTool → ${top.toolId} (${manifests.length} candidates)`);
     return { toolId: top.toolId, manifest: top };
@@ -499,7 +292,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
   }): Promise<CompileResult> {
     const profile = await this.userProfileDB.findByUserId(opts.userId);
     const autoFilled: Record<string, unknown> = {
-      scaAddress: profile?.smartAccountAddress ?? "",
+      userAddress: profile?.eoaAddress ?? "",
     };
     return this.schemaCompiler.compile({
       manifest: opts.manifest,
@@ -520,12 +313,23 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const { manifest, resolvedFrom, resolvedTo, userId, amountHuman } = opts;
     const params = { ...opts.params };
 
-    if (resolvedFrom) params.tokenAddress = resolvedFrom.address;
-    if (amountHuman && resolvedFrom) params.amountRaw = toRaw(amountHuman, resolvedFrom.decimals);
-    if (resolvedTo) params.toTokenAddress = resolvedTo.address;
+    const addressFields = extractAddressFields(manifest.inputSchema as Record<string, unknown>);
+    const [fromField, toField] = addressFields;
+
+    if (resolvedFrom) {
+      params[fromField ?? "tokenAddress"] = resolvedFrom.address;
+    }
+    if (resolvedTo) {
+      params[toField ?? "toTokenAddress"] = resolvedTo.address;
+    }
+
+    const humanAmount = amountHuman ?? (params.amountHuman as string | undefined);
+    if (humanAmount && resolvedFrom) {
+      params.amountRaw = toRaw(humanAmount, resolvedFrom.decimals);
+    }
 
     const profile = await this.userProfileDB.findByUserId(userId);
-    const scaAddress = profile?.smartAccountAddress ?? "";
+    const userAddress = profile?.eoaAddress ?? "";
 
     const intentPackage: IntentPackage = {
       action: manifest.toolId,
@@ -537,9 +341,16 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const solver = await this.solverRegistry.getSolverAsync(manifest.toolId);
     if (!solver) throw new Error(`No solver for toolId: ${manifest.toolId}`);
 
-    const calldata = await solver.buildCalldata(intentPackage, scaAddress);
+    const calldata = await solver.buildCalldata(intentPackage, userAddress);
     if (!calldata.to) throw new Error("Incomplete calldata");
     return calldata;
+  }
+
+  async generateMissingParamQuestion(
+    manifest: ToolManifest,
+    missingFields: string[],
+  ): Promise<string> {
+    return this.schemaCompiler.generateQuestion({ manifest, missingFields });
   }
 
   private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {
@@ -558,7 +369,6 @@ export class IntentUseCaseImpl implements IIntentUseCase {
           const records = await this.toolManifestDB.findByToolIds(toolIds);
           console.log(`[IntentUseCase] loaded ${records.length} manifests from DB for vector hits`);
 
-          // Preserve vector score order before resolveConflicts reorders by category.
           const scoreMap = new Map(hits.map((h) => [h.toolId, h.score]));
           records.sort((a, b) => (scoreMap.get(b.toolId) ?? 0) - (scoreMap.get(a.toolId) ?? 0));
 
@@ -567,19 +377,15 @@ export class IntentUseCaseImpl implements IIntentUseCase {
           return resolved;
         }
 
-        // 0 results above threshold means no relevant tool — return empty.
-        // Do not fall back to ILIKE: surfacing unrelated tools is worse than none.
         console.log(`[IntentUseCase] vector search: 0 results above threshold, returning empty`);
         return [];
       } catch (err) {
-        // Vector search failed (network, Pinecone down). Fall through to ILIKE.
         console.error("[IntentUseCase] vector search failed, falling back to ILIKE:", err);
       }
     } else {
       console.log(`[IntentUseCase] no toolIndexService configured, using ILIKE fallback`);
     }
 
-    // ILIKE fallback — used when toolIndexService is absent or threw.
     const candidates = await this.toolManifestDB.search(rawInput, {
       limit: 15,
       chainId: this.chainId,
@@ -623,45 +429,33 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     return resolved.slice(0, 8).map(deserializeManifest);
   }
 
-  private buildPreFlightSummary(
+  private buildCalldataSummary(
     intent: IntentPackage,
-    sim: { gasEstimate: string; warnings: string[] },
+    calldata: { to: string; data: string; value: string },
   ): string {
-    const lines: string[] = ["⚡ Pre-Flight Check", ""];
+    const lines: string[] = ["⚡ Transaction Ready", ""];
 
-    const actionLabel = {
+    const actionLabel: Record<string, string> = {
       [INTENT_ACTION.SWAP]: "Swap",
       [INTENT_ACTION.STAKE]: "Stake",
       [INTENT_ACTION.UNSTAKE]: "Unstake",
       [INTENT_ACTION.CLAIM_REWARDS]: "Claim Rewards",
       [INTENT_ACTION.TRANSFER]: "Transfer",
       [INTENT_ACTION.UNKNOWN]: "Unknown",
-    }[intent.action];
-    lines.push(`Action: ${actionLabel}`);
+    };
+    lines.push(`Action: ${actionLabel[intent.action] ?? intent.action}`);
 
-    // TODO: restore token details after token resolution step is added
     if (intent.fromTokenSymbol) {
-      lines.push(
-        `You send: ${intent.amountHuman ?? "?"} ${intent.fromTokenSymbol}`,
-      );
+      lines.push(`You send: ${intent.amountHuman ?? "?"} ${intent.fromTokenSymbol}`);
     }
     if (intent.toTokenSymbol) {
       lines.push(`You receive: ~? ${intent.toTokenSymbol} (est.)`);
     }
-    if (intent.slippageBps) {
-      lines.push(`Slippage: ${intent.slippageBps / 100}%`);
-    }
-    lines.push(`Protocol fee: 1%`);
-    lines.push(
-      `Gas estimate: ${parseInt(sim.gasEstimate).toLocaleString()} units`,
-    );
+
+    lines.push(`Contract: ${calldata.to}`);
+    lines.push(`Value: ${calldata.value}`);
     lines.push("");
-    lines.push("Simulation: ✅ PASSED");
-    if (sim.warnings.length > 0) {
-      lines.push(`Warnings: ${sim.warnings.join(", ")}`);
-    }
-    lines.push("");
-    lines.push("Type /confirm to execute or /cancel to abort.");
+    lines.push("Open the Aegis app to sign and execute this transaction.");
 
     return lines.join("\n");
   }

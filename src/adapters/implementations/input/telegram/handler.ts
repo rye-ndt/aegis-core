@@ -2,6 +2,7 @@ import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { toRaw } from "../../../../helpers/bigint";
+import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
@@ -404,7 +405,7 @@ export class TelegramAssistantHandler {
             return;
           }
 
-          await this.resolveTokensAndFinish(ctx, chatId, userId, newSession);
+          await this.finishCompileOrAsk(ctx, chatId, userId, newSession);
           return;
         }
 
@@ -437,7 +438,7 @@ export class TelegramAssistantHandler {
             return;
           }
 
-          await this.resolveTokensAndFinish(ctx, chatId, userId, existing);
+          await this.finishCompileOrAsk(ctx, chatId, userId, existing);
         }
       } catch (err) {
         console.error("[Handler] error handling message:", err);
@@ -466,6 +467,42 @@ export class TelegramAssistantHandler {
       `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}]`,
     );
     await this.safeSend(ctx, response.reply);
+  }
+
+  private getMissingRequiredFields(
+    manifest: ToolManifest,
+    partialParams: Record<string, unknown>,
+  ): string[] {
+    const inputSchema = manifest.inputSchema as Record<string, unknown>;
+    const required = (inputSchema.required as string[] | undefined) ?? [];
+    const addressFields = new Set(extractAddressFields(inputSchema));
+    return required.filter(
+      (field) =>
+        !addressFields.has(field) &&
+        (partialParams[field] === undefined ||
+          partialParams[field] === null ||
+          partialParams[field] === ""),
+    );
+  }
+
+  private async finishCompileOrAsk(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    session: OrchestratorSession,
+  ): Promise<void> {
+    const missing = this.getMissingRequiredFields(session.manifest, session.partialParams);
+    if (missing.length > 0) {
+      console.log(`[Handler] post-compile validation: missing fields=${JSON.stringify(missing)}`);
+      const question = await this.intentUseCase!.generateMissingParamQuestion(
+        session.manifest,
+        missing,
+      );
+      this.orchestratorSessions.set(chatId, session);
+      await ctx.reply(question);
+      return;
+    }
+    await this.resolveTokensAndFinish(ctx, chatId, userId, session);
   }
 
   private async resolveTokensAndFinish(
@@ -644,35 +681,38 @@ export class TelegramAssistantHandler {
     resolvedFrom: ITokenRecord | null,
     resolvedTo: ITokenRecord | null,
   ): Promise<void> {
-    try {
-      const calldata = await this.intentUseCase!.buildRequestBody({
-        manifest: session.manifest,
-        params: session.partialParams,
-        resolvedFrom,
-        resolvedTo,
-        userId,
-        amountHuman: session.partialParams.amountHuman as string | undefined,
-      });
-
-      await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
-
-      this.orchestratorSessions.delete(chatId);
-      await this.safeSend(
-        ctx,
-        this.buildConfirmationMessage(
-          session,
-          calldata,
-          resolvedFrom,
-          resolvedTo,
-        ),
-      );
-    } catch (err) {
-      console.error("[Handler] buildRequestBody error:", err);
-      this.orchestratorSessions.delete(chatId);
-      await ctx.reply(
-        `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
-      );
+    // DEBUG: show resolved context without hitting any external API
+    const { extractAddressFields } = await import("../../../../helpers/schema/addressFields");
+    const addressFields = extractAddressFields(session.manifest.inputSchema as Record<string, unknown>);
+    const [fromField, toField] = addressFields;
+    const debugParams: Record<string, unknown> = { ...session.partialParams };
+    if (resolvedFrom && fromField) debugParams[fromField] = resolvedFrom.address;
+    if (resolvedTo && toField) debugParams[toField] = resolvedTo.address;
+    const amountHuman = session.partialParams.amountHuman as string | undefined;
+    if (amountHuman && resolvedFrom) {
+      debugParams.amountRaw = toRaw(amountHuman, resolvedFrom.decimals);
     }
+
+    const debugLines = [
+      "🔍 DEBUG — resolved request context",
+      "",
+      `Tool: ${session.manifest.toolId}`,
+      `From token: ${resolvedFrom ? `${resolvedFrom.symbol} (${resolvedFrom.address})` : "none"}`,
+      `To token:   ${resolvedTo   ? `${resolvedTo.symbol} (${resolvedTo.address})`   : "none"}`,
+      "",
+      "Params passed to solver:",
+      "```",
+      JSON.stringify(debugParams, null, 2),
+      "```",
+      "",
+      "Manifest steps (template bodies):",
+      "```",
+      JSON.stringify(session.manifest.steps, null, 2),
+      "```",
+    ];
+
+    this.orchestratorSessions.delete(chatId);
+    await this.safeSend(ctx, debugLines.join("\n"));
   }
 
   private async tryCreateDelegationRequest(

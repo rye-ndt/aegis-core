@@ -14,20 +14,15 @@ import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
 import type { IIntentUseCase } from "../../use-cases/interface/input/intent.interface";
 import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecase";
 import { ViemClientAdapter } from "../implementations/output/blockchain/viemClient";
-import { SmartAccountAdapter } from "../implementations/output/blockchain/smartAccount.adapter";
-import { SessionKeyAdapter } from "../implementations/output/blockchain/sessionKey.adapter";
-import { UserOperationBuilder } from "../implementations/output/blockchain/userOperation.builder";
 import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
 import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
 import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
-import { RpcSimulator } from "../implementations/output/simulator/rpc.simulator";
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
 import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
 import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
 import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
-import { TxResultParser } from "../implementations/output/resultParser/tx.resultParser";
 import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
 import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
@@ -52,9 +47,6 @@ export class AssistantInject {
   private _authUseCase: IAuthUseCase | null = null;
   private _intentUseCase: IIntentUseCase | null = null;
   private _viemClient: ViemClientAdapter | null = null;
-  private _smartAccountService: SmartAccountAdapter | null = null;
-  private _sessionKeyService: SessionKeyAdapter | null = null;
-  private _userOpBuilder: UserOperationBuilder | null = null;
   private _solverRegistry: SolverRegistry | null = null;
   private _intentParser: OpenAIIntentParser | null = null;
   private _intentClassifier: OpenAIIntentClassifier | null = null;
@@ -62,8 +54,6 @@ export class AssistantInject {
   private _toolRegistrationUseCase: IToolRegistrationUseCase | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
-  private _simulator: RpcSimulator | null = null;
-  private _resultParser: TxResultParser | null = null;
   private _embeddingService: OpenAIEmbeddingService | null = null;
   private _toolVectorStore: PineconeVectorStore | null = null;
   private _toolIndexService: IToolIndexService | null = null;
@@ -91,7 +81,7 @@ export class AssistantInject {
     if (!this._viemClient) {
       this._viemClient = new ViemClientAdapter({
         rpcUrl: process.env.AVAX_RPC_URL ?? "https://api.avax-test.network/ext/bc/C/rpc",
-        botPrivateKey: process.env.BOT_PRIVATE_KEY ?? "",
+        botPrivateKey: "",
         chainId: this.getChainId(),
       });
     }
@@ -191,33 +181,6 @@ export class AssistantInject {
     return this._toolRegistrationUseCase;
   }
 
-  getSimulator(): RpcSimulator {
-    if (!this._simulator) {
-      this._simulator = new RpcSimulator(this.getViemClient());
-    }
-    return this._simulator;
-  }
-
-  getResultParser(): TxResultParser {
-    if (!this._resultParser) {
-      this._resultParser = new TxResultParser(this.getViemClient());
-    }
-    return this._resultParser;
-  }
-
-  getUserOpBuilder(): UserOperationBuilder {
-    if (!this._userOpBuilder) {
-      this._userOpBuilder = new UserOperationBuilder(
-        this.getViemClient(),
-        process.env.ENTRY_POINT_ADDRESS ?? "0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789",
-        process.env.AVAX_BUNDLER_URL ?? "",
-        process.env.BOT_PRIVATE_KEY ?? "",
-        process.env.TREASURY_ADDRESS ?? "",
-      );
-    }
-    return this._userOpBuilder;
-  }
-
   getIntentParser(): OpenAIIntentParser {
     if (!this._intentParser) {
       this._intentParser = new OpenAIIntentParser(
@@ -253,16 +216,10 @@ export class AssistantInject {
         this.getIntentParser(),
         this.getTokenRegistryService(),
         this.getSolverRegistry(),
-        this.getUserOpBuilder(),
-        this.getSimulator(),
         db.intents,
-        db.intentExecutions,
-        db.feeRecords,
         db.userProfiles,
         db.messages,
-        this.getResultParser(),
         chainId,
-        process.env.TREASURY_ADDRESS ?? "",
         db.toolManifests,
         this.getToolIndexService(),
         this.getIntentClassifier(),
@@ -312,43 +269,10 @@ export class AssistantInject {
   getAuthUseCase(): IAuthUseCase {
     if (!this._authUseCase) {
       const db = this.getSqlDB();
-      const chainId = this.getChainId();
-      const botAddress = process.env.BOT_ADDRESS ?? "";
-
-      let smartAccountService: SmartAccountAdapter | undefined;
-      let sessionKeyService: SessionKeyAdapter | undefined;
-
-      if (process.env.BOT_PRIVATE_KEY && process.env.JARVIS_ACCOUNT_FACTORY_ADDRESS) {
-        if (!this._smartAccountService) {
-          this._smartAccountService = new SmartAccountAdapter(
-            this.getViemClient(),
-            process.env.JARVIS_ACCOUNT_FACTORY_ADDRESS,
-            botAddress,
-          );
-        }
-        smartAccountService = this._smartAccountService;
-      }
-
-      if (process.env.BOT_PRIVATE_KEY && process.env.SESSION_KEY_MANAGER_ADDRESS) {
-        if (!this._sessionKeyService) {
-          this._sessionKeyService = new SessionKeyAdapter(
-            this.getViemClient(),
-            process.env.SESSION_KEY_MANAGER_ADDRESS,
-            botAddress,
-          );
-        }
-        sessionKeyService = this._sessionKeyService;
-      }
-
       this._authUseCase = new AuthUseCaseImpl(
         db.users,
         process.env.JWT_SECRET ?? "",
         process.env.JWT_EXPIRES_IN ?? "7d",
-        db.userProfiles,
-        smartAccountService,
-        sessionKeyService,
-        // Default allowed token addresses for Fuji
-        ["0x5425890298aed601595a70AB815c96711a31Bc65", "0xd00ae08403B9bbb9124bB305C09058E32C39A48c"],
         this.getPrivyAuthService(),
       );
     }

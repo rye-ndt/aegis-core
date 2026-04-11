@@ -3,23 +3,43 @@ import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import type { ISchemaCompiler, CompileResult } from "../../../../use-cases/interface/output/schemaCompiler.interface";
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
+import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 
 const CompileSchema = z.object({
-  params: z.record(z.string(), z.unknown()),
+  paramsJson: z.string(),
   missingQuestion: z.string().nullable(),
   fromTokenSymbol: z.string().nullable(),
   toTokenSymbol: z.string().nullable(),
 });
+
+function stripAddressFields(inputSchema: Record<string, unknown>): Record<string, unknown> {
+  const addressFields = extractAddressFields(inputSchema);
+  if (addressFields.length === 0) return inputSchema;
+
+  const properties = { ...(inputSchema.properties as Record<string, unknown>) };
+  for (const field of addressFields) delete properties[field];
+
+  const required = (inputSchema.required as string[] | undefined)
+    ?.filter((f) => !addressFields.includes(f));
+
+  return { ...inputSchema, properties, required };
+}
 
 function buildSystemPrompt(
   manifest: ToolManifest,
   autoFilled: Record<string, unknown>,
   partialParams: Record<string, unknown>,
 ): string {
+  const rawSchema = manifest.inputSchema as Record<string, unknown>;
+  const addressFields = extractAddressFields(rawSchema);
+  const visibleSchema = stripAddressFields(rawSchema);
+
+  console.log(`[OpenAISchemaCompiler] addressFields=${JSON.stringify(addressFields)} visibleSchema=${JSON.stringify(visibleSchema)}`);
+
   return `You are a field extractor for a DeFi transaction agent.
 
 Tool schema (inputSchema):
-${JSON.stringify(manifest.inputSchema, null, 2)}
+${JSON.stringify(visibleSchema, null, 2)}
 
 Auto-filled fields (do not ask user for these):
 ${JSON.stringify(autoFilled, null, 2)}
@@ -29,11 +49,11 @@ ${JSON.stringify(partialParams, null, 2)}
 
 Instructions:
 - Scan the conversation and extract as many inputSchema fields as possible.
-- Do NOT extract or ask for: tokenAddress, amountRaw (these are resolved later from token symbols).
-- If the user mentions a token symbol (e.g. "USDC", "AVAX"), extract it as fromTokenSymbol or toTokenSymbol — NOT as tokenAddress.
-- If any required field (from inputSchema.required) is still missing after extraction, set missingQuestion to a short, natural question to ask the user.
-- If all required non-token fields are filled, set missingQuestion to null.
-- Do not include auto-filled fields in params output.`;
+- If the user mentions a token symbol (e.g. "USDC", "AVAX", "FUJI", "MOON"), extract it as fromTokenSymbol or toTokenSymbol.
+- If any required field (from inputSchema.required) is still missing, set missingQuestion to a short, natural question to ask the user.
+- If all required fields are filled, set missingQuestion to null.
+- Do not include auto-filled fields in params output.
+- Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.`;
 }
 
 export class OpenAISchemaCompiler implements ISchemaCompiler {
@@ -70,16 +90,45 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI schema compiler");
 
-    console.log(`[OpenAISchemaCompiler] params=${JSON.stringify(parsed.params)} missingQuestion=${parsed.missingQuestion} from=${parsed.fromTokenSymbol} to=${parsed.toTokenSymbol}`);
+    const params = JSON.parse(parsed.paramsJson) as Record<string, unknown>;
+
+    console.log(`[OpenAISchemaCompiler] params=${JSON.stringify(params)} missingQuestion=${parsed.missingQuestion} from=${parsed.fromTokenSymbol} to=${parsed.toTokenSymbol}`);
 
     const tokenSymbols: CompileResult["tokenSymbols"] = {};
     if (parsed.fromTokenSymbol) tokenSymbols.from = parsed.fromTokenSymbol;
     if (parsed.toTokenSymbol) tokenSymbols.to = parsed.toTokenSymbol;
 
     return {
-      params: parsed.params,
+      params,
       missingQuestion: parsed.missingQuestion,
       tokenSymbols,
     };
+  }
+
+  async generateQuestion(opts: {
+    manifest: ToolManifest;
+    missingFields: string[];
+  }): Promise<string> {
+    const properties = (opts.manifest.inputSchema as Record<string, unknown>).properties as
+      Record<string, { description?: string }> | undefined ?? {};
+
+    const fieldDescriptions = opts.missingFields
+      .map((f) => properties[f]?.description ? `${f} (${properties[f].description})` : f)
+      .join(", ");
+
+    const response = await this.client.chat.completions.create({
+      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      messages: [
+        {
+          role: "user",
+          content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
+        },
+      ],
+    });
+
+    return (
+      response.choices[0]?.message.content ??
+      `Could you provide the following: ${opts.missingFields.join(", ")}?`
+    );
   }
 }

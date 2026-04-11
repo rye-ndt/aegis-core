@@ -13,4 +13,9 @@ export interface ISchemaCompiler {
     autoFilled: Record<string, unknown>;
     partialParams: Record<string, unknown>;
   }): Promise<CompileResult>;
+
+  generateQuestion(opts: {
+    manifest: ToolManifest;
+    missingFields: string[];
+  }): Promise<string>;
 }

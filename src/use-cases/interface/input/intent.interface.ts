@@ -13,11 +13,9 @@ export { MissingFieldsError, InvalidFieldError, ConversationLimitError } from '.
 export interface IntentExecutionResult {
   intentId: string;
   status: INTENT_STATUSES;
-  simulationReport?: { gasEstimate: string; warnings: string[] };
+  calldata?: { to: string; data: string; value: string };
   humanSummary: string;
   requiresConfirmation: boolean;
-  executionId?: string;
-  txHash?: string;
 }
 
 export interface ParseFromHistoryResult {
@@ -71,4 +69,9 @@ export interface IIntentUseCase {
     userId: string;
     amountHuman?: string;
   }): Promise<{ to: string; data: string; value: string }>;
+
+  generateMissingParamQuestion(
+    manifest: ToolManifest,
+    missingFields: string[],
+  ): Promise<string>;
 }
