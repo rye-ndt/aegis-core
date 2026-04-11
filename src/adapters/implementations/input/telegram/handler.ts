@@ -5,28 +5,16 @@ import type { IAssistantUseCase } from "../../../../use-cases/interface/input/as
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
-import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
-import { INTENT_STATUSES } from "../../../../helpers/enums/intentStatus.enum";
-import type {
-  IIntentParser,
-  IntentPackage,
-} from "../../../../use-cases/interface/output/intentParser.interface";
-import type { ITokenRecord } from "../../../../use-cases/interface/output/repository/tokenRegistry.repo";
-import type { IToolManifestDB } from "../../../../use-cases/interface/output/repository/toolManifest.repo";
-import {
-  deserializeManifest,
-  type ToolManifest,
-} from "../../../../use-cases/interface/output/toolManifest.types";
-import type { IToolIndexService } from "../../../../use-cases/interface/output/toolIndex.interface";
-import { ManifestDrivenSolver } from "../../output/solver/manifestSolver/manifestDriven.solver";
+import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
 import {
   MissingFieldsError,
   ConversationLimitError,
   InvalidFieldError,
-  validateIntent,
-} from "../../output/intentParser/intent.validator";
+  type ParseFromHistoryResult,
+  type ITokenRecord,
+  type ToolManifest,
+} from "../../../../use-cases/interface/input/intent.interface";
+import type { IntentPackage } from "../../../../use-cases/interface/output/intentParser.interface";
 
 // BigInt string arithmetic — no float precision loss at any decimal count
 function toRaw(amountHuman: string, decimals: number): string {
@@ -62,13 +50,7 @@ export class TelegramAssistantHandler {
     private readonly telegramSessions: ITelegramSessionDB,
     private readonly botToken?: string,
     private readonly intentUseCase?: IIntentUseCase,
-    private readonly userProfileDB?: IUserProfileDB,
-    private readonly tokenRegistryService?: ITokenRegistryService,
-    private readonly viemClient?: ViemClientAdapter,
-    private readonly chainId?: number,
-    private readonly intentParser?: IIntentParser,
-    private readonly toolManifestDB?: IToolManifestDB,
-    private readonly toolIndexService?: IToolIndexService,
+    private readonly portfolioUseCase?: IPortfolioUseCase,
   ) {}
 
   register(bot: Bot): void {
@@ -183,12 +165,7 @@ export class TelegramAssistantHandler {
       }
       await ctx.replyWithChatAction("typing");
       try {
-        // Find the latest pending intent for this user
-        const { userId } = session;
-        // We need to find pending intent — intentUseCase exposes confirmAndExecute
-        // The pending intentId must be stored in DB; use a placeholder lookup approach
-        // by calling confirmAndExecute with a sentinel that triggers DB lookup
-        const result = await this.confirmLatestIntent(userId);
+        const result = await this.confirmLatestIntent(session.userId);
         await this.safeSend(ctx, result);
       } catch (err) {
         console.error("Error confirming intent:", err);
@@ -233,8 +210,8 @@ export class TelegramAssistantHandler {
         return;
       }
       try {
-        const profile = await this.userProfileDB?.findByUserId(session.userId);
-        if (!profile?.smartAccountAddress) {
+        const info = await this.portfolioUseCase?.getWalletInfo(session.userId);
+        if (!info?.smartAccountAddress) {
           await ctx.reply(
             "No wallet found. Complete registration to deploy your Smart Contract Account.",
           );
@@ -242,14 +219,14 @@ export class TelegramAssistantHandler {
         }
         const lines = [
           "🔑 Wallet Info",
-          `Smart Account: \`${profile.smartAccountAddress}\``,
-          profile.sessionKeyAddress
-            ? `Session Key: \`${profile.sessionKeyAddress}\``
+          `Smart Account: \`${info.smartAccountAddress}\``,
+          info.sessionKeyAddress
+            ? `Session Key: \`${info.sessionKeyAddress}\``
             : "Session Key: Not set",
-          `Session Key Status: ${profile.sessionKeyStatus ?? "N/A"}`,
+          `Session Key Status: ${info.sessionKeyStatus ?? "N/A"}`,
         ];
-        if (profile.sessionKeyExpiresAtEpoch) {
-          const expiresDate = new Date(profile.sessionKeyExpiresAtEpoch * 1000)
+        if (info.sessionKeyExpiresAtEpoch) {
+          const expiresDate = new Date(info.sessionKeyExpiresAtEpoch * 1000)
             .toISOString()
             .split("T")[0];
           lines.push(`Expires: ${expiresDate}`);
@@ -331,8 +308,8 @@ export class TelegramAssistantHandler {
 
       await ctx.replyWithChatAction("typing");
 
-      if (!this.intentParser) {
-        await ctx.reply("Intent parser not configured.");
+      if (!this.intentUseCase) {
+        await ctx.reply("Intent service not configured.");
         return;
       }
 
@@ -404,9 +381,9 @@ export class TelegramAssistantHandler {
   }
 
   /**
-   * Appends the incoming message to this chat's history, then asks the intent
-   * parser to extract a structured intent from the full history. If an intent
-   * is found, enriches it with a matching tool manifest before validating.
+   * Appends the incoming message to this chat's history, then delegates to the
+   * intent use case which discovers relevant manifests, parses the intent, and
+   * validates completeness. Clears the history on success.
    *
    * Throws ConversationLimitError, MissingFieldsError, or InvalidFieldError —
    * callers are expected to handle each case with an appropriate user reply.
@@ -415,43 +392,16 @@ export class TelegramAssistantHandler {
     chatId: number,
     text: string,
     userId: string,
-  ): Promise<{
-    intent: IntentPackage | null;
-    manifest: ToolManifest | undefined;
-  }> {
+  ): Promise<ParseFromHistoryResult> {
     const history = this.intentHistory.get(chatId) ?? [];
     history.push(text);
     this.intentHistory.set(chatId, history);
 
-    let intent: IntentPackage | null;
-    let manifest: ToolManifest | undefined;
-
     try {
-      // Discover relevant tool manifests BEFORE calling the intent parser so the
-      // LLM prompt includes dynamic toolIds (e.g. "relay_swap") and can set
-      // action = toolId instead of falling back to a built-in action name.
-      // Always use history[0] (the original intent phrase) as the query — subsequent
-      // messages are clarifying answers (addresses, numbers) that produce bad vector hits.
-      const relevantManifests = await this.discoverManifests(history[0]);
-      console.log(
-        `[Handler] discovered ${relevantManifests.length} manifests for prompt: [${relevantManifests.map((m) => m.toolId).join(", ")}]`,
-      );
-
-      intent = await this.intentParser!.parse(
-        history,
-        userId,
-        relevantManifests,
-      );
-
-      if (intent !== null) {
-        // Manifest for this action — exact match (toolId set by LLM from the prompt)
-        manifest = relevantManifests.find((m) => m.toolId === intent!.action);
-        console.log(
-          `[Handler] manifest for action="${intent.action}" → ${manifest ? manifest.toolId : "not found in discovered set"}`,
-        );
-        // Validate completeness; throws if required fields are still missing
-        validateIntent(intent, history.length, manifest);
-      }
+      const result = await this.intentUseCase!.parseFromHistory(history, userId);
+      // Intent resolved — clear history for the next intent
+      this.intentHistory.delete(chatId);
+      return result;
     } catch (err) {
       if (err instanceof ConversationLimitError) {
         // Conversation exceeded the allowed turn limit — reset so next message starts fresh
@@ -459,11 +409,6 @@ export class TelegramAssistantHandler {
       }
       throw err;
     }
-
-    // Intent is complete and valid — clear history for the next intent
-    this.intentHistory.delete(chatId);
-
-    return { intent, manifest };
   }
 
   /**
@@ -499,21 +444,22 @@ export class TelegramAssistantHandler {
     intent: IntentPackage,
     manifest?: ToolManifest,
   ): Promise<void> {
-    if (!this.tokenRegistryService || !this.chainId) {
+    if (!this.intentUseCase) {
       await ctx.reply("Token registry not configured.");
       return;
     }
 
+    const chainId = parseInt(process.env.CHAIN_ID ?? "43113", 10);
     let fromCandidates: ITokenRecord[] = [];
     let toCandidates: ITokenRecord[] = [];
 
     if (intent.fromTokenSymbol) {
       console.log(
-        `[Handler] searching token registry for fromToken="${intent.fromTokenSymbol}" chainId=${this.chainId}`,
+        `[Handler] searching token registry for fromToken="${intent.fromTokenSymbol}" chainId=${chainId}`,
       );
-      fromCandidates = await this.tokenRegistryService.searchBySymbol(
+      fromCandidates = await this.intentUseCase.searchTokens(
         intent.fromTokenSymbol,
-        this.chainId,
+        chainId,
       );
       console.log(
         `[Handler] fromToken candidates: ${fromCandidates.length} — ${fromCandidates.map((t) => t.symbol).join(", ") || "none"}`,
@@ -528,11 +474,11 @@ export class TelegramAssistantHandler {
 
     if (intent.toTokenSymbol) {
       console.log(
-        `[Handler] searching token registry for toToken="${intent.toTokenSymbol}" chainId=${this.chainId}`,
+        `[Handler] searching token registry for toToken="${intent.toTokenSymbol}" chainId=${chainId}`,
       );
-      toCandidates = await this.tokenRegistryService.searchBySymbol(
+      toCandidates = await this.intentUseCase.searchTokens(
         intent.toTokenSymbol,
-        this.chainId,
+        chainId,
       );
       console.log(
         `[Handler] toToken candidates: ${toCandidates.length} — ${toCandidates.map((t) => t.symbol).join(", ") || "none"}`,
@@ -673,59 +619,6 @@ export class TelegramAssistantHandler {
     );
   }
 
-  /**
-   * Discovers relevant tool manifests for the given query text.
-   * Uses vector search (Pinecone) when available, falls back to ILIKE.
-   * Mirrors IntentUseCaseImpl.discoverRelevantTools.
-   */
-  private async discoverManifests(query: string): Promise<ToolManifest[]> {
-    if (!this.toolManifestDB) return [];
-
-    if (this.toolIndexService) {
-      try {
-        console.log(
-          `[Handler] vector search for manifests query="${query.slice(0, 80)}"`,
-        );
-        const hits = await this.toolIndexService.search(query, {
-          topK: 10,
-          chainId: this.chainId,
-          minScore: 0.3,
-        });
-        console.log(
-          `[Handler] vector hits: [${hits.map((h) => `${h.toolId}(${h.score.toFixed(2)})`).join(", ")}]`,
-        );
-        if (hits.length > 0) {
-          const toolIds = hits.map((h) => h.toolId);
-          const records = await this.toolManifestDB.findByToolIds(toolIds);
-          console.log(
-            `[Handler] loaded ${records.length} manifests from DB via vector hits`,
-          );
-          return records.map(deserializeManifest);
-        }
-        console.log(`[Handler] vector search: 0 hits above threshold`);
-        return [];
-      } catch (err) {
-        console.error(
-          `[Handler] vector search failed, falling back to ILIKE:`,
-          err,
-        );
-      }
-    }
-
-    // ILIKE fallback
-    console.log(
-      `[Handler] ILIKE manifest search query="${query.slice(0, 80)}"`,
-    );
-    const candidates = await this.toolManifestDB.search(query, {
-      limit: 8,
-      chainId: this.chainId,
-    });
-    console.log(
-      `[Handler] ILIKE candidates: [${candidates.map((c) => c.toolId).join(", ")}]`,
-    );
-    return candidates.map(deserializeManifest);
-  }
-
   private buildDisambiguationPrompt(
     slot: "from" | "to",
     symbol: string,
@@ -786,31 +679,27 @@ export class TelegramAssistantHandler {
       lines.push(`Category: ${manifest.category}`);
       lines.push(`Description: ${manifest.description}`);
 
-      // Build calldata preview using the manifest's step pipeline
-      try {
-        const amountRaw =
-          fromToken && intent.amountHuman
-            ? toRaw(intent.amountHuman, fromToken.decimals)
-            : undefined;
-        const enrichedIntent: IntentPackage = {
-          ...intent,
-          params: {
-            ...(intent.params ?? {}),
-            ...(fromToken && { tokenAddress: fromToken.address }),
-            ...(amountRaw !== undefined && { amountRaw }),
-          },
-        };
-        const solver = new ManifestDrivenSolver(manifest);
-        const calldata = await solver.buildCalldata(enrichedIntent, "");
+      // Build calldata preview via the use case (keeps ManifestDrivenSolver in the adapter layer)
+      const amountRaw =
+        fromToken && intent.amountHuman
+          ? toRaw(intent.amountHuman, fromToken.decimals)
+          : undefined;
+      const enrichedIntent: IntentPackage = {
+        ...intent,
+        params: {
+          ...(intent.params ?? {}),
+          ...(fromToken && { tokenAddress: fromToken.address }),
+          ...(amountRaw !== undefined && { amountRaw }),
+        },
+      };
+      const calldata = await this.intentUseCase?.previewCalldata(enrichedIntent, manifest);
+      if (calldata) {
         lines.push("", "*Calldata*");
         lines.push(`To: \`${calldata.to}\``);
         lines.push(`Value: ${calldata.value}`);
         lines.push(`\`\`\`\n${calldata.data}\n\`\`\``);
-      } catch (err) {
-        lines.push(
-          "",
-          `_Calldata preview unavailable: ${(err as Error).message}_`,
-        );
+      } else {
+        lines.push("", "_Calldata preview unavailable_");
       }
     } else {
       lines.push("", "_No tool manifest found in registry for this action._");
@@ -823,9 +712,8 @@ export class TelegramAssistantHandler {
 
   private async confirmLatestIntent(userId: string): Promise<string> {
     if (!this.intentUseCase) return "Intent execution not configured.";
-    // The intentUseCase needs access to the intent DB to find the pending intent.
-    // We expose a method that internally looks up the latest AWAITING_CONFIRMATION intent.
-    // For now, we pass a sentinel intentId that the use case understands to mean "latest".
+    // The intentUseCase internally looks up the latest AWAITING_CONFIRMATION intent
+    // when the sentinel "__latest__" is passed as the intentId.
     const result = await this.intentUseCase.confirmAndExecute({
       intentId: "__latest__",
       userId,
@@ -834,57 +722,23 @@ export class TelegramAssistantHandler {
   }
 
   private async fetchPortfolio(userId: string): Promise<string> {
-    if (
-      !this.userProfileDB ||
-      !this.tokenRegistryService ||
-      !this.viemClient ||
-      !this.chainId
-    ) {
+    if (!this.portfolioUseCase) {
       return "Portfolio service not configured.";
     }
-    const profile = await this.userProfileDB.findByUserId(userId);
-    if (!profile?.smartAccountAddress) {
+    const result = await this.portfolioUseCase.getPortfolio(userId);
+    if (!result) {
       return "No Smart Contract Account found. Please complete registration.";
     }
 
-    const scaAddress = profile.smartAccountAddress as `0x${string}`;
-    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
-
-    const ERC20_BALANCE_ABI = [
-      {
-        name: "balanceOf",
-        type: "function" as const,
-        stateMutability: "view",
-        inputs: [{ name: "account", type: "address" }],
-        outputs: [{ name: "", type: "uint256" }],
-      },
-    ] as const;
-
     const rows: string[] = [
       "💼 Portfolio",
-      `SCA: \`${scaAddress}\``,
+      `SCA: \`${result.smartAccountAddress}\``,
       "",
       "Token | Balance",
       "------|-------",
     ];
-    for (const token of tokens) {
-      let rawBalance: bigint;
-      if (token.isNative) {
-        rawBalance = await this.viemClient.publicClient.getBalance({
-          address: scaAddress,
-        });
-      } else {
-        rawBalance = (await this.viemClient.publicClient.readContract({
-          address: token.address as `0x${string}`,
-          abi: ERC20_BALANCE_ABI,
-          functionName: "balanceOf",
-          args: [scaAddress],
-        })) as bigint;
-      }
-      const humanBalance = (Number(rawBalance) / 10 ** token.decimals).toFixed(
-        6,
-      );
-      rows.push(`${token.symbol} | ${humanBalance}`);
+    for (const b of result.balances) {
+      rows.push(`${b.symbol} | ${b.balance}`);
     }
     return rows.join("\n");
   }

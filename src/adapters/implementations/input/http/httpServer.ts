@@ -3,23 +3,27 @@ import { URL } from "node:url";
 import { z } from "zod";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
+import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
 import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/input/toolRegistration.interface";
+import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/input/sessionDelegation.interface";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
-import type { ViemClientAdapter } from "../../output/blockchain/viemClient";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 
-const ERC20_BALANCE_ABI = [
-  {
-    name: "balanceOf",
-    type: "function" as const,
-    stateMutability: "view",
-    inputs: [{ name: "account", type: "address" }],
-    outputs: [{ name: "", type: "uint256" }],
-  },
-] as const;
+const PermissionSchema = z.object({
+  tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  maxAmount: z.string().regex(/^\d+$/),
+  validUntil: z.number().int().positive(),
+});
+
+const DelegationRecordSchema = z.object({
+  publicKey: z.string().min(1),
+  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  smartAccountAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  signerAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  permissions: z.array(PermissionSchema).min(1),
+  grantedAt: z.number().int().positive(),
+});
 
 export class HttpApiServer {
   private server: http.Server;
@@ -30,11 +34,9 @@ export class HttpApiServer {
     private readonly port: number,
     private readonly jwtSecret?: string,
     private readonly intentUseCase?: IIntentUseCase,
-    private readonly userProfileDB?: IUserProfileDB,
-    private readonly tokenRegistryService?: ITokenRegistryService,
-    private readonly viemClient?: ViemClientAdapter,
-    private readonly chainId?: number,
+    private readonly portfolioUseCase?: IPortfolioUseCase,
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
+    private readonly sessionDelegationUseCase?: ISessionDelegationUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -48,6 +50,16 @@ export class HttpApiServer {
     const base = `http://localhost`;
     const url = new URL(req.url ?? "/", base);
     const method = req.method?.toUpperCase();
+
+    // CORS — allow the mini app dev server and any deployed origin
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
 
     if (method === "POST" && url.pathname === "/auth/privy") {
       return this.handlePrivyLogin(req, res);
@@ -69,6 +81,12 @@ export class HttpApiServer {
     }
     if (method === "DELETE" && url.pathname.startsWith("/tools/")) {
       return this.handleDeleteTool(req, res, url);
+    }
+    if (method === 'POST' && url.pathname === '/persistent') {
+      return this.handlePostPersistent(req, res);
+    }
+    if (method === 'GET' && url.pathname === '/permissions') {
+      return this.handleGetPermissions(req, res, url);
     }
 
     res.writeHead(404);
@@ -117,48 +135,20 @@ export class HttpApiServer {
   private async handleGetPortfolio(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const userId = this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.userProfileDB || !this.tokenRegistryService || !this.viemClient || !this.chainId) {
-      return this.sendJson(res, 503, { error: "Portfolio service not available" });
-    }
+    if (!this.portfolioUseCase) return this.sendJson(res, 503, { error: "Portfolio service not available" });
 
-    const profile = await this.userProfileDB.findByUserId(userId);
-    if (!profile?.smartAccountAddress) {
-      return this.sendJson(res, 404, { error: "No Smart Contract Account found" });
-    }
-
-    const scaAddress = profile.smartAccountAddress as `0x${string}`;
-    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
-    const balances: { symbol: string; address: string; balance: string }[] = [];
-
-    for (const token of tokens) {
-      let rawBalance: bigint;
-      if (token.isNative) {
-        rawBalance = await this.viemClient.publicClient.getBalance({ address: scaAddress });
-      } else {
-        rawBalance = await this.viemClient.publicClient.readContract({
-          address: token.address as `0x${string}`,
-          abi: ERC20_BALANCE_ABI,
-          functionName: "balanceOf",
-          args: [scaAddress],
-        }) as bigint;
-      }
-      balances.push({
-        symbol: token.symbol,
-        address: token.address,
-        balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
-      });
-    }
-
-    return this.sendJson(res, 200, { smartAccountAddress: scaAddress, balances });
+    const result = await this.portfolioUseCase.getPortfolio(userId);
+    if (!result) return this.sendJson(res, 404, { error: "No Smart Contract Account found" });
+    return this.sendJson(res, 200, result);
   }
 
   private async handleGetTokens(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    if (!this.tokenRegistryService) {
+    if (!this.portfolioUseCase) {
       return this.sendJson(res, 503, { error: "Token registry not available" });
     }
     const chainIdStr = url.searchParams.get("chainId");
-    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : (this.chainId ?? 43113);
-    const tokens = await this.tokenRegistryService.listByChain(chainId);
+    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    const tokens = await this.portfolioUseCase.listTokens(chainId);
     return this.sendJson(res, 200, { tokens });
   }
 
@@ -217,6 +207,64 @@ export class HttpApiServer {
     const chainId = chainIdStr ? parseInt(chainIdStr, 10) : undefined;
     const tools = await this.toolRegistrationUseCase.list(chainId);
     return this.sendJson(res, 200, { tools });
+  }
+
+  private async handlePostPersistent(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    if (!this.sessionDelegationUseCase) {
+      return this.sendJson(res, 503, { error: 'Session delegation store not available' });
+    }
+
+    let body: unknown;
+    try {
+      body = await this.readJson(req);
+    } catch {
+      return this.sendJson(res, 400, { error: 'Invalid JSON' });
+    }
+
+    const parsed = DelegationRecordSchema.safeParse(body);
+    if (!parsed.success) {
+      return this.sendJson(res, 400, {
+        error: 'Invalid delegation record',
+        details: parsed.error.issues,
+      });
+    }
+
+    await this.sessionDelegationUseCase.save(parsed.data);
+    console.log(`[Delegation] Stored record for address ${parsed.data.address}`);
+    return this.sendJson(res, 201, { address: parsed.data.address, saved: true });
+  }
+
+  private async handleGetPermissions(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    if (!this.sessionDelegationUseCase) {
+      return this.sendJson(res, 503, { error: 'Session delegation store not available' });
+    }
+
+    const param = url.searchParams.get('public_key');
+    if (!param) {
+      return this.sendJson(res, 400, { error: 'public_key query parameter is required' });
+    }
+
+    // The query parameter must be a 42-char Ethereum address (0x + 40 hex).
+    // The frontend should pass the session key `address` field, not the raw compressed public key.
+    if (!/^0x[0-9a-fA-F]{40}$/.test(param)) {
+      return this.sendJson(res, 400, {
+        error: 'public_key must be a valid Ethereum address (0x followed by 40 hex characters)',
+      });
+    }
+
+    const record = await this.sessionDelegationUseCase.findByAddress(param);
+    if (!record) {
+      return this.sendJson(res, 404, { error: 'No delegation record found for this address' });
+    }
+
+    return this.sendJson(res, 200, record);
   }
 
   private extractUserId(req: http.IncomingMessage): string | null {

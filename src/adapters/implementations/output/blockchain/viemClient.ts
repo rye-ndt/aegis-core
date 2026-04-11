@@ -7,8 +7,19 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { avalancheFuji, avalanche } from "viem/chains";
+import type { IChainReader } from "../../../../use-cases/interface/output/blockchain/chainReader.interface";
 
-export class ViemClientAdapter {
+const ERC20_BALANCE_ABI = [
+  {
+    name: "balanceOf",
+    type: "function" as const,
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+export class ViemClientAdapter implements IChainReader {
   readonly publicClient: PublicClient;
   readonly walletClient: WalletClient | null;
   readonly chainId: number;
@@ -32,5 +43,18 @@ export class ViemClientAdapter {
     } else {
       this.walletClient = null;
     }
+  }
+
+  getNativeBalance(address: `0x${string}`): Promise<bigint> {
+    return this.publicClient.getBalance({ address });
+  }
+
+  getErc20Balance(tokenAddress: `0x${string}`, account: `0x${string}`): Promise<bigint> {
+    return this.publicClient.readContract({
+      address: tokenAddress,
+      abi: ERC20_BALANCE_ABI,
+      functionName: "balanceOf",
+      args: [account],
+    }) as Promise<bigint>;
   }
 }

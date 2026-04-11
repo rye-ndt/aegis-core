@@ -26,13 +26,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     sqlDB.telegramSessions,
     token,
     inject.getIntentUseCase(),
-    sqlDB.userProfiles,
-    inject.getTokenRegistryService(),
-    inject.getViemClient(),
-    parseInt(process.env.CHAIN_ID ?? "43113", 10),
-    inject.getIntentParser(),
-    sqlDB.toolManifests,
-    inject.getToolIndexService(),
+    inject.getPortfolioUseCase(),
   );
 
   const bot = new TelegramBot(token, handler);
@@ -44,6 +38,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     tokenCrawlerJob.stop();
     httpServer.stop();
     await bot.stop();
+    await inject.getSessionDelegationCache()?.disconnect();
     process.exit(0);
   });
 

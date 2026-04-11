@@ -35,6 +35,12 @@ import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
 import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
 import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
+import { RedisSessionDelegationCache } from '../implementations/output/cache/redis.sessionDelegation';
+import type { ISessionDelegationCache } from '../../use-cases/interface/output/cache/sessionDelegation.cache';
+import { PortfolioUseCaseImpl } from '../../use-cases/implementations/portfolio.usecase';
+import type { IPortfolioUseCase } from '../../use-cases/interface/input/portfolio.interface';
+import { SessionDelegationUseCaseImpl } from '../../use-cases/implementations/sessionDelegation.usecase';
+import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/sessionDelegation.interface';
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -56,6 +62,9 @@ export class AssistantInject {
   private _toolVectorStore: PineconeVectorStore | null = null;
   private _toolIndexService: IToolIndexService | null = null;
   private _privyAuthService: PrivyServerAuthAdapter | null = null;
+  private _sessionDelegationCache: ISessionDelegationCache | null = null;
+  private _portfolioUseCase: IPortfolioUseCase | null = null;
+  private _sessionDelegationUseCase: ISessionDelegationUseCase | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -319,21 +328,47 @@ export class AssistantInject {
     return this._authUseCase;
   }
 
+  getSessionDelegationCache(): ISessionDelegationCache | undefined {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) return undefined;
+    if (!this._sessionDelegationCache) {
+      this._sessionDelegationCache = new RedisSessionDelegationCache(redisUrl);
+    }
+    return this._sessionDelegationCache;
+  }
+
+  getPortfolioUseCase(): IPortfolioUseCase {
+    if (!this._portfolioUseCase) {
+      this._portfolioUseCase = new PortfolioUseCaseImpl(
+        this.getSqlDB().userProfiles,
+        this.getTokenRegistryService(),
+        this.getViemClient(),
+        this.getChainId(),
+      );
+    }
+    return this._portfolioUseCase;
+  }
+
+  getSessionDelegationUseCase(): ISessionDelegationUseCase | undefined {
+    const cache = this.getSessionDelegationCache();
+    if (!cache) return undefined;
+    if (!this._sessionDelegationUseCase) {
+      this._sessionDelegationUseCase = new SessionDelegationUseCaseImpl(cache);
+    }
+    return this._sessionDelegationUseCase;
+  }
+
   getHttpApiServer(): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
-    const db = this.getSqlDB();
-    const chainId = this.getChainId();
     return new HttpApiServer(
       this.getAuthUseCase(),
       null,
       port,
       process.env.JWT_SECRET,
       this.getIntentUseCase(),
-      db.userProfiles,
-      this.getTokenRegistryService(),
-      this.getViemClient(),
-      chainId,
+      this.getPortfolioUseCase(),
       this.getToolRegistrationUseCase(),
+      this.getSessionDelegationUseCase(),
     );
   }
 }
