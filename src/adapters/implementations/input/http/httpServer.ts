@@ -7,6 +7,8 @@ import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/po
 import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/input/toolRegistration.interface";
 import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/input/sessionDelegation.interface";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
+import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
+import type { ISseRegistry } from "../../../../use-cases/interface/output/sse/sseRegistry.interface";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -39,6 +41,8 @@ export class HttpApiServer {
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
     private readonly sessionDelegationUseCase?: ISessionDelegationUseCase,
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
+    private readonly sseRegistry?: ISseRegistry,
+    private readonly signingRequestUseCase?: ISigningRequestUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -96,6 +100,12 @@ export class HttpApiServer {
     if (method === 'POST' && /^\/delegation\/[^/]+\/signed$/.test(url.pathname)) {
       const id = url.pathname.split('/')[2] ?? '';
       return this.handlePostDelegationSigned(req, res, id);
+    }
+    if (method === 'GET' && url.pathname === '/events') {
+      return this.handleGetEvents(req, res, url);
+    }
+    if (method === 'POST' && url.pathname === '/sign-response') {
+      return this.handlePostSignResponse(req, res);
     }
 
     res.writeHead(404);
@@ -314,6 +324,85 @@ export class HttpApiServer {
       return this.sendJson(res, 200, { id, signed: true });
     } catch (err) {
       return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
+  }
+
+  private handleGetEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+    if (!this.sseRegistry) {
+      this.sendJson(res, 503, { error: 'SSE service not available' });
+      return;
+    }
+
+    // EventSource cannot set Authorization header — accept ?token= as fallback
+    const authHeader = req.headers.authorization;
+    let userId: string | null = null;
+    if (authHeader?.startsWith('Bearer ') && this.jwtSecret) {
+      try {
+        const payload = jwt.verify(authHeader.slice(7), this.jwtSecret) as { userId: string };
+        userId = payload.userId;
+      } catch { /* fall through to query param */ }
+    }
+    if (!userId) {
+      const token = url.searchParams.get('token');
+      if (token && this.jwtSecret) {
+        try {
+          const payload = jwt.verify(token, this.jwtSecret) as { userId: string };
+          userId = payload.userId;
+        } catch { /* invalid */ }
+      }
+    }
+
+    if (!userId) {
+      this.sendJson(res, 401, { error: 'Unauthorized' });
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+
+    this.sseRegistry.connect(userId, res);
+  }
+
+  private async handlePostSignResponse(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+    if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
+
+    let body: unknown;
+    try {
+      body = await this.readJson(req);
+    } catch {
+      return this.sendJson(res, 400, { error: 'Invalid JSON' });
+    }
+
+    const parsed = z.object({
+      requestId: z.string().min(1),
+      txHash: z.string().optional(),
+      rejected: z.boolean().optional(),
+    }).safeParse(body);
+
+    if (!parsed.success) {
+      return this.sendJson(res, 400, { error: 'Invalid body', details: parsed.error.issues });
+    }
+
+    try {
+      await this.signingRequestUseCase.resolveRequest({
+        requestId: parsed.data.requestId,
+        userId,
+        txHash: parsed.data.txHash,
+        rejected: parsed.data.rejected,
+      });
+      return this.sendJson(res, 200, { requestId: parsed.data.requestId, resolved: true });
+    } catch (err) {
+      const message = toErrorMessage(err);
+      if (message === 'SIGNING_REQUEST_NOT_FOUND') return this.sendJson(res, 404, { error: 'Request not found' });
+      if (message === 'SIGNING_REQUEST_EXPIRED') return this.sendJson(res, 410, { error: 'Request expired' });
+      if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });
+      throw err;
     }
   }
 

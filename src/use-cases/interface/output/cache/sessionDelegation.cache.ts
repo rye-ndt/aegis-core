@@ -16,5 +16,4 @@ export type DelegationRecord = {
 export interface ISessionDelegationCache {
   save(record: DelegationRecord): Promise<void>;
   findByAddress(address: string): Promise<DelegationRecord | null>;
-  disconnect(): Promise<void>;
 }

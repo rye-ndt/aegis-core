@@ -21,6 +21,7 @@ import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageTy
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
+import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 
 type OrchestratorStage = "compile" | "token_disambig";
 
@@ -69,6 +70,7 @@ export class TelegramAssistantHandler {
     private readonly delegationBuilder?: IDelegationRequestBuilder,
     private readonly telegramHandleResolver?: ITelegramHandleResolver,
     private readonly privyAuthService?: IPrivyAuthService,
+    private readonly signingRequestUseCase?: ISigningRequestUseCase,
   ) {}
 
   register(bot: Bot): void {
@@ -273,6 +275,44 @@ export class TelegramAssistantHandler {
       } catch (err) {
         console.error("Error fetching wallet:", err);
         await ctx.reply("Sorry, couldn't fetch wallet info. Please try again.");
+      }
+    });
+
+    bot.command("sign", async (ctx) => {
+      const session = await this.ensureAuthenticated(ctx.chat.id);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      if (!this.signingRequestUseCase) {
+        await ctx.reply("Signing service not configured.");
+        return;
+      }
+      // Usage: /sign <to> <value_wei> <calldata_hex> <description>
+      const parts = ctx.match?.trim().split(/\s+/) ?? [];
+      if (parts.length < 4) {
+        await ctx.reply("Usage: /sign <to> <value_wei> <calldata_hex> <description...>");
+        return;
+      }
+      const [to, value, data, ...descParts] = parts;
+      const description = descParts.join(' ');
+      try {
+        const { requestId, pushed } = await this.signingRequestUseCase.createRequest({
+          userId: session.userId,
+          chatId: ctx.chat.id,
+          to: to ?? '',
+          value: value ?? '0',
+          data: data ?? '0x',
+          description,
+        });
+        if (pushed) {
+          await ctx.reply(`Signing request sent to your app.\nRequest ID: \`${requestId}\``, { parse_mode: 'Markdown' });
+        } else {
+          await ctx.reply(`Signing request created but your app is not connected.\nRequest ID: \`${requestId}\`\n\nOpen the Aegis app and connect to receive signing requests.`, { parse_mode: 'Markdown' });
+        }
+      } catch (err) {
+        console.error("Error creating signing request:", err);
+        await ctx.reply("Failed to create signing request. Please try again.");
       }
     });
 

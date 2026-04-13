@@ -1,18 +1,11 @@
-import Redis from 'ioredis';
+import type Redis from 'ioredis';
 import type {
   ISessionDelegationCache,
   DelegationRecord,
 } from '../../../../use-cases/interface/output/cache/sessionDelegation.cache';
 
 export class RedisSessionDelegationCache implements ISessionDelegationCache {
-  private readonly redis: Redis;
-
-  constructor(redisUrl: string) {
-    this.redis = new Redis(redisUrl, { lazyConnect: false });
-    this.redis.on('error', (err: Error) => {
-      console.error('[Redis] connection error:', err.message);
-    });
-  }
+  constructor(private readonly redis: Redis) {}
 
   private key(address: string): string {
     return `delegation:${address.toLowerCase()}`;
@@ -28,7 +21,4 @@ export class RedisSessionDelegationCache implements ISessionDelegationCache {
     return JSON.parse(raw) as DelegationRecord;
   }
 
-  async disconnect(): Promise<void> {
-    await this.redis.quit();
-  }
 }

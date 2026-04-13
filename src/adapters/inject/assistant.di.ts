@@ -41,6 +41,11 @@ import { SessionDelegationUseCaseImpl } from '../../use-cases/implementations/se
 import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/sessionDelegation.interface';
 import { DelegationRequestBuilder } from '../implementations/output/delegation/delegationRequestBuilder';
 import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
+import Redis from 'ioredis';
+import { SseRegistry } from '../implementations/output/sse/sseRegistry';
+import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
+import { SigningRequestUseCaseImpl } from '../../use-cases/implementations/signingRequest.usecase';
+import type { ISigningRequestUseCase } from '../../use-cases/interface/input/signingRequest.interface';
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -64,6 +69,9 @@ export class AssistantInject {
   private _sessionDelegationUseCase: ISessionDelegationUseCase | null = null;
   private _delegationRequestBuilder: DelegationRequestBuilder | null = null;
   private _telegramHandleResolver: GramjsTelegramResolver | null = null;
+  private _redis: Redis | null = null;
+  private _sseRegistry: SseRegistry | null = null;
+  private _signingRequestUseCase: ISigningRequestUseCase | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -281,13 +289,42 @@ export class AssistantInject {
     return this._authUseCase;
   }
 
+  getRedis(): Redis | undefined {
+    const url = process.env.REDIS_URL;
+    if (!url) return undefined;
+    if (!this._redis) {
+      this._redis = new Redis(url, { lazyConnect: false });
+      this._redis.on('error', (err: Error) => console.error('[Redis]', err.message));
+    }
+    return this._redis;
+  }
+
   getSessionDelegationCache(): ISessionDelegationCache | undefined {
-    const redisUrl = process.env.REDIS_URL;
-    if (!redisUrl) return undefined;
+    if (!this.getRedis()) return undefined;
     if (!this._sessionDelegationCache) {
-      this._sessionDelegationCache = new RedisSessionDelegationCache(redisUrl);
+      this._sessionDelegationCache = new RedisSessionDelegationCache(this.getRedis()!);
     }
     return this._sessionDelegationCache;
+  }
+
+  getSseRegistry(): SseRegistry {
+    if (!this._sseRegistry) this._sseRegistry = new SseRegistry();
+    return this._sseRegistry;
+  }
+
+  getSigningRequestUseCase(
+    onResolved: (chatId: number, txHash: string | undefined, rejected: boolean) => void,
+  ): ISigningRequestUseCase | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._signingRequestUseCase) {
+      this._signingRequestUseCase = new SigningRequestUseCaseImpl(
+        new RedisSigningRequestCache(redis),
+        this.getSseRegistry(),
+        onResolved,
+      );
+    }
+    return this._signingRequestUseCase;
   }
 
   getPortfolioUseCase(): IPortfolioUseCase {
@@ -334,7 +371,7 @@ export class AssistantInject {
     return this._telegramHandleResolver;
   }
 
-  getHttpApiServer(): HttpApiServer {
+  getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
       this.getAuthUseCase(),
@@ -346,6 +383,8 @@ export class AssistantInject {
       this.getToolRegistrationUseCase(),
       this.getSessionDelegationUseCase(),
       this.getSqlDB().pendingDelegations,
+      this.getSseRegistry(),
+      signingRequestUseCase,
     );
   }
 }

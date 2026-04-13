@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { Api } from "grammy";
 import { AssistantInject } from "./adapters/inject/assistant.di";
 import { TelegramBot } from "./adapters/implementations/input/telegram/bot";
 import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/handler";
@@ -14,7 +15,17 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   const useCase = inject.getUseCase();
   const sqlDB = inject.getSqlDB();
 
-  const httpServer = inject.getHttpApiServer();
+  const tgApi = new Api(token);
+  const notifyResolved = async (chatId: number, txHash: string | undefined, rejected: boolean): Promise<void> => {
+    if (rejected) {
+      await tgApi.sendMessage(chatId, 'Transaction rejected in the app.');
+    } else {
+      await tgApi.sendMessage(chatId, `Transaction submitted.\nTx hash: \`${txHash ?? 'unknown'}\``, { parse_mode: 'Markdown' });
+    }
+  };
+
+  const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved);
+  const httpServer = inject.getHttpApiServer(signingRequestUseCase);
   httpServer.start();
 
   const tokenCrawlerJob = inject.getTokenCrawlerJob();
@@ -33,6 +44,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     inject.getDelegationRequestBuilder(),
     inject.getTelegramHandleResolver(),
     inject.getPrivyAuthService(),
+    signingRequestUseCase,
   );
 
   const bot = new TelegramBot(token, handler);
@@ -42,9 +54,10 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   process.on("SIGINT", async () => {
     console.log("\nShutting down…");
     tokenCrawlerJob.stop();
+    inject.getSseRegistry().stop();
     httpServer.stop();
     await bot.stop();
-    await inject.getSessionDelegationCache()?.disconnect();
+    await inject.getRedis()?.quit();
     process.exit(0);
   });
 
