@@ -10,6 +10,7 @@ const CompileSchema = z.object({
   missingQuestion: z.string().nullable(),
   fromTokenSymbol: z.string().nullable(),
   toTokenSymbol: z.string().nullable(),
+  telegramHandle: z.string().nullable(),
 });
 
 function stripAddressFields(inputSchema: Record<string, unknown>): Record<string, unknown> {
@@ -53,6 +54,7 @@ Instructions:
 - If any required field (from inputSchema.required) is still missing, set missingQuestion to a short, natural question to ask the user.
 - If all required fields are filled, set missingQuestion to null.
 - Do not include auto-filled fields in params output.
+- If the user mentions a Telegram handle as the recipient (a word starting with @ followed by alphanumerics/underscores/hyphens, referring to a *person*, not a protocol, token name, or brand), extract it into telegramHandle without the @ prefix (e.g. "rye-ndt"). Only set this when the intent is to send tokens TO that specific person. If no person handle is mentioned, set telegramHandle to null.
 - Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.`;
 }
 
@@ -102,6 +104,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       params,
       missingQuestion: parsed.missingQuestion,
       tokenSymbols,
+      telegramHandle: parsed.telegramHandle ?? undefined,
     };
   }
 

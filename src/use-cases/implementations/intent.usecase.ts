@@ -334,6 +334,8 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const intentPackage: IntentPackage = {
       action: manifest.toolId,
       params: params as Record<string, string | number | boolean | null>,
+      // Bridge params.recipient → top-level field consumed by erc20_transfer step executor
+      ...(params["recipient"] ? { recipient: params["recipient"] as `0x${string}` } : {}),
       confidence: 1,
       rawInput: "",
     };

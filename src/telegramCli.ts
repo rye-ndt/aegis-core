@@ -31,6 +31,8 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     sqlDB.userProfiles,
     sqlDB.pendingDelegations,
     inject.getDelegationRequestBuilder(),
+    inject.getTelegramHandleResolver(),
+    inject.getPrivyAuthService(),
   );
 
   const bot = new TelegramBot(token, handler);

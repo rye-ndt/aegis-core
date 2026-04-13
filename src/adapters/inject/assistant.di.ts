@@ -32,6 +32,7 @@ import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
 import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
 import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
+import { GramjsTelegramResolver } from "../implementations/output/telegram/gramjs.telegramResolver";
 import { RedisSessionDelegationCache } from '../implementations/output/cache/redis.sessionDelegation';
 import type { ISessionDelegationCache } from '../../use-cases/interface/output/cache/sessionDelegation.cache';
 import { PortfolioUseCaseImpl } from '../../use-cases/implementations/portfolio.usecase';
@@ -62,6 +63,7 @@ export class AssistantInject {
   private _portfolioUseCase: IPortfolioUseCase | null = null;
   private _sessionDelegationUseCase: ISessionDelegationUseCase | null = null;
   private _delegationRequestBuilder: DelegationRequestBuilder | null = null;
+  private _telegramHandleResolver: GramjsTelegramResolver | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -314,6 +316,22 @@ export class AssistantInject {
       this._delegationRequestBuilder = new DelegationRequestBuilder();
     }
     return this._delegationRequestBuilder;
+  }
+
+  getTelegramHandleResolver(): GramjsTelegramResolver | undefined {
+    const apiId = parseInt(process.env.TG_API_ID ?? "", 10);
+    const apiHash = process.env.TG_API_HASH;
+    const botToken = process.env.TELEGRAM_BOT_TOKEN;
+    if (!apiId || !apiHash || !botToken) return undefined;
+    if (!this._telegramHandleResolver) {
+      this._telegramHandleResolver = new GramjsTelegramResolver(
+        apiId,
+        apiHash,
+        botToken,
+        process.env.TG_SESSION ?? "",
+      );
+    }
+    return this._telegramHandleResolver;
   }
 
   getHttpApiServer(): HttpApiServer {

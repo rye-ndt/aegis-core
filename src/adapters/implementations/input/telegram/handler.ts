@@ -18,6 +18,9 @@ import type { IPendingDelegationDB } from "../../../../use-cases/interface/outpu
 import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
 import type { ZerodevMessage } from "../../../../use-cases/interface/output/delegation/zerodevMessage.types";
 import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
+import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 
 type OrchestratorStage = "compile" | "token_disambig";
 
@@ -37,6 +40,7 @@ interface OrchestratorSession {
   partialParams: Record<string, unknown>;
   tokenSymbols: { from?: string; to?: string };
   disambiguation?: DisambiguationPending;
+  recipientTelegramUserId?: string;
 }
 
 export class TelegramAssistantHandler {
@@ -46,6 +50,8 @@ export class TelegramAssistantHandler {
     { userId: string; expiresAtEpoch: number }
   >();
   private orchestratorSessions = new Map<number, OrchestratorSession>();
+  private pendingRecipientNotifications = new Map<string, { telegramUserId: string }>();
+  private botRef: Bot | null = null;
 
   constructor(
     private readonly assistantUseCase: IAssistantUseCase,
@@ -61,9 +67,13 @@ export class TelegramAssistantHandler {
     private readonly userProfileRepo?: IUserProfileDB,
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
     private readonly delegationBuilder?: IDelegationRequestBuilder,
+    private readonly telegramHandleResolver?: ITelegramHandleResolver,
+    private readonly privyAuthService?: IPrivyAuthService,
   ) {}
 
   register(bot: Bot): void {
+    this.botRef = bot;
+
     bot.catch((err) => {
       console.error("Bot error:", err.message);
       if (err.error) console.error("Cause:", err.error);
@@ -188,6 +198,13 @@ export class TelegramAssistantHandler {
       try {
         const result = await this.confirmLatestIntent(session.userId);
         await this.safeSend(ctx, result);
+
+        // Notify recipient if this was a P2P transfer
+        const pending = this.pendingRecipientNotifications.get(session.userId);
+        if (pending) {
+          this.pendingRecipientNotifications.delete(session.userId);
+          await this.notifyRecipient(pending.telegramUserId, session.userId);
+        }
       } catch (err) {
         console.error("Error confirming intent:", err);
         await ctx.reply("Sorry, something went wrong. Please try again.");
@@ -406,6 +423,17 @@ export class TelegramAssistantHandler {
             tokenSymbols: compileResult.tokenSymbols,
           };
 
+          // Resolve @handle → telegramUserId → walletAddress
+          if (compileResult.telegramHandle) {
+            const resolved = await this.resolveRecipientHandle(
+              ctx,
+              chatId,
+              compileResult.telegramHandle,
+              newSession,
+            );
+            if (!resolved) return; // error already replied, session cleared
+          }
+
           if (compileResult.missingQuestion) {
             this.orchestratorSessions.set(chatId, newSession);
             await ctx.reply(compileResult.missingQuestion);
@@ -438,6 +466,17 @@ export class TelegramAssistantHandler {
             ...existing.tokenSymbols,
             ...compileResult.tokenSymbols,
           };
+
+          // Resolve @handle if newly detected in this continuation message
+          if (compileResult.telegramHandle && !existing.recipientTelegramUserId) {
+            const resolved = await this.resolveRecipientHandle(
+              ctx,
+              chatId,
+              compileResult.telegramHandle,
+              existing,
+            );
+            if (!resolved) return;
+          }
 
           if (compileResult.missingQuestion) {
             this.orchestratorSessions.set(chatId, existing);
@@ -709,6 +748,13 @@ export class TelegramAssistantHandler {
       return;
     }
 
+    // Store pending notification before clearing session
+    if (session.recipientTelegramUserId) {
+      this.pendingRecipientNotifications.set(userId, {
+        telegramUserId: session.recipientTelegramUserId,
+      });
+    }
+
     this.orchestratorSessions.delete(chatId);
     await this.safeSend(
       ctx,
@@ -833,6 +879,76 @@ export class TelegramAssistantHandler {
     }
     lines.push("", "Reply with the number.");
     return lines.join("\n");
+  }
+
+  private async resolveRecipientHandle(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    handle: string,
+    session: OrchestratorSession,
+  ): Promise<boolean> {
+    if (!this.telegramHandleResolver || !this.privyAuthService) {
+      await ctx.reply("Sorry, peer-to-peer transfers are not configured on this server.");
+      this.orchestratorSessions.delete(chatId);
+      return false;
+    }
+
+    // Step 1: Resolve handle → Telegram user ID
+    await ctx.reply(`Resolving @${handle}...`);
+    let telegramUserId: string;
+    try {
+      telegramUserId = await this.telegramHandleResolver.resolveHandle(handle);
+      console.log(`[Handler] resolved @${handle} → telegramUserId=${telegramUserId}`);
+      await ctx.reply(`@${handle} → Telegram ID: \`${telegramUserId}\``);
+    } catch (err) {
+      const isNotFound = err instanceof TelegramHandleNotFoundError;
+      const msg = isNotFound
+        ? `Sorry, I couldn't find a Telegram user for @${handle}. Double-check the handle and try again.`
+        : `Sorry, something went wrong resolving @${handle}. Please try again.`;
+      if (!isNotFound) console.error(`[Handler] resolveHandle error for @${handle}:`, err);
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(msg);
+      return false;
+    }
+
+    // Step 2: Resolve Telegram user ID → EVM wallet address
+    await ctx.reply(`Finding wallet for Telegram user \`${telegramUserId}\`...`);
+    let recipientAddress: string;
+    try {
+      recipientAddress = await this.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
+      console.log(`[Handler] resolved telegramUserId=${telegramUserId} → wallet=${recipientAddress}`);
+      await ctx.reply(`Recipient wallet: \`${recipientAddress}\``);
+    } catch (err) {
+      console.error(`[Handler] Privy wallet resolution failed for telegramUserId=${telegramUserId}:`, err);
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(`Sorry, I couldn't set up a wallet for @${handle}. Please try again later.`);
+      return false;
+    }
+
+    // Inject resolved address and store Telegram user ID for post-confirm notification
+    session.partialParams.recipient = recipientAddress;
+    session.recipientTelegramUserId = telegramUserId;
+    return true;
+  }
+
+  private async notifyRecipient(
+    recipientTelegramUserId: string,
+    _senderUserId: string,
+  ): Promise<void> {
+    if (!this.botRef) return;
+    try {
+      await this.botRef.api.sendMessage(
+        parseInt(recipientTelegramUserId, 10),
+        "You have received tokens in your wallet! Open the Aegis app to view your balance.",
+      );
+      console.log(`[Handler] notified recipient telegramUserId=${recipientTelegramUserId}`);
+    } catch (err) {
+      // Recipient hasn't started the bot — best-effort only
+      console.warn(
+        `[Handler] could not notify recipient telegramUserId=${recipientTelegramUserId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   private async confirmLatestIntent(userId: string): Promise<string> {

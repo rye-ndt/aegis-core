@@ -4,6 +4,7 @@ export interface CompileResult {
   params: Record<string, unknown>;
   missingQuestion: string | null;
   tokenSymbols: { from?: string; to?: string };
+  telegramHandle?: string; // e.g. "rye-ndt" (without @), if user mentions a person handle as recipient
 }
 
 export interface ISchemaCompiler {
