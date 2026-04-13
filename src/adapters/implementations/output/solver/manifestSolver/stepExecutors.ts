@@ -42,7 +42,8 @@ export async function executeHttpGet(
   const url = resolve(step.url, ctx);
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`HTTP GET ${url} failed: ${response.status} ${response.statusText}`);
+    const body = await response.text().catch(() => "");
+    throw new Error(`HTTP GET ${url} failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`);
   }
   const data: unknown = await response.json();
   return applyExtract(data, step.extract);
@@ -57,13 +58,15 @@ export async function executeHttpPost(
   for (const [key, value] of Object.entries(step.body)) {
     resolvedBody[key] = typeof value === "string" ? resolve(value, ctx) : value;
   }
+  console.log(`[stepExecutors] http_post ${url}`, JSON.stringify(resolvedBody));
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(resolvedBody),
   });
   if (!response.ok) {
-    throw new Error(`HTTP POST ${url} failed: ${response.status} ${response.statusText}`);
+    const body = await response.text().catch(() => "");
+    throw new Error(`HTTP POST ${url} failed: ${response.status} ${response.statusText}${body ? ` — ${body}` : ""}`);
   }
   const data: unknown = await response.json();
   return applyExtract(data, step.extract);

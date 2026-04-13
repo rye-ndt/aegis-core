@@ -92,6 +92,20 @@
       "when": 1775780765990,
       "tag": "0013_dynamic_tool_registry",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1775800000000,
+      "tag": "0014_privy_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1775810000000,
+      "tag": "0015_pending_delegations",
+      "breakpoints": true
     }
   ]
 }

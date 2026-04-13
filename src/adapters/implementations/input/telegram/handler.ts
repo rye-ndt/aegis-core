@@ -122,10 +122,16 @@ export class TelegramAssistantHandler {
         await ctx.reply(
           "Authenticated with Google via Privy. You can now use the Onchain Agent.",
         );
-      } catch {
-        await ctx.reply(
-          "Invalid or expired token. Open the Aegis mini app and copy a fresh token.",
-        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[Auth] /auth loginWithPrivy failed:', err);
+        if (msg === 'PRIVY_NOT_CONFIGURED') {
+          await ctx.reply('Authentication service is not configured on this server. Contact the admin.');
+        } else {
+          await ctx.reply(
+            "Invalid or expired token. Open the Aegis mini app, tap Copy to get a fresh token, then try again.",
+          );
+        }
       }
     });
 
@@ -280,7 +286,8 @@ export class TelegramAssistantHandler {
         await ctx.reply(
           "Authenticated with Google. You can now use the Onchain Agent.",
         );
-      } catch {
+      } catch (err) {
+        console.error('[Auth] web_app_data loginWithPrivy failed:', err);
         await ctx.reply(
           "Authentication failed. Please try again from the mini app.",
         );
@@ -681,38 +688,33 @@ export class TelegramAssistantHandler {
     resolvedFrom: ITokenRecord | null,
     resolvedTo: ITokenRecord | null,
   ): Promise<void> {
-    // DEBUG: show resolved context without hitting any external API
-    const { extractAddressFields } = await import("../../../../helpers/schema/addressFields");
-    const addressFields = extractAddressFields(session.manifest.inputSchema as Record<string, unknown>);
-    const [fromField, toField] = addressFields;
-    const debugParams: Record<string, unknown> = { ...session.partialParams };
-    if (resolvedFrom && fromField) debugParams[fromField] = resolvedFrom.address;
-    if (resolvedTo && toField) debugParams[toField] = resolvedTo.address;
     const amountHuman = session.partialParams.amountHuman as string | undefined;
-    if (amountHuman && resolvedFrom) {
-      debugParams.amountRaw = toRaw(amountHuman, resolvedFrom.decimals);
+
+    let calldata: { to: string; data: string; value: string };
+    try {
+      calldata = await this.intentUseCase!.buildRequestBody({
+        manifest: session.manifest,
+        params: session.partialParams,
+        resolvedFrom,
+        resolvedTo,
+        userId,
+        amountHuman,
+      });
+    } catch (err) {
+      console.error("[Handler] buildRequestBody failed:", err);
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(
+        `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
     }
 
-    const debugLines = [
-      "🔍 DEBUG — resolved request context",
-      "",
-      `Tool: ${session.manifest.toolId}`,
-      `From token: ${resolvedFrom ? `${resolvedFrom.symbol} (${resolvedFrom.address})` : "none"}`,
-      `To token:   ${resolvedTo   ? `${resolvedTo.symbol} (${resolvedTo.address})`   : "none"}`,
-      "",
-      "Params passed to solver:",
-      "```",
-      JSON.stringify(debugParams, null, 2),
-      "```",
-      "",
-      "Manifest steps (template bodies):",
-      "```",
-      JSON.stringify(session.manifest.steps, null, 2),
-      "```",
-    ];
-
     this.orchestratorSessions.delete(chatId);
-    await this.safeSend(ctx, debugLines.join("\n"));
+    await this.safeSend(
+      ctx,
+      this.buildConfirmationMessage(session, calldata, resolvedFrom, resolvedTo),
+    );
+    await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
   }
 
   private async tryCreateDelegationRequest(
