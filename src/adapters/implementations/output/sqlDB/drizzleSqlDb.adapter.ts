@@ -10,6 +10,7 @@ import { DrizzleTokenRegistryRepo } from "./repositories/tokenRegistry.repo";
 import { DrizzleIntentRepo } from "./repositories/intent.repo";
 import { DrizzleIntentExecutionRepo } from "./repositories/intentExecution.repo";
 import { DrizzleToolManifestRepo } from "./repositories/toolManifest.repo";
+import { DrizzleCommandToolMappingRepo } from "./repositories/commandToolMapping.repo";
 import { DrizzleFeeRecordRepo } from "./repositories/feeRecord.repo";
 import { DrizzlePendingDelegationRepo } from "./repositories/pendingDelegation.repo";
 
@@ -25,6 +26,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly toolManifests: DrizzleToolManifestRepo;
   readonly feeRecords: DrizzleFeeRecordRepo;
   readonly pendingDelegations: DrizzlePendingDelegationRepo;
+  readonly commandToolMappings: DrizzleCommandToolMappingRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -39,6 +41,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.toolManifests = new DrizzleToolManifestRepo(this.db);
     this.feeRecords = new DrizzleFeeRecordRepo(this.db);
     this.pendingDelegations = new DrizzlePendingDelegationRepo(this.db);
+    this.commandToolMappings = new DrizzleCommandToolMappingRepo(this.db);
   }
 
 }

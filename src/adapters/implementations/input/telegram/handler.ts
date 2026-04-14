@@ -1,35 +1,35 @@
 import type { Bot } from "grammy";
 import { InlineKeyboard } from "grammy";
-import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { toRaw } from "../../../../helpers/bigint";
-import { extractAddressFields } from "../../../../helpers/schema/addressFields";
-import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
-import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
-import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
-import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
-import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
-import {
-  type ITokenRecord,
-  type ToolManifest,
-  type ResolvedPayload,
-  DisambiguationRequiredError,
-} from "../../../../use-cases/interface/input/intent.interface";
-import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
 import {
   INTENT_COMMAND,
   parseIntentCommand,
 } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
+import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
+import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
+import { extractAddressFields } from "../../../../helpers/schema/addressFields";
+import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
+import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
+import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
+import {
+  type ITokenRecord,
+  type ResolvedPayload,
+  type ToolManifest,
+  DisambiguationRequiredError,
+} from "../../../../use-cases/interface/input/intent.interface";
+import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
+import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
 import type { ZerodevMessage } from "../../../../use-cases/interface/output/delegation/zerodevMessage.types";
-import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
+import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
+import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
+import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
-import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
-import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
-import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
 
 // ── Session state types ────────────────────────────────────────────────────────
 

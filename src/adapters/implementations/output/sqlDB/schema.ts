@@ -151,3 +151,11 @@ export const feeRecords = pgTable("fee_records", {
   chainId: integer("chain_id").notNull(),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
+
+// Explicit command → tool mapping (bare word stored, e.g. "buy" not "/buy")
+export const commandToolMappings = pgTable("command_tool_mappings", {
+  command:        text("command").primaryKey(),        // bare word, e.g. "buy"
+  toolId:         text("tool_id").notNull(),           // references tool_manifests.tool_id (soft)
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
