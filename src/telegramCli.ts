@@ -45,6 +45,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     inject.getTelegramHandleResolver(),
     inject.getPrivyAuthService(),
     signingRequestUseCase,
+    inject.getResolverEngine(),
   );
 
   const bot = new TelegramBot(token, handler);

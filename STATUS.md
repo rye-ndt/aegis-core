@@ -170,6 +170,77 @@ IntentUseCaseImpl.confirmAndExecute()
   6. notifyRecipient() if P2P transfer
 ```
 
+## `bot.on("message:text")` — how it works
+
+Every plain text message the user types goes through a single handler. Here's what happens, step by step.
+
+### 0. Auth gate
+The first thing the handler does is call `ensureAuthenticated`. It checks an in-memory cache; if the session isn't cached it hits the DB. If no valid session is found, it replies "please authenticate" and stops.
+
+### 1. Typing indicator
+`ctx.replyWithChatAction("typing")` is sent so the user sees the "..." bubble while the bot works.
+
+### 2. Check for an in-progress session (`OrchestratorSession`)
+The handler looks up `orchestratorSessions` (an in-memory map keyed by `chatId`).
+
+- **If the session is in `token_disambig` stage** — the user is being asked to pick between multiple tokens with the same symbol. The message is treated as a selection (number or exact symbol string). Once the user picks, the flow resumes from where disambiguation interrupted it. → `handleDisambiguationReply()`
+
+- **If there is no active session** — this is a fresh request. The handler checks whether the text starts with a recognized intent command (e.g. `/buy`, `/swap`, `/send`).
+  - **Command found** → `startCommandSession()` — deterministic pipeline (see phases below).
+  - **No command** → `startLegacySession()` — the LLM first classifies the intent type, then selects a tool, then compiles.
+
+- **If the session is in `compile` stage** — the bot previously asked a follow-up question and is waiting for the user's answer. The new message is appended to the conversation and the compile loop continues. → `continueCompileLoop()`
+
+### Phase 1 — Tool selection
+The handler calls `intentUseCase.selectTool()` to find the right registered tool for this intent (e.g. the "swap" tool manifest). If no tool is found, it falls back to a plain LLM chat reply.
+
+### Phase 2 — Schema compilation (LLM extraction loop)
+`intentUseCase.compileSchema()` sends the conversation so far to the LLM, which extracts all required parameters from the tool's input schema (amount, token symbols, recipient, etc.). If anything is still missing, the LLM generates a follow-up question that is sent back to the user. The session is saved and the handler exits — it will resume on the next message. This loop runs up to `MAX_TOOL_ROUNDS` (default 10) before giving up.
+
+During compilation:
+- If a `@telegramHandle` was mentioned as the recipient, `resolveRecipientHandle()` looks it up via MTProto and maps it to an EVM address.
+- Extracted values are accumulated in `session.partialParams` and `session.resolverFields`.
+
+### Phase 2→3 transition — validation
+After the LLM says it has everything, `getMissingRequiredFields()` does a deterministic check against the manifest schema. If anything is still missing, another question is generated (bypassing the LLM extraction cost).
+
+### Phase 3 — Token / recipient resolution
+Two paths, depending on whether the tool manifest declares `requiredFields` (dual-schema):
+
+- **Dual-schema path** — `runResolutionPhase()` calls `resolverEngine.resolve()` which converts human-readable values (e.g. `"USDC"`, `"0.5"`) into exact on-chain data (contract address, raw wei amount, recipient wallet). If a token symbol matches multiple contracts, a `DisambiguationRequiredError` is thrown — the handler catches it, saves the candidates, switches the session to `token_disambig`, and asks the user to pick one.
+- **Legacy path** — `resolveTokensAndFinish()` does a simple `searchTokens()` lookup by symbol (same disambiguation flow applies).
+
+### Phase 4 — Confirmation prompt
+`buildAndShowConfirmationFromResolved()` (dual-schema) or `buildAndShowConfirmation()` (legacy) assembles the calldata via `intentUseCase.buildRequestBody()`, then sends the user a human-readable transaction preview with the exact parameters and calldata. The session is cleared from memory. The user must send `/confirm` to execute or `/cancel` to abort.
+
+### Summary diagram
+
+```
+message:text
+  │
+  ├─ token_disambig? ──→ handleDisambiguationReply → (resume phase 3 or 4)
+  │
+  ├─ no session + command → startCommandSession
+  │                              └─→ compileSchema (Phase 2)
+  ├─ no session + free text → startLegacySession
+  │                              └─→ classifyIntent → selectTool → compileSchema (Phase 2)
+  │
+  └─ compile stage → continueCompileLoop (Phase 2 resumed)
+                          │
+                          ▼
+                    finishCompileOrResolve (Phase 2→3)
+                          │
+                    ┌─────┴──────┐
+              dual-schema    legacy
+                    │              │
+             runResolutionPhase   resolveTokensAndFinish (Phase 3)
+                    │              │
+                    └──────┬───────┘
+                           ▼
+                  buildAndShowConfirmation (Phase 4)
+                  → user sees tx preview → /confirm or /cancel
+```
+
 ## Database schema
 
 | Table               | Purpose                                                                            |

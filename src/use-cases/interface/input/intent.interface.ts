@@ -9,6 +9,8 @@ export type { ToolManifest };
 export type { ITokenRecord };
 export type { CompileResult };
 export { MissingFieldsError, InvalidFieldError, ConversationLimitError } from './intent.errors';
+export { DisambiguationRequiredError } from '../output/resolver.interface';
+export type { ResolvedPayload } from '../output/resolver.interface';
 
 export interface IntentExecutionResult {
   intentId: string;
