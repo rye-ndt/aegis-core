@@ -5,6 +5,7 @@ export enum INTENT_COMMAND {
   CONVERT = "/convert",
   TOPUP   = "/topup",
   DCA     = "/dca",
+  SEND    = "/send",
 }
 
 /**

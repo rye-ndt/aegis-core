@@ -39,56 +39,97 @@ export class ResolverEngineImpl implements IResolverEngine {
     const toSymbol = resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL];
 
     if (fromSymbol) {
-      console.log(
-        `[ResolverEngine] resolving fromToken symbol="${fromSymbol}" chainId=${chainId}`,
-      );
-      const candidates = await this.tokenRegistry.searchBySymbol(
-        fromSymbol,
-        chainId,
-      );
-      if (candidates.length === 0) {
-        throw new Error(
-          `Token not found: ${fromSymbol}. Make sure it is supported on this chain.`,
+      // After disambiguation the slot is patched to a 0x address — use exact
+      // address lookup; otherwise do a symbol search that may need disambiguation.
+      if (/^0x[0-9a-fA-F]{40}$/.test(fromSymbol)) {
+        console.log(
+          `[ResolverEngine] fromToken is a 0x address, resolving by address: ${fromSymbol}`,
+        );
+        fromToken = await this.resolveTokenByAddress(fromSymbol, chainId);
+        if (!fromToken) {
+          throw new Error(
+            `Token address ${fromSymbol} not found in registry for chainId ${chainId}.`,
+          );
+        }
+        console.log(
+          `[ResolverEngine] fromToken resolved (address) → ${fromToken.symbol} (${fromToken.address})`,
+        );
+      } else {
+        console.log(
+          `[ResolverEngine] resolving fromToken symbol="${fromSymbol}" chainId=${chainId}`,
+        );
+        const candidates = await this.tokenRegistry.searchBySymbol(
+          fromSymbol,
+          chainId,
+        );
+        if (candidates.length === 0) {
+          throw new Error(
+            `Token not found: ${fromSymbol}. Make sure it is supported on this chain.`,
+          );
+        }
+        if (candidates.length > 1) {
+          throw new DisambiguationRequiredError("from", fromSymbol, candidates);
+        }
+        fromToken = candidates[0]!;
+        console.log(
+          `[ResolverEngine] fromToken resolved (symbol) → ${fromToken.symbol} (${fromToken.address})`,
         );
       }
-      if (candidates.length > 1) {
-        throw new DisambiguationRequiredError("from", fromSymbol, candidates);
-      }
-      fromToken = candidates[0]!;
-      console.log(
-        `[ResolverEngine] fromToken resolved → ${fromToken.symbol} (${fromToken.address})`,
-      );
     }
 
     if (toSymbol) {
-      console.log(
-        `[ResolverEngine] resolving toToken symbol="${toSymbol}" chainId=${chainId}`,
-      );
-      const candidates = await this.tokenRegistry.searchBySymbol(
-        toSymbol,
-        chainId,
-      );
-      if (candidates.length === 0) {
-        throw new Error(
-          `Token not found: ${toSymbol}. Make sure it is supported on this chain.`,
+      if (/^0x[0-9a-fA-F]{40}$/.test(toSymbol)) {
+        console.log(
+          `[ResolverEngine] toToken is a 0x address, resolving by address: ${toSymbol}`,
+        );
+        toToken = await this.resolveTokenByAddress(toSymbol, chainId);
+        if (!toToken) {
+          throw new Error(
+            `Token address ${toSymbol} not found in registry for chainId ${chainId}.`,
+          );
+        }
+        console.log(
+          `[ResolverEngine] toToken resolved (address) → ${toToken.symbol} (${toToken.address})`,
+        );
+      } else {
+        console.log(
+          `[ResolverEngine] resolving toToken symbol="${toSymbol}" chainId=${chainId}`,
+        );
+        const candidates = await this.tokenRegistry.searchBySymbol(
+          toSymbol,
+          chainId,
+        );
+        if (candidates.length === 0) {
+          throw new Error(
+            `Token not found: ${toSymbol}. Make sure it is supported on this chain.`,
+          );
+        }
+        if (candidates.length > 1) {
+          throw new DisambiguationRequiredError("to", toSymbol, candidates);
+        }
+        toToken = candidates[0]!;
+        console.log(
+          `[ResolverEngine] toToken resolved (symbol) → ${toToken.symbol} (${toToken.address})`,
         );
       }
-      if (candidates.length > 1) {
-        throw new DisambiguationRequiredError("to", toSymbol, candidates);
-      }
-      toToken = candidates[0]!;
-      console.log(
-        `[ResolverEngine] toToken resolved → ${toToken.symbol} (${toToken.address})`,
-      );
     }
 
-    // ── Amount resolution — requires fromToken decimals ──────────────────────
+    // ── Amount resolver ───────────────────────────────────────────────────────
+    // Requires:  readableAmount  (e.g. "5", "0.25") from the LLM
+    //            fromToken       already resolved above so decimals are known
+    //
+    // Converts human-readable amount → raw integer string using BigInt
+    // arithmetic (no floating-point loss at any decimal precision).
     let rawAmount: string | null = null;
     const humanAmount = resolverFields[RESOLVER_FIELD.READABLE_AMOUNT];
     if (humanAmount && fromToken) {
       rawAmount = toRaw(humanAmount, fromToken.decimals);
       console.log(
-        `[ResolverEngine] amount "${humanAmount}" → rawAmount="${rawAmount}" (${fromToken.decimals} decimals)`,
+        `[ResolverEngine] amount "${humanAmount}" → rawAmount="${rawAmount}" (decimals=${fromToken.decimals}, token=${fromToken.symbol})`,
+      );
+    } else if (humanAmount && !fromToken) {
+      console.warn(
+        `[ResolverEngine] readableAmount="${humanAmount}" provided but fromToken is null — rawAmount cannot be computed yet`,
       );
     }
 

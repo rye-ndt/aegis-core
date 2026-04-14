@@ -43,16 +43,16 @@ function buildSystemPrompt(
 
   console.log(`[OpenAISchemaCompiler] addressFields=${JSON.stringify(addressFields)} visibleSchema=${JSON.stringify(visibleSchema)}`);
 
-  let dualSchemaBlock = "";
   const hasDualSchema =
     manifest.requiredFields &&
     typeof manifest.requiredFields === "object" &&
     Object.keys(manifest.requiredFields).length > 0;
 
-  if (hasDualSchema) {
-    dualSchemaBlock = `
+  const resolverFieldsInstruction = hasDualSchema
+    ? `
 
 This tool uses the dual-schema extraction model.
+You MUST populate resolverFieldsJson — do NOT set it to null.
 Extract values for these resolver fields from the conversation:
 ${JSON.stringify(manifest.requiredFields, null, 2)}
 
@@ -60,8 +60,10 @@ Emit them as a JSON-encoded string in resolverFieldsJson.
 Keys must exactly match the requiredFields property names
 (e.g. "fromTokenSymbol", "toTokenSymbol", "readableAmount", "userHandle").
 Only include keys where the user has explicitly provided a value.
-Use null for resolverFieldsJson if no resolver fields were found.`;
-  }
+If the user provided some but not all values, still emit the ones you found.
+Only use null for resolverFieldsJson if the user provided absolutely no resolver field values.`
+    : `
+- Set resolverFieldsJson to null (this tool does not use the dual-schema model).`;
 
   return `You are a field extractor for a DeFi transaction agent.
 
@@ -81,8 +83,7 @@ Instructions:
 - If all required fields are filled, set missingQuestion to null.
 - Do not include auto-filled fields in params output.
 - If the user mentions a Telegram handle as the recipient (a word starting with @ followed by alphanumerics/underscores/hyphens, referring to a *person*, not a protocol, token name, or brand), extract it into telegramHandle without the @ prefix (e.g. "rye-ndt"). Only set this when the intent is to send tokens TO that specific person. If no person handle is mentioned, set telegramHandle to null.
-- Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.
-- Set resolverFieldsJson to null if this tool does not use the dual-schema model.${dualSchemaBlock}`;
+- Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.${resolverFieldsInstruction}`;
 }
 
 export class OpenAISchemaCompiler implements ISchemaCompiler {

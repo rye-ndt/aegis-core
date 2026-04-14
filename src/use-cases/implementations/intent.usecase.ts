@@ -345,7 +345,11 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       params[toField ?? "toTokenAddress"] = resolvedTo.address;
     }
 
-    const humanAmount = amountHuman ?? (params.amountHuman as string | undefined);
+    const humanAmount =
+      amountHuman ??
+      (params.amountHuman as string | undefined) ??
+      (params.readableAmount as string | undefined);
+
     if (humanAmount && resolvedFrom) {
       params.amountRaw = toRaw(humanAmount, resolvedFrom.decimals);
     }

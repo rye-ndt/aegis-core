@@ -136,6 +136,58 @@ psql \d command_tool_mappings  ✅  table confirmed created
 ### Verification
 - `command_tool_mappings` table now exists in DB with correct schema
 - `db:generate` reports no further schema drift
-- `db:migrate` reports all applied
+- `db:migrate` reports all applied---
 
+## [2026-04-14] Fix: erc20_transfer crash — missing amountRaw
 
+### Root cause (two compounding bugs)
+
+**Bug 1 — Prompt ordering in `openai.schemaCompiler.ts`**
+The LLM instruction `"Set resolverFieldsJson to null if this tool does not use the dual-schema model."` appeared immediately before the dual-schema block. The model pattern-matched on the null instruction and emitted `resolverFieldsJson=null` even for tools that DO have `requiredFields`. This left `session.resolverFields={}`, so the resolver engine got no inputs and returned `rawAmount=null`.
+
+**Bug 2 — `buildRequestBody` field name mismatch in `intent.usecase.ts`**
+The function looked for `params.amountHuman` but the LLM populates `params.readableAmount` (matching the tool's inputSchema field name). Even on the legacy path, `amountRaw` was never computed, causing the step executor to throw.
+
+### Fixes applied
+
+| File | Change |
+|---|---|
+| `src/adapters/implementations/output/intentParser/openai.schemaCompiler.ts` | Rewrote prompt to use a conditional `resolverFieldsInstruction`: dual-schema tools get a strong "You MUST populate resolverFieldsJson" instruction; non-dual-schema tools get the null instruction. Removed the ambiguous combined sentence. |
+| `src/use-cases/implementations/intent.usecase.ts` | `buildRequestBody`: `humanAmount` fallback chain now also checks `params.readableAmount` before giving up. |
+| `src/helpers/enums/intentCommand.enum.ts` | Added `SEND = "/send"` (user change). |
+
+### Commands executed
+```
+npx tsc --noEmit  ✅  (0 errors)
+```
+
+---
+
+## [2026-04-14] Amount Resolver — `resolverEngine.ts`
+
+### What was added
+The resolver engine already had a `readableAmount → rawAmount` conversion at line 85, but it had a hidden dependency: it could only run if `fromToken` was resolved from a symbol in the **same call**. After disambiguation, `resolverFields[FROM_TOKEN_SYMBOL]` is patched to a `0x…` address, so `searchBySymbol` returned no results → `fromToken = null` → `rawAmount = null`.
+
+### Changes (one file)
+
+**`src/adapters/implementations/output/resolver/resolverEngine.ts`**
+
+Both `fromToken` and `toToken` resolution now branch on whether the value looks like a 0x address:
+- **Symbol path** (unchanged): `tokenRegistry.searchBySymbol()` → disambiguation if >1 result
+- **Address path** (new): if value matches `/^0x[0-9a-fA-F]{40}$/`, resolve via `resolveTokenByAddress()` (existing exact-match helper) — guarantees `fromToken.decimals` are available even after disambiguation
+
+Amount resolver (was already there conceptually, now always has decimals after the above fix):
+```ts
+// RESOLVER_FIELD.READABLE_AMOUNT → rawAmount
+const humanAmount = resolverFields[RESOLVER_FIELD.READABLE_AMOUNT];
+if (humanAmount && fromToken) {
+  rawAmount = toRaw(humanAmount, fromToken.decimals);
+  // e.g. "5" + decimals=6 → "5000000"
+}
+```
+Added a warn log when `readableAmount` is present but `fromToken` is still null, so the failure is easier to trace.
+
+### Commands executed
+```
+npx tsc --noEmit  ✅  (0 errors)
+```
