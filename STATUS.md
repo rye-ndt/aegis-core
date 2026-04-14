@@ -1,16 +1,13 @@
 # Onchain Agent — Status
 
-> Last updated: 2026-04-13 (SSE signing requests — committed)
+## Things I should add in
 
----
+- proactive agent: ask the agent to gather market sentiment daily, analyze it and give out the verdict for today' investment status
+- temporarily disable the RAG. we need speed and correctness. enable it once we have multiple tools
 
 ## What it is
 
 A non-custodial, intent-based AI trading agent on Avalanche, backed by Hexagonal Architecture (Ports & Adapters). Users authenticate via Privy (Google OAuth), link their session with `/auth <token>` in Telegram. The agent parses natural language intents, simulates them via ERC-4337 UserOperations, and submits them on-chain via Session Keys. Users can send tokens to any Telegram handle — the bot resolves the handle to an EVM wallet via MTProto + Privy. The frontend connects via SSE to receive signing requests pushed from the bot. Use cases depend only on interfaces; adapters never depend on each other; DI wiring lives entirely in `src/adapters/inject/`.
-
-**Phase 1 (purge) ✅ — Phase 2 (infrastructure) ✅ — Phase 3 (execution engine) ✅ — Phase 4 (token crawler) ✅ — Phase 5 (token enrichment) ✅ — Phase 6 (dynamic tool registry) ✅ — Phase 7 (tool RAG indexing) 🚧 — Phase 8 (SSE signing requests) ✅ — Phase 9 (P2P Telegram transfers) ✅**
-
----
 
 ## Tech stack
 
@@ -25,8 +22,6 @@ A non-custodial, intent-based AI trading agent on Avalanche, backed by Hexagonal
 | DI         | Manual container in `src/adapters/inject/`                     |
 | Web search | Tavily (`@tavily/core`)                                        |
 | Cache      | Redis via `ioredis` (shared client)                            |
-
----
 
 ## Project structure
 
@@ -107,58 +102,49 @@ src/
     └── uuid.ts                    # newUuid() — v4
 ```
 
----
-
 ## Contract Registry (Avalanche Fuji Testnet)
 
 - **AegisToken (Proxy):** `0x8839ecFB1BefD232d5Fcf55C223BDD78bc3A2f69`
 - **RewardController (Proxy):** `0x519092C2185E4209B43d3ea40cC34D39978073A7`
-- **SessionKeyFactory:** `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443`
-- **SessionKeyManager:** `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291`
-- **ERC-4337 EntryPoint:** `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789`
-
----
 
 ## HTTP API
 
 Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
-| Method   | Route                       | Auth               | Purpose                                                          |
-| -------- | --------------------------- | ------------------ | ---------------------------------------------------------------- |
-| `POST`   | `/auth/privy`               | None               | Verify Privy token → `{ token, expiresAtEpoch, userId }`         |
-| `GET`    | `/intent/:intentId`         | JWT                | Fetch intent + execution status                                  |
-| `GET`    | `/portfolio`                | JWT                | On-chain balances for user's SCA                                 |
-| `GET`    | `/tokens?chainId=`          | None               | List verified tokens for a chain                                 |
-| `POST`   | `/tools`                    | JWT                | Register a dynamic tool manifest                                 |
-| `GET`    | `/tools`                    | None               | List active tool manifests                                       |
-| `DELETE` | `/tools/:toolId`            | JWT                | Deactivate a tool manifest                                       |
-| `POST`   | `/persistent`               | None               | Persist a session delegation record (from frontend)              |
-| `GET`    | `/permissions?public_key=`  | None               | Fetch delegation record by session key address                   |
-| `GET`    | `/delegation/pending`       | JWT                | Fetch latest pending delegation for the user                     |
-| `POST`   | `/delegation/:id/signed`    | JWT                | Mark a pending delegation as signed                              |
-| `GET`    | `/events`                   | JWT (or `?token=`) | SSE stream — receives `sign_request` events                      |
-| `POST`   | `/sign-response`            | JWT                | Submit txHash (or rejection) for a signing request               |
+| Method   | Route                      | Auth               | Purpose                                                  |
+| -------- | -------------------------- | ------------------ | -------------------------------------------------------- |
+| `POST`   | `/auth/privy`              | None               | Verify Privy token → `{ token, expiresAtEpoch, userId }` |
+| `GET`    | `/intent/:intentId`        | JWT                | Fetch intent + execution status                          |
+| `GET`    | `/portfolio`               | JWT                | On-chain balances for user's SCA                         |
+| `GET`    | `/tokens?chainId=`         | None               | List verified tokens for a chain                         |
+| `POST`   | `/tools`                   | JWT                | Register a dynamic tool manifest                         |
+| `GET`    | `/tools`                   | None               | List active tool manifests                               |
+| `DELETE` | `/tools/:toolId`           | JWT                | Deactivate a tool manifest                               |
+| `POST`   | `/persistent`              | None               | Persist a session delegation record (from frontend)      |
+| `GET`    | `/permissions?public_key=` | None               | Fetch delegation record by session key address           |
+| `GET`    | `/delegation/pending`      | JWT                | Fetch latest pending delegation for the user             |
+| `POST`   | `/delegation/:id/signed`   | JWT                | Mark a pending delegation as signed                      |
+| `GET`    | `/events`                  | JWT (or `?token=`) | SSE stream — receives `sign_request` events              |
+| `POST`   | `/sign-response`           | JWT                | Submit txHash (or rejection) for a signing request       |
 
 ---
 
 ## Telegram commands
 
-| Command                                | Behavior                                                                            |
-| -------------------------------------- | ----------------------------------------------------------------------------------- |
-| `/start`                               | Welcome message; prompts authentication if not logged in                            |
-| `/auth <privy_token>`                  | Verifies Privy token, links userId to Telegram chat                                 |
-| `/logout`                              | Deletes session from DB + cache                                                     |
-| `/new`                                 | Clears active conversation ID (starts fresh thread)                                 |
-| `/history`                             | Shows last 10 messages of the current conversation                                  |
-| `/confirm`                             | Executes the latest `AWAITING_CONFIRMATION` intent                                  |
-| `/cancel`                              | Aborts the pending intent (no tx submitted)                                         |
-| `/portfolio`                           | Shows on-chain token balances for user's SCA                                        |
-| `/wallet`                              | Shows SCA address + session key status                                              |
-| `/sign <to> <value_wei> <data> <desc>` | Creates a signing request; pushes via SSE to the connected frontend                 |
-| _(text)_                               | Chat with the agent; supports tool calls (web search, executeIntent, getPortfolio)  |
-| _(photo)_                              | Base64 → vision chat with caption as message                                        |
-
----
+| Command                                | Behavior                                                                           |
+| -------------------------------------- | ---------------------------------------------------------------------------------- |
+| `/start`                               | Welcome message; prompts authentication if not logged in                           |
+| `/auth <privy_token>`                  | Verifies Privy token, links userId to Telegram chat                                |
+| `/logout`                              | Deletes session from DB + cache                                                    |
+| `/new`                                 | Clears active conversation ID (starts fresh thread)                                |
+| `/history`                             | Shows last 10 messages of the current conversation                                 |
+| `/confirm`                             | Executes the latest `AWAITING_CONFIRMATION` intent                                 |
+| `/cancel`                              | Aborts the pending intent (no tx submitted)                                        |
+| `/portfolio`                           | Shows on-chain token balances for user's SCA                                       |
+| `/wallet`                              | Shows SCA address + session key status                                             |
+| `/sign <to> <value_wei> <data> <desc>` | Creates a signing request; pushes via SSE to the connected frontend                |
+| _(text)_                               | Chat with the agent; supports tool calls (web search, executeIntent, getPortfolio) |
+| _(photo)_                              | Base64 → vision chat with caption as message                                       |
 
 ## Intent execution flow
 
@@ -184,109 +170,59 @@ IntentUseCaseImpl.confirmAndExecute()
   6. notifyRecipient() if P2P transfer
 ```
 
----
-
 ## Database schema
 
-| Table               | Purpose                                                                             |
-| ------------------- | ----------------------------------------------------------------------------------- |
+| Table               | Purpose                                                                            |
+| ------------------- | ---------------------------------------------------------------------------------- |
 | `users`             | Account record — hashed password, email, status                                    |
-| `telegram_sessions` | Links Telegram chat ID → userId with JWT expiry                                     |
-| `conversations`     | Per-user threads — title, status                                                    |
-| `messages`          | All turns (user / assistant / tool / assistant_tool_call)                           |
-| `user_profiles`     | SCA address, session key address + scope + status                                   |
-| `token_registry`    | Symbol → address + decimals per chainId; `deployer_address` nullable                |
-| `intents`           | Parsed intent records with status lifecycle                                         |
-| `intent_executions` | Per-attempt execution records with userOpHash + txHash                              |
+| `telegram_sessions` | Links Telegram chat ID → userId with JWT expiry                                    |
+| `conversations`     | Per-user threads — title, status                                                   |
+| `messages`          | All turns (user / assistant / tool / assistant_tool_call)                          |
+| `user_profiles`     | SCA address, session key address + scope + status                                  |
+| `token_registry`    | Symbol → address + decimals per chainId; `deployer_address` nullable               |
+| `intents`           | Parsed intent records with status lifecycle                                        |
+| `intent_executions` | Per-attempt execution records with userOpHash + txHash                             |
 | `tool_manifests`    | Dynamic tool registry — toolId slug, category, steps (JSON), inputSchema, chainIds |
-| `fee_records`       | Audit trail of every 1% protocol fee collected                                      |
-
----
-
-## Roadmap
-
-### Phases 1–6 ✅
-1. **Purge** — removed dead features (RLHF, vector memory, calendar/gmail, TTS, personality)
-2. **Infrastructure** — AnthropicOrchestrator, SCA deployment on register, Drizzle DB, ViemClientAdapter
-3. **Execution engine** — IntentParser, TokenRegistry, SolverRegistry, RpcSimulator, UserOpBuilder, 1% fee
-4. **Token crawler** — PangolinTokenCrawler, TokenIngestionUseCase, TokenCrawlerJob (15 min interval)
-5. **Token enrichment** — ILIKE symbol search, token disambiguation flow, toRaw() BigInt helper
-6. **Dynamic tool registry** — ToolManifest Zod schemas, ManifestDrivenSolver, step pipeline, RAG discovery
-
-### Phase 7 — Tool RAG Indexing 🚧
-Replaces ILIKE `discoverRelevantTools()` with Pinecone semantic search; falls back to ILIKE on error.
-
-- [x] `IToolIndexService` port, `PineconeToolIndexService`, `ToolRegistrationUseCase` auto-indexes on create/deactivate
-- [x] `IntentUseCaseImpl.discoverRelevantTools()` — vector-first, ILIKE fallback
-- [ ] `DrizzleToolManifestRepo.findByToolIds()` — batch fetch impl (in progress)
-- [ ] `PineconeVectorStore.delete(id)` (in progress)
-- [ ] `assistant.di.ts` wiring (in progress)
-
-### Phase 8 — SSE Signing Requests ✅
-- [x] `ISseRegistry` port + `SseRegistry` — in-memory userId→res map, 25s heartbeat
-- [x] `ISigningRequestCache` + `RedisSigningRequestCache` — `sign_req:{id}`, 5 min TTL
-- [x] `SigningRequestUseCaseImpl` — create → push → resolve → `onResolved` callback
-- [x] `GET /events` (SSE, `?token=` fallback) + `POST /sign-response`
-- [x] `/sign` Telegram command; shared Redis client; Redis lifecycle centralized in DI
-
-### Phase 9 — P2P Telegram Transfers ✅
-User says "send 10 USDC to @alice" — handle resolved to EVM address, injected as `recipient` param.
-
-- [x] `ITelegramHandleResolver` port + `GramjsTelegramResolver` (MTProto `contacts.ResolveUsername`)
-- [x] `IPrivyAuthService.getOrCreateWalletByTelegramId()` — provisions wallet for recipient if absent
-- [x] Two-step resolution in handler: MTProto → telegramUserId → Privy EVM wallet
-- [x] `pendingRecipientNotifications` map — best-effort `sendMessage` to recipient after `/confirm`
-
-### Next steps
-- [ ] Finish Phase 7 wiring (`DrizzleToolManifestRepo.findByToolIds`, `PineconeVectorStore.delete`, `assistant.di.ts`)
-- [ ] Seed token registry — AVAX/WAVAX/USDC for Fuji
-- [ ] Fill `.env` — `ANTHROPIC_API_KEY`, `BOT_PRIVATE_KEY`, `AVAX_BUNDLER_URL`, `TREASURY_ADDRESS`, `BOT_ADDRESS`
-- [ ] Integration test: register → SCA deployed → "Swap 100 USDC for AVAX" → /confirm → txHash
-
----
+| `fee_records`       | Audit trail of every 1% protocol fee collected                                     |
 
 ## Environment variables
 
-| Variable                         | Default                               | Purpose                                        |
-| -------------------------------- | ------------------------------------- | ---------------------------------------------- |
-| `DATABASE_URL`                   | `postgres://localhost/aether_intent`  | PostgreSQL connection string                   |
-| `ANTHROPIC_API_KEY`              | —                                     | Anthropic API key                              |
-| `ANTHROPIC_MODEL`                | `claude-sonnet-4-6`                   | LLM model                                     |
-| `TELEGRAM_BOT_TOKEN`             | —                                     | Telegram bot token                             |
-| `JWT_SECRET`                     | —                                     | JWT signing secret                             |
-| `JWT_EXPIRES_IN`                 | `7d`                                  | Token lifetime                                 |
-| `HTTP_API_PORT`                  | `4000`                                | HTTP API port                                  |
-| `TAVILY_API_KEY`                 | —                                     | Tavily web search key                          |
-| `MAX_TOOL_ROUNDS`                | `10`                                  | Max agentic tool rounds per chat               |
-| `AVAX_RPC_URL`                   | Fuji public RPC                       | Avalanche RPC endpoint                         |
-| `AVAX_BUNDLER_URL`               | —                                     | ERC-4337 bundler (e.g. Pimlico)                |
-| `BOT_PRIVATE_KEY`                | —                                     | Session key signer private key                 |
-| `BOT_ADDRESS`                    | —                                     | On-chain address of BOT_PRIVATE_KEY            |
-| `TREASURY_ADDRESS`               | —                                     | Platform fee recipient wallet                  |
-| `CHAIN_ID`                       | `43113`                               | 43113 = Fuji, 43114 = Mainnet                  |
-| `ENTRY_POINT_ADDRESS`            | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789` | ERC-4337 EntryPoint                  |
-| `JARVIS_ACCOUNT_FACTORY_ADDRESS` | `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443` | SCA factory                          |
-| `SESSION_KEY_MANAGER_ADDRESS`    | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291` | Session key manager                  |
-| `REWARD_CONTROLLER_ADDRESS`      | —                                     | Rewards contract for ClaimRewardsSolver        |
-| `TRADERJOE_API_URL`              | `https://api.traderjoexyz.com`        | TraderJoe quote API                            |
-| `PANGOLIN_TOKEN_LIST_URL`        | Pangolin GitHub raw URL               | Override Pangolin token list source            |
-| `TOKEN_CRAWLER_INTERVAL_MS`      | `900000` (15 min)                     | Token list re-fetch interval                   |
-| `REDIS_URL`                      | —                                     | ioredis connection string (shared client)      |
-| `TG_API_ID`                      | —                                     | Telegram MTProto API ID (my.telegram.org)      |
-| `TG_API_HASH`                    | —                                     | Telegram MTProto API hash                      |
-| `TG_SESSION`                     | `""`                                  | Persisted gramjs session; logged on first connect |
-| `PRIVY_APP_ID`                   | —                                     | Privy app ID for server-side auth              |
-| `PRIVY_APP_SECRET`               | —                                     | Privy app secret                               |
-
----
+| Variable                         | Default                                      | Purpose                                           |
+| -------------------------------- | -------------------------------------------- | ------------------------------------------------- |
+| `DATABASE_URL`                   | `postgres://localhost/aether_intent`         | PostgreSQL connection string                      |
+| `ANTHROPIC_API_KEY`              | —                                            | Anthropic API key                                 |
+| `ANTHROPIC_MODEL`                | `claude-sonnet-4-6`                          | LLM model                                         |
+| `TELEGRAM_BOT_TOKEN`             | —                                            | Telegram bot token                                |
+| `JWT_SECRET`                     | —                                            | JWT signing secret                                |
+| `JWT_EXPIRES_IN`                 | `7d`                                         | Token lifetime                                    |
+| `HTTP_API_PORT`                  | `4000`                                       | HTTP API port                                     |
+| `TAVILY_API_KEY`                 | —                                            | Tavily web search key                             |
+| `MAX_TOOL_ROUNDS`                | `10`                                         | Max agentic tool rounds per chat                  |
+| `AVAX_RPC_URL`                   | Fuji public RPC                              | Avalanche RPC endpoint                            |
+| `AVAX_BUNDLER_URL`               | —                                            | ERC-4337 bundler (e.g. Pimlico)                   |
+| `BOT_PRIVATE_KEY`                | —                                            | Session key signer private key                    |
+| `BOT_ADDRESS`                    | —                                            | On-chain address of BOT_PRIVATE_KEY               |
+| `TREASURY_ADDRESS`               | —                                            | Platform fee recipient wallet                     |
+| `CHAIN_ID`                       | `43113`                                      | 43113 = Fuji, 43114 = Mainnet                     |
+| `ENTRY_POINT_ADDRESS`            | `0x5FF137D4b0FDCD49DcA30c7CF57E578a026d2789` | ERC-4337 EntryPoint                               |
+| `JARVIS_ACCOUNT_FACTORY_ADDRESS` | `0x160E43075D9912FFd7006f7Ad14f4781C7f0D443` | SCA factory                                       |
+| `SESSION_KEY_MANAGER_ADDRESS`    | `0xA5264f7599B031fDD523Ab66f6B6FA86ce56d291` | Session key manager                               |
+| `REWARD_CONTROLLER_ADDRESS`      | —                                            | Rewards contract for ClaimRewardsSolver           |
+| `TRADERJOE_API_URL`              | `https://api.traderjoexyz.com`               | TraderJoe quote API                               |
+| `PANGOLIN_TOKEN_LIST_URL`        | Pangolin GitHub raw URL                      | Override Pangolin token list source               |
+| `TOKEN_CRAWLER_INTERVAL_MS`      | `900000` (15 min)                            | Token list re-fetch interval                      |
+| `REDIS_URL`                      | —                                            | ioredis connection string (shared client)         |
+| `TG_API_ID`                      | —                                            | Telegram MTProto API ID (my.telegram.org)         |
+| `TG_API_HASH`                    | —                                            | Telegram MTProto API hash                         |
+| `TG_SESSION`                     | `""`                                         | Persisted gramjs session; logged on first connect |
+| `PRIVY_APP_ID`                   | —                                            | Privy app ID for server-side auth                 |
+| `PRIVY_APP_SECRET`               | —                                            | Privy app secret                                  |
 
 ## Coding conventions
 
 - IDs: `newUuid()` from `helpers/uuid`. Timestamps: `newCurrentUTCEpoch()` from `helpers/time/dateTime` — **seconds**, not ms.
 - Comments only where code cannot explain itself (unit mismatches, crash-recovery edges). No JSDoc, no section dividers.
 - DB facade: `assistant.di.ts` holds a `DrizzleSqlDB` concrete instance; repos are properties on it.
-
----
 
 ## Patterns
 
