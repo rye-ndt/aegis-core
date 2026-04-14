@@ -11,8 +11,15 @@ import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/po
 import {
   type ITokenRecord,
   type ToolManifest,
+  type ResolvedPayload,
+  DisambiguationRequiredError,
 } from "../../../../use-cases/interface/input/intent.interface";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
+import {
+  INTENT_COMMAND,
+  parseIntentCommand,
+} from "../../../../helpers/enums/intentCommand.enum";
+import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
@@ -22,6 +29,9 @@ import type { ITelegramHandleResolver } from "../../../../use-cases/interface/ou
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
+import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
+
+// ── Session state types ────────────────────────────────────────────────────────
 
 type OrchestratorStage = "compile" | "token_disambig";
 
@@ -39,10 +49,21 @@ interface OrchestratorSession {
   messages: string[];
   manifest: ToolManifest;
   partialParams: Record<string, unknown>;
+  /** Legacy: token symbols extracted by the LLM for non-dual-schema tools. */
   tokenSymbols: { from?: string; to?: string };
+  /** Dual-schema: human-readable values keyed by RESOLVER_FIELD enum — fed to ResolverEngine. */
+  resolverFields: Partial<Record<string, string>>;
+  /** Counts LLM extraction turns; aborts at MAX_TOOL_ROUNDS. */
+  compileTurns: number;
+  /** Counts disambiguation reply attempts; aborts at 10. */
+  disambigTurns: number;
+  /** Populated after Phase 3 resolution; consumed in Phase 4. */
+  resolved?: ResolvedPayload;
   disambiguation?: DisambiguationPending;
   recipientTelegramUserId?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
@@ -51,7 +72,10 @@ export class TelegramAssistantHandler {
     { userId: string; expiresAtEpoch: number }
   >();
   private orchestratorSessions = new Map<number, OrchestratorSession>();
-  private pendingRecipientNotifications = new Map<string, { telegramUserId: string }>();
+  private pendingRecipientNotifications = new Map<
+    string,
+    { telegramUserId: string }
+  >();
   private botRef: Bot | null = null;
 
   constructor(
@@ -71,7 +95,10 @@ export class TelegramAssistantHandler {
     private readonly telegramHandleResolver?: ITelegramHandleResolver,
     private readonly privyAuthService?: IPrivyAuthService,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
+    private readonly resolverEngine?: IResolverEngine,
   ) {}
+
+  // ── Bot registration ─────────────────────────────────────────────────────────
 
   register(bot: Bot): void {
     this.botRef = bot;
@@ -136,9 +163,11 @@ export class TelegramAssistantHandler {
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        console.error('[Auth] /auth loginWithPrivy failed:', err);
-        if (msg === 'PRIVY_NOT_CONFIGURED') {
-          await ctx.reply('Authentication service is not configured on this server. Contact the admin.');
+        console.error("[Auth] /auth loginWithPrivy failed:", err);
+        if (msg === "PRIVY_NOT_CONFIGURED") {
+          await ctx.reply(
+            "Authentication service is not configured on this server. Contact the admin.",
+          );
         } else {
           await ctx.reply(
             "Invalid or expired token. Open the Aegis mini app, tap Copy to get a fresh token, then try again.",
@@ -201,7 +230,6 @@ export class TelegramAssistantHandler {
         const result = await this.confirmLatestIntent(session.userId);
         await this.safeSend(ctx, result);
 
-        // Notify recipient if this was a P2P transfer
         const pending = this.pendingRecipientNotifications.get(session.userId);
         if (pending) {
           this.pendingRecipientNotifications.delete(session.userId);
@@ -288,27 +316,35 @@ export class TelegramAssistantHandler {
         await ctx.reply("Signing service not configured.");
         return;
       }
-      // Usage: /sign <to> <value_wei> <calldata_hex> <description>
       const parts = ctx.match?.trim().split(/\s+/) ?? [];
       if (parts.length < 4) {
-        await ctx.reply("Usage: /sign <to> <value_wei> <calldata_hex> <description...>");
+        await ctx.reply(
+          "Usage: /sign <to> <value_wei> <calldata_hex> <description...>",
+        );
         return;
       }
       const [to, value, data, ...descParts] = parts;
-      const description = descParts.join(' ');
+      const description = descParts.join(" ");
       try {
-        const { requestId, pushed } = await this.signingRequestUseCase.createRequest({
-          userId: session.userId,
-          chatId: ctx.chat.id,
-          to: to ?? '',
-          value: value ?? '0',
-          data: data ?? '0x',
-          description,
-        });
+        const { requestId, pushed } =
+          await this.signingRequestUseCase.createRequest({
+            userId: session.userId,
+            chatId: ctx.chat.id,
+            to: to ?? "",
+            value: value ?? "0",
+            data: data ?? "0x",
+            description,
+          });
         if (pushed) {
-          await ctx.reply(`Signing request sent to your app.\nRequest ID: \`${requestId}\``, { parse_mode: 'Markdown' });
+          await ctx.reply(
+            `Signing request sent to your app.\nRequest ID: \`${requestId}\``,
+            { parse_mode: "Markdown" },
+          );
         } else {
-          await ctx.reply(`Signing request created but your app is not connected.\nRequest ID: \`${requestId}\`\n\nOpen the Aegis app and connect to receive signing requests.`, { parse_mode: 'Markdown' });
+          await ctx.reply(
+            `Signing request created but your app is not connected.\nRequest ID: \`${requestId}\`\n\nOpen the Aegis app and connect to receive signing requests.`,
+            { parse_mode: "Markdown" },
+          );
         }
       } catch (err) {
         console.error("Error creating signing request:", err);
@@ -344,7 +380,7 @@ export class TelegramAssistantHandler {
           "Authenticated with Google. You can now use the Onchain Agent.",
         );
       } catch (err) {
-        console.error('[Auth] web_app_data loginWithPrivy failed:', err);
+        console.error("[Auth] web_app_data loginWithPrivy failed:", err);
         await ctx.reply(
           "Authentication failed. Please try again from the mini app.",
         );
@@ -381,6 +417,7 @@ export class TelegramAssistantHandler {
       }
     });
 
+    // ── Primary text handler ────────────────────────────────────────────────
     bot.on("message:text", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
@@ -389,11 +426,6 @@ export class TelegramAssistantHandler {
       }
 
       await ctx.replyWithChatAction("typing");
-
-      if (!this.intentUseCase) {
-        await ctx.reply("Intent service not configured.");
-        return;
-      }
 
       const chatId = ctx.chat.id;
       const text = ctx.message.text.trim();
@@ -406,7 +438,7 @@ export class TelegramAssistantHandler {
       try {
         const existing = this.orchestratorSessions.get(chatId);
 
-        // Route token_disambig replies
+        // ── Disambiguation reply ────────────────────────────────────────────
         if (existing?.stage === "token_disambig") {
           console.log(
             `[Handler] token_disambig active, routing to handleDisambiguationReply`,
@@ -421,110 +453,29 @@ export class TelegramAssistantHandler {
           return;
         }
 
-        // First message of this intent — classify + select tool
+        // ── Phase 1: Routing ────────────────────────────────────────────────
+        const command = parseIntentCommand(text);
+
         if (!existing) {
-          console.log(`[Handler] no session, classifying intent...`);
-          const intentType = await this.intentUseCase.classifyIntent([text]);
-          console.log(`[Handler] intentType=${intentType}`);
-
-          if (
-            intentType === USER_INTENT_TYPE.RETRIEVE_BALANCE ||
-            intentType === USER_INTENT_TYPE.UNKNOWN
-          ) {
-            await this.handleFallbackChat(ctx, chatId, text, userId);
-            return;
+          if (command) {
+            // Command-driven path (new deterministic pipeline)
+            console.log(`[Handler] command=${command}, starting command session`);
+            await this.startCommandSession(ctx, chatId, userId, command, text);
+          } else {
+            // Legacy free-form text path
+            console.log(`[Handler] no session, no command — legacy path`);
+            await this.startLegacySession(ctx, chatId, userId, text);
           }
-
-          const toolResult = await this.intentUseCase.selectTool(intentType, [
-            text,
-          ]);
-          if (!toolResult) {
-            console.log(`[Handler] no tool found, falling back to chat`);
-            await this.handleFallbackChat(ctx, chatId, text, userId);
-            return;
-          }
-
-          console.log(
-            `[Handler] selected tool=${toolResult.toolId}, compiling schema...`,
-          );
-          const compileResult = await this.intentUseCase.compileSchema({
-            manifest: toolResult.manifest,
-            messages: [text],
-            userId,
-            partialParams: {},
-          });
-
-          const newSession: OrchestratorSession = {
-            stage: "compile",
-            conversationId: this.conversations.get(chatId) ?? "",
-            messages: [text],
-            manifest: toolResult.manifest,
-            partialParams: compileResult.params,
-            tokenSymbols: compileResult.tokenSymbols,
-          };
-
-          // Resolve @handle → telegramUserId → walletAddress
-          if (compileResult.telegramHandle) {
-            const resolved = await this.resolveRecipientHandle(
-              ctx,
-              chatId,
-              compileResult.telegramHandle,
-              newSession,
-            );
-            if (!resolved) return; // error already replied, session cleared
-          }
-
-          if (compileResult.missingQuestion) {
-            this.orchestratorSessions.set(chatId, newSession);
-            await ctx.reply(compileResult.missingQuestion);
-            return;
-          }
-
-          await this.finishCompileOrAsk(ctx, chatId, userId, newSession);
           return;
         }
 
-        // Continuing compile loop
+        // ── Continuing compile loop (Phase 2) ──────────────────────────────
         if (existing.stage === "compile") {
           existing.messages.push(text);
           console.log(
             `[Handler] compile stage, messages=${existing.messages.length}`,
           );
-
-          const compileResult = await this.intentUseCase.compileSchema({
-            manifest: existing.manifest,
-            messages: existing.messages,
-            userId,
-            partialParams: existing.partialParams,
-          });
-
-          existing.partialParams = {
-            ...existing.partialParams,
-            ...compileResult.params,
-          };
-          existing.tokenSymbols = {
-            ...existing.tokenSymbols,
-            ...compileResult.tokenSymbols,
-          };
-
-          // Resolve @handle if newly detected in this continuation message
-          if (compileResult.telegramHandle && !existing.recipientTelegramUserId) {
-            const resolved = await this.resolveRecipientHandle(
-              ctx,
-              chatId,
-              compileResult.telegramHandle,
-              existing,
-            );
-            if (!resolved) return;
-          }
-
-          if (compileResult.missingQuestion) {
-            this.orchestratorSessions.set(chatId, existing);
-            await ctx.reply(compileResult.missingQuestion);
-            return;
-          }
-
-          await this.finishCompileOrAsk(ctx, chatId, userId, existing);
+          await this.continueCompileLoop(ctx, chatId, userId, existing);
         }
       } catch (err) {
         console.error("[Handler] error handling message:", err);
@@ -533,53 +484,227 @@ export class TelegramAssistantHandler {
     });
   }
 
-  private async handleFallbackChat(
+  // ── Phase 1 helpers ──────────────────────────────────────────────────────────
+
+  /** Phase 1 — command-driven session start (new deterministic pipeline). */
+  private async startCommandSession(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
-    text: string,
     userId: string,
+    command: INTENT_COMMAND,
+    text: string,
   ): Promise<void> {
-    const conversationId = this.conversations.get(chatId);
-    console.log(
-      `[Handler] fallback chat userId=${userId} conversationId=${conversationId ?? "new"}`,
+    if (!this.intentUseCase) {
+      await ctx.reply("Intent service not configured.");
+      return;
+    }
+
+    // selectTool uses keyword search; the command string (e.g. "/buy") is passed
+    // as the intentType query alongside the full message for context.
+    const toolResult = await this.intentUseCase.selectTool(
+      command as unknown as USER_INTENT_TYPE,
+      [text],
     );
-    const response = await this.assistantUseCase.chat({
+
+    if (!toolResult) {
+      await ctx.reply(
+        `No tool is registered for ${command}. Contact the admin.`,
+      );
+      return;
+    }
+
+    console.log(
+      `[Handler] command=${command} → tool=${toolResult.toolId}, compiling schema...`,
+    );
+
+    const compileResult = await this.intentUseCase.compileSchema({
+      manifest: toolResult.manifest,
+      messages: [text],
       userId,
-      conversationId,
-      message: text,
+      partialParams: {},
     });
-    this.conversations.set(chatId, response.conversationId);
+
+    const newSession: OrchestratorSession = {
+      stage: "compile",
+      conversationId: this.conversations.get(chatId) ?? "",
+      messages: [text],
+      manifest: toolResult.manifest,
+      partialParams: compileResult.params,
+      tokenSymbols: compileResult.tokenSymbols,
+      resolverFields: compileResult.resolverFields ?? {},
+      compileTurns: 1,
+      disambigTurns: 0,
+    };
+
+    if (compileResult.telegramHandle && !newSession.recipientTelegramUserId) {
+      const resolved = await this.resolveRecipientHandle(
+        ctx,
+        chatId,
+        compileResult.telegramHandle,
+        newSession,
+      );
+      if (!resolved) return;
+    }
+
+    if (compileResult.missingQuestion) {
+      this.orchestratorSessions.set(chatId, newSession);
+      await ctx.reply(compileResult.missingQuestion);
+      return;
+    }
+
+    await this.finishCompileOrResolve(ctx, chatId, userId, newSession);
+  }
+
+  /** Phase 1 — free-form text session start (legacy classify→compile path). */
+  private async startLegacySession(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    text: string,
+  ): Promise<void> {
+    if (!this.intentUseCase) {
+      await ctx.reply("Intent service not configured.");
+      return;
+    }
+
+    const intentType = await this.intentUseCase.classifyIntent([text]);
+    console.log(`[Handler] intentType=${intentType}`);
+
+    if (
+      intentType === USER_INTENT_TYPE.RETRIEVE_BALANCE ||
+      intentType === USER_INTENT_TYPE.UNKNOWN
+    ) {
+      await this.handleFallbackChat(ctx, chatId, text, userId);
+      return;
+    }
+
+    const toolResult = await this.intentUseCase.selectTool(intentType, [text]);
+    if (!toolResult) {
+      console.log(`[Handler] no tool found, falling back to chat`);
+      await this.handleFallbackChat(ctx, chatId, text, userId);
+      return;
+    }
+
     console.log(
-      `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}]`,
+      `[Handler] selected tool=${toolResult.toolId}, compiling schema...`,
     );
-    await this.safeSend(ctx, response.reply);
+
+    const compileResult = await this.intentUseCase.compileSchema({
+      manifest: toolResult.manifest,
+      messages: [text],
+      userId,
+      partialParams: {},
+    });
+
+    const newSession: OrchestratorSession = {
+      stage: "compile",
+      conversationId: this.conversations.get(chatId) ?? "",
+      messages: [text],
+      manifest: toolResult.manifest,
+      partialParams: compileResult.params,
+      tokenSymbols: compileResult.tokenSymbols,
+      resolverFields: compileResult.resolverFields ?? {},
+      compileTurns: 1,
+      disambigTurns: 0,
+    };
+
+    if (compileResult.telegramHandle && !newSession.recipientTelegramUserId) {
+      const resolved = await this.resolveRecipientHandle(
+        ctx,
+        chatId,
+        compileResult.telegramHandle,
+        newSession,
+      );
+      if (!resolved) return;
+    }
+
+    if (compileResult.missingQuestion) {
+      this.orchestratorSessions.set(chatId, newSession);
+      await ctx.reply(compileResult.missingQuestion);
+      return;
+    }
+
+    await this.finishCompileOrResolve(ctx, chatId, userId, newSession);
   }
 
-  private getMissingRequiredFields(
-    manifest: ToolManifest,
-    partialParams: Record<string, unknown>,
-  ): string[] {
-    const inputSchema = manifest.inputSchema as Record<string, unknown>;
-    const required = (inputSchema.required as string[] | undefined) ?? [];
-    const addressFields = new Set(extractAddressFields(inputSchema));
-    return required.filter(
-      (field) =>
-        !addressFields.has(field) &&
-        (partialParams[field] === undefined ||
-          partialParams[field] === null ||
-          partialParams[field] === ""),
-    );
-  }
+  // ── Phase 2 — LLM extraction loop ───────────────────────────────────────────
 
-  private async finishCompileOrAsk(
+  private async continueCompileLoop(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
     userId: string,
     session: OrchestratorSession,
   ): Promise<void> {
-    const missing = this.getMissingRequiredFields(session.manifest, session.partialParams);
+    const MAX_COMPILE_TURNS = parseInt(
+      process.env.MAX_TOOL_ROUNDS ?? "10",
+      10,
+    );
+
+    if (session.compileTurns >= MAX_COMPILE_TURNS) {
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(
+        "I couldn't collect all required information after several attempts. Please start over with a new request.",
+      );
+      return;
+    }
+
+    session.compileTurns += 1;
+
+    const compileResult = await this.intentUseCase!.compileSchema({
+      manifest: session.manifest,
+      messages: session.messages,
+      userId,
+      partialParams: session.partialParams,
+    });
+
+    session.partialParams = {
+      ...session.partialParams,
+      ...compileResult.params,
+    };
+    session.tokenSymbols = {
+      ...session.tokenSymbols,
+      ...compileResult.tokenSymbols,
+    };
+    session.resolverFields = {
+      ...session.resolverFields,
+      ...(compileResult.resolverFields ?? {}),
+    };
+
+    if (compileResult.telegramHandle && !session.recipientTelegramUserId) {
+      const resolved = await this.resolveRecipientHandle(
+        ctx,
+        chatId,
+        compileResult.telegramHandle,
+        session,
+      );
+      if (!resolved) return;
+    }
+
+    if (compileResult.missingQuestion) {
+      this.orchestratorSessions.set(chatId, session);
+      await ctx.reply(compileResult.missingQuestion);
+      return;
+    }
+
+    await this.finishCompileOrResolve(ctx, chatId, userId, session);
+  }
+
+  // ── Phase 2→3 transition ─────────────────────────────────────────────────────
+
+  private async finishCompileOrResolve(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    session: OrchestratorSession,
+  ): Promise<void> {
+    const missing = this.getMissingRequiredFields(
+      session.manifest,
+      session.partialParams,
+    );
     if (missing.length > 0) {
-      console.log(`[Handler] post-compile validation: missing fields=${JSON.stringify(missing)}`);
+      console.log(
+        `[Handler] post-compile validation: missing fields=${JSON.stringify(missing)}`,
+      );
       const question = await this.intentUseCase!.generateMissingParamQuestion(
         session.manifest,
         missing,
@@ -588,8 +713,337 @@ export class TelegramAssistantHandler {
       await ctx.reply(question);
       return;
     }
-    await this.resolveTokensAndFinish(ctx, chatId, userId, session);
+
+    // Choose Phase 3 path: dual-schema (resolver engine) or legacy (token symbols)
+    const usesDualSchema =
+      session.manifest.requiredFields !== undefined &&
+      Object.keys(session.manifest.requiredFields).length > 0 &&
+      this.resolverEngine !== undefined;
+
+    if (usesDualSchema) {
+      console.log(`[Handler] dual-schema path → runResolutionPhase`);
+      await this.runResolutionPhase(ctx, chatId, userId, session);
+    } else {
+      console.log(`[Handler] legacy path → resolveTokensAndFinish`);
+      await this.resolveTokensAndFinish(ctx, chatId, userId, session);
+    }
   }
+
+  // ── Phase 3 — Dual-schema resolver path ─────────────────────────────────────
+
+  private async runResolutionPhase(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    session: OrchestratorSession,
+  ): Promise<void> {
+    try {
+      const resolved = await this.resolverEngine!.resolve({
+        resolverFields: session.resolverFields,
+        userId,
+        chainId: this.chainId,
+      });
+      session.resolved = resolved;
+
+      if (resolved.recipientTelegramUserId) {
+        session.recipientTelegramUserId = resolved.recipientTelegramUserId;
+      }
+
+      console.log(
+        `[Handler] resolution complete fromToken=${resolved.fromToken?.symbol ?? "null"} toToken=${resolved.toToken?.symbol ?? "null"} rawAmount=${resolved.rawAmount}`,
+      );
+
+      await this.buildAndShowConfirmationFromResolved(
+        ctx,
+        chatId,
+        userId,
+        session,
+      );
+    } catch (err) {
+      if (err instanceof DisambiguationRequiredError) {
+        console.log(
+          `[Handler] disambiguation required slot=${err.slot} symbol="${err.symbol}" candidates=${err.candidates.length}`,
+        );
+        await this.enterDisambiguationFromResolver(ctx, chatId, session, err);
+        return;
+      }
+      this.orchestratorSessions.delete(chatId);
+      const msg = err instanceof Error ? err.message : String(err);
+      await ctx.reply(`Could not resolve transaction details: ${msg}`);
+    }
+  }
+
+  private async enterDisambiguationFromResolver(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    session: OrchestratorSession,
+    err: DisambiguationRequiredError,
+  ): Promise<void> {
+    session.stage = "token_disambig";
+    session.disambiguation = {
+      resolvedFrom: err.slot === "to" ? (session.resolved?.fromToken ?? null) : null,
+      resolvedTo: err.slot === "from" ? (session.resolved?.toToken ?? null) : null,
+      awaitingSlot: err.slot,
+      fromCandidates: err.slot === "from" ? err.candidates : [],
+      toCandidates: err.slot === "to" ? err.candidates : [],
+    };
+    this.orchestratorSessions.set(chatId, session);
+    await ctx.reply(
+      this.buildDisambiguationPrompt(err.slot, err.symbol, err.candidates),
+    );
+  }
+
+  // ── Phase 3 — Disambiguation reply handler ───────────────────────────────────
+
+  private async handleDisambiguationReply(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    text: string,
+    userId: string,
+    session: OrchestratorSession,
+  ): Promise<void> {
+    const pending = session.disambiguation;
+    if (!pending) {
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply("Session error. Please start over.");
+      return;
+    }
+
+    // Turn-limit guard
+    session.disambigTurns += 1;
+    if (session.disambigTurns > 10) {
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(
+        "Token selection timed out after too many attempts. Please start over.",
+      );
+      return;
+    }
+
+    const candidates =
+      pending.awaitingSlot === "from"
+        ? pending.fromCandidates
+        : pending.toCandidates;
+
+    console.log(
+      `[Handler] disambig reply slot=${pending.awaitingSlot} input="${text}" candidates=[${candidates.map((c) => c.symbol).join(", ")}]`,
+    );
+
+    let selected: ITokenRecord | undefined;
+    const index = parseInt(text, 10);
+    if (!isNaN(index) && index >= 1 && index <= candidates.length) {
+      selected = candidates[index - 1];
+    } else {
+      const normalized = text.trim().toUpperCase();
+      selected = candidates.find(
+        (c) => c.symbol.toUpperCase() === normalized,
+      );
+    }
+
+    if (!selected) {
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply("Disambiguation cancelled. Please repeat your request.");
+      return;
+    }
+
+    console.log(
+      `[Handler] disambig resolved slot=${pending.awaitingSlot} → ${selected.symbol} (${selected.address})`,
+    );
+
+    // Determine if this session is using the dual-schema resolver path
+    const usesDualSchema =
+      session.manifest.requiredFields !== undefined &&
+      Object.keys(session.manifest.requiredFields).length > 0 &&
+      this.resolverEngine !== undefined;
+
+    if (pending.awaitingSlot === "from") {
+      pending.resolvedFrom = selected;
+
+      if (usesDualSchema) {
+        // Patch resolverFields with the confirmed address for an exact next lookup
+        session.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] =
+          selected.address;
+      }
+
+      if (pending.toCandidates.length > 1) {
+        pending.awaitingSlot = "to";
+        this.orchestratorSessions.set(chatId, session);
+        await ctx.reply(
+          this.buildDisambiguationPrompt(
+            "to",
+            session.tokenSymbols.to ?? "",
+            pending.toCandidates,
+          ),
+        );
+        return;
+      }
+      pending.resolvedTo = pending.toCandidates[0] ?? null;
+    } else {
+      pending.resolvedTo = selected;
+
+      if (usesDualSchema) {
+        session.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL] =
+          selected.address;
+      }
+    }
+
+    // All disambiguation done — clear disambig state
+    session.disambiguation = undefined;
+    session.stage = "compile"; // prevent re-entering disambig handler
+
+    if (usesDualSchema) {
+      await this.runResolutionPhase(ctx, chatId, userId, session);
+    } else {
+      await this.buildAndShowConfirmation(
+        ctx,
+        chatId,
+        userId,
+        session,
+        pending.resolvedFrom,
+        pending.resolvedTo,
+      );
+    }
+  }
+
+  // ── Phase 4 — Dual-schema confirmation ──────────────────────────────────────
+
+  private async buildAndShowConfirmationFromResolved(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    userId: string,
+    session: OrchestratorSession,
+  ): Promise<void> {
+    const { resolved } = session;
+    if (!resolved) {
+      await ctx.reply(
+        "Internal error: resolution payload missing. Please try again.",
+      );
+      return;
+    }
+
+    // Merge resolved values into partialParams so buildRequestBody can use them
+    if (resolved.rawAmount) session.partialParams.amountRaw = resolved.rawAmount;
+    if (resolved.recipientAddress)
+      session.partialParams.recipient = resolved.recipientAddress;
+    if (resolved.senderAddress)
+      session.partialParams.userAddress = resolved.senderAddress;
+
+    let calldata: { to: string; data: string; value: string };
+    try {
+      calldata = await this.intentUseCase!.buildRequestBody({
+        manifest: session.manifest,
+        params: session.partialParams,
+        resolvedFrom: resolved.fromToken,
+        resolvedTo: resolved.toToken,
+        userId,
+        amountHuman: session.partialParams.amountHuman as string | undefined,
+      });
+    } catch (err) {
+      console.error("[Handler] buildRequestBody failed:", err);
+      this.orchestratorSessions.delete(chatId);
+      await ctx.reply(
+        `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    if (session.recipientTelegramUserId) {
+      this.pendingRecipientNotifications.set(userId, {
+        telegramUserId: session.recipientTelegramUserId,
+      });
+    }
+
+    this.orchestratorSessions.delete(chatId);
+
+    // Phase 4: show finalSchema (if defined) or fall back to legacy format
+    if (session.manifest.finalSchema) {
+      const finalSchemaFilled = this.populateFinalSchema(
+        session.manifest.finalSchema,
+        resolved,
+        session.partialParams,
+      );
+      await this.safeSend(
+        ctx,
+        this.buildFinalSchemaConfirmation(
+          session,
+          finalSchemaFilled,
+          calldata,
+        ),
+      );
+    } else {
+      await this.safeSend(
+        ctx,
+        this.buildConfirmationMessage(
+          session,
+          calldata,
+          resolved.fromToken,
+          resolved.toToken,
+        ),
+      );
+    }
+
+    await this.tryCreateDelegationRequest(
+      ctx,
+      userId,
+      session,
+      resolved.fromToken,
+    );
+  }
+
+  private populateFinalSchema(
+    finalSchema: Record<string, unknown>,
+    resolved: ResolvedPayload,
+    params: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const filled: Record<string, unknown> = {};
+    const properties = (finalSchema.properties ?? {}) as Record<
+      string,
+      { description?: string }
+    >;
+
+    for (const key of Object.keys(properties)) {
+      if (key === "from_token_address" && resolved.fromToken)
+        filled[key] = resolved.fromToken.address;
+      else if (key === "to_token_address" && resolved.toToken)
+        filled[key] = resolved.toToken.address;
+      else if (key === "raw_amount" && resolved.rawAmount)
+        filled[key] = resolved.rawAmount;
+      else if (key === "recipient_address" && resolved.recipientAddress)
+        filled[key] = resolved.recipientAddress;
+      else if (key === "sender_address" && resolved.senderAddress)
+        filled[key] = resolved.senderAddress;
+      else if (params[key] !== undefined) filled[key] = params[key];
+    }
+
+    return filled;
+  }
+
+  private buildFinalSchemaConfirmation(
+    session: OrchestratorSession,
+    finalSchema: Record<string, unknown>,
+    calldata: { to: string; data: string; value: string },
+  ): string {
+    const lines = [
+      "*Transaction Preview*",
+      "",
+      `Action: ${session.manifest.name}`,
+      `Protocol: ${session.manifest.protocolName}`,
+      "",
+      "*Resolved Parameters:*",
+      "```json",
+      JSON.stringify(finalSchema, null, 2),
+      "```",
+      "",
+      "*Calldata*",
+      `To: \`${calldata.to}\``,
+      `Value: ${calldata.value}`,
+      `\`\`\`\n${calldata.data}\n\`\`\``,
+      "",
+      "Type /confirm to execute or /cancel to abort.",
+    ];
+    return lines.join("\n");
+  }
+
+  // ── Phase 3 — Legacy token-resolution path (unchanged logic) ────────────────
 
   private async resolveTokensAndFinish(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
@@ -635,8 +1089,7 @@ export class TelegramAssistantHandler {
       }
     }
 
-    const resolvedFrom =
-      fromCandidates.length === 1 ? fromCandidates[0]! : null;
+    const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0]! : null;
     const resolvedTo = toCandidates.length === 1 ? toCandidates[0]! : null;
 
     if (fromCandidates.length > 1) {
@@ -689,75 +1142,7 @@ export class TelegramAssistantHandler {
     );
   }
 
-  private async handleDisambiguationReply(
-    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
-    chatId: number,
-    text: string,
-    userId: string,
-    session: OrchestratorSession,
-  ): Promise<void> {
-    const pending = session.disambiguation;
-    if (!pending) {
-      this.orchestratorSessions.delete(chatId);
-      await ctx.reply("Session error. Please start over.");
-      return;
-    }
-    const candidates =
-      pending.awaitingSlot === "from"
-        ? pending.fromCandidates
-        : pending.toCandidates;
-
-    console.log(
-      `[Handler] disambig reply slot=${pending.awaitingSlot} input="${text}" candidates=[${candidates.map((c) => c.symbol).join(", ")}]`,
-    );
-
-    let selected: ITokenRecord | undefined;
-    const index = parseInt(text, 10);
-    if (!isNaN(index) && index >= 1 && index <= candidates.length) {
-      selected = candidates[index - 1];
-    } else {
-      const normalized = text.trim().toUpperCase();
-      selected = candidates.find((c) => c.symbol.toUpperCase() === normalized);
-    }
-
-    if (!selected) {
-      this.orchestratorSessions.delete(chatId);
-      await ctx.reply("Disambiguation cancelled. Please repeat your request.");
-      return;
-    }
-
-    console.log(
-      `[Handler] disambig resolved slot=${pending.awaitingSlot} → ${selected.symbol} (${selected.address})`,
-    );
-
-    if (pending.awaitingSlot === "from") {
-      pending.resolvedFrom = selected;
-      if (pending.toCandidates.length > 1) {
-        pending.awaitingSlot = "to";
-        this.orchestratorSessions.set(chatId, session);
-        await ctx.reply(
-          this.buildDisambiguationPrompt(
-            "to",
-            session.tokenSymbols.to!,
-            pending.toCandidates,
-          ),
-        );
-        return;
-      }
-      pending.resolvedTo = pending.toCandidates[0] ?? null;
-    } else {
-      pending.resolvedTo = selected;
-    }
-
-    await this.buildAndShowConfirmation(
-      ctx,
-      chatId,
-      userId,
-      session,
-      pending.resolvedFrom,
-      pending.resolvedTo,
-    );
-  }
+  // ── Phase 4 — Legacy confirmation path (unchanged logic) ────────────────────
 
   private async buildAndShowConfirmation(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
@@ -767,7 +1152,9 @@ export class TelegramAssistantHandler {
     resolvedFrom: ITokenRecord | null,
     resolvedTo: ITokenRecord | null,
   ): Promise<void> {
-    const amountHuman = session.partialParams.amountHuman as string | undefined;
+    const amountHuman = session.partialParams.amountHuman as
+      | string
+      | undefined;
 
     let calldata: { to: string; data: string; value: string };
     try {
@@ -788,7 +1175,6 @@ export class TelegramAssistantHandler {
       return;
     }
 
-    // Store pending notification before clearing session
     if (session.recipientTelegramUserId) {
       this.pendingRecipientNotifications.set(userId, {
         telegramUserId: session.recipientTelegramUserId,
@@ -816,7 +1202,8 @@ export class TelegramAssistantHandler {
       !resolvedFrom ||
       resolvedFrom.isNative ||
       !session.partialParams.amountHuman
-    ) return;
+    )
+      return;
 
     try {
       const profile = await this.userProfileRepo.findByUserId(userId);
@@ -832,29 +1219,35 @@ export class TelegramAssistantHandler {
         valueLimit: amountRaw,
         chainId: this.chainId,
       });
-      await this.pendingDelegationRepo.create({ userId, zerodevMessage: delegationMsg });
+      await this.pendingDelegationRepo.create({
+        userId,
+        zerodevMessage: delegationMsg,
+      });
       await ctx.reply(this.buildDelegationPrompt(delegationMsg));
     } catch (err) {
-      // Non-fatal — log and continue to show the confirmation message
-      console.error('[Handler] delegation request error:', err);
+      console.error("[Handler] delegation request error:", err);
     }
   }
 
+  // ── Message builders ─────────────────────────────────────────────────────────
+
   private buildDelegationPrompt(msg: ZerodevMessage): string {
     if (msg.type === ZERODEV_MESSAGE_TYPE.ERC20_SPEND) {
-      const expiresDate = new Date(msg.validUntil * 1000).toISOString().split('T')[0];
+      const expiresDate = new Date(msg.validUntil * 1000)
+        .toISOString()
+        .split("T")[0];
       return [
-        '🔐 *Delegation Request*',
-        '',
-        'The bot is requesting permission to spend tokens on your behalf.',
+        "🔐 *Delegation Request*",
+        "",
+        "The bot is requesting permission to spend tokens on your behalf.",
         `Token: \`${msg.target}\``,
         `Max amount: ${msg.valueLimit} (raw)`,
         `Expires: ${expiresDate}`,
-        '',
-        'Open the Aegis app to approve or dismiss this request.',
-      ].join('\n');
+        "",
+        "Open the Aegis app to approve or dismiss this request.",
+      ].join("\n");
     }
-    return '🔐 Delegation request pending. Open the Aegis app to review.';
+    return "🔐 Delegation request pending. Open the Aegis app to review.";
   }
 
   private buildConfirmationMessage(
@@ -876,7 +1269,9 @@ export class TelegramAssistantHandler {
       const amountHuman = partialParams.amountHuman as string | undefined;
       if (amountHuman) {
         const raw = toRaw(amountHuman, fromToken.decimals);
-        lines.push(`  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`);
+        lines.push(
+          `  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`,
+        );
       }
     }
 
@@ -921,6 +1316,8 @@ export class TelegramAssistantHandler {
     return lines.join("\n");
   }
 
+  // ── Recipient handle resolver (legacy P2P path — unchanged) ─────────────────
+
   private async resolveRecipientHandle(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     chatId: number,
@@ -928,73 +1325,108 @@ export class TelegramAssistantHandler {
     session: OrchestratorSession,
   ): Promise<boolean> {
     if (!this.telegramHandleResolver || !this.privyAuthService) {
-      await ctx.reply("Sorry, peer-to-peer transfers are not configured on this server.");
+      await ctx.reply(
+        "Sorry, peer-to-peer transfers are not configured on this server.",
+      );
       this.orchestratorSessions.delete(chatId);
       return false;
     }
 
-    // Step 1: Resolve handle → Telegram user ID
     await ctx.reply(`Resolving @${handle}...`);
     let telegramUserId: string;
     try {
-      telegramUserId = await this.telegramHandleResolver.resolveHandle(handle);
-      console.log(`[Handler] resolved @${handle} → telegramUserId=${telegramUserId}`);
-      await ctx.reply(`@${handle} → Telegram ID: \`${telegramUserId}\``);
+      telegramUserId =
+        await this.telegramHandleResolver.resolveHandle(handle);
+      console.log(
+        `[Handler] resolved @${handle} → telegramUserId=${telegramUserId}`,
+      );
+      await ctx.reply(
+        `@${handle} → Telegram ID: \`${telegramUserId}\``,
+      );
     } catch (err) {
       const isNotFound = err instanceof TelegramHandleNotFoundError;
       const msg = isNotFound
         ? `Sorry, I couldn't find a Telegram user for @${handle}. Double-check the handle and try again.`
         : `Sorry, something went wrong resolving @${handle}. Please try again.`;
-      if (!isNotFound) console.error(`[Handler] resolveHandle error for @${handle}:`, err);
+      if (!isNotFound)
+        console.error(`[Handler] resolveHandle error for @${handle}:`, err);
       this.orchestratorSessions.delete(chatId);
       await ctx.reply(msg);
       return false;
     }
 
-    // Step 2: Resolve Telegram user ID → EVM wallet address
-    await ctx.reply(`Finding wallet for Telegram user \`${telegramUserId}\`...`);
+    await ctx.reply(
+      `Finding wallet for Telegram user \`${telegramUserId}\`...`,
+    );
     let recipientAddress: string;
     try {
-      recipientAddress = await this.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
-      console.log(`[Handler] resolved telegramUserId=${telegramUserId} → wallet=${recipientAddress}`);
+      recipientAddress =
+        await this.privyAuthService.getOrCreateWalletByTelegramId(
+          telegramUserId,
+        );
+      console.log(
+        `[Handler] resolved telegramUserId=${telegramUserId} → wallet=${recipientAddress}`,
+      );
       await ctx.reply(`Recipient wallet: \`${recipientAddress}\``);
     } catch (err) {
-      console.error(`[Handler] Privy wallet resolution failed for telegramUserId=${telegramUserId}:`, err);
+      console.error(
+        `[Handler] Privy wallet resolution failed for telegramUserId=${telegramUserId}:`,
+        err,
+      );
       this.orchestratorSessions.delete(chatId);
-      await ctx.reply(`Sorry, I couldn't set up a wallet for @${handle}. Please try again later.`);
+      await ctx.reply(
+        `Sorry, I couldn't set up a wallet for @${handle}. Please try again later.`,
+      );
       return false;
     }
 
-    // Inject resolved address and store Telegram user ID for post-confirm notification
     session.partialParams.recipient = recipientAddress;
     session.recipientTelegramUserId = telegramUserId;
     return true;
   }
 
-  private async notifyRecipient(
-    recipientTelegramUserId: string,
-    _senderUserId: string,
+  // ── Helpers shared by both paths ─────────────────────────────────────────────
+
+  private getMissingRequiredFields(
+    manifest: ToolManifest,
+    partialParams: Record<string, unknown>,
+  ): string[] {
+    const inputSchema = manifest.inputSchema as Record<string, unknown>;
+    const required = (inputSchema.required as string[] | undefined) ?? [];
+    const addressFields = new Set(extractAddressFields(inputSchema));
+    return required.filter(
+      (field) =>
+        !addressFields.has(field) &&
+        (partialParams[field] === undefined ||
+          partialParams[field] === null ||
+          partialParams[field] === ""),
+    );
+  }
+
+  private async handleFallbackChat(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    chatId: number,
+    text: string,
+    userId: string,
   ): Promise<void> {
-    if (!this.botRef) return;
-    try {
-      await this.botRef.api.sendMessage(
-        parseInt(recipientTelegramUserId, 10),
-        "You have received tokens in your wallet! Open the Aegis app to view your balance.",
-      );
-      console.log(`[Handler] notified recipient telegramUserId=${recipientTelegramUserId}`);
-    } catch (err) {
-      // Recipient hasn't started the bot — best-effort only
-      console.warn(
-        `[Handler] could not notify recipient telegramUserId=${recipientTelegramUserId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
+    const conversationId = this.conversations.get(chatId);
+    console.log(
+      `[Handler] fallback chat userId=${userId} conversationId=${conversationId ?? "new"}`,
+    );
+    const response = await this.assistantUseCase.chat({
+      userId,
+      conversationId,
+      message: text,
+    });
+    this.conversations.set(chatId, response.conversationId);
+    console.log(
+      `[Handler] fallback chat done toolsUsed=[${response.toolsUsed.join(", ")}]`,
+    );
+    await this.safeSend(ctx, response.reply);
   }
 
   private async confirmLatestIntent(userId: string): Promise<string> {
     if (!this.intentUseCase) return "Intent execution not configured.";
-    // The intentUseCase internally looks up the latest AWAITING_CONFIRMATION intent
-    // when the sentinel "__latest__" is passed as the intentId.
     const result = await this.intentUseCase.confirmAndExecute({
       intentId: "__latest__",
       userId,
@@ -1056,6 +1488,27 @@ export class TelegramAssistantHandler {
       await ctx.reply(text, { parse_mode: "Markdown" });
     } catch {
       await ctx.reply(text);
+    }
+  }
+
+  private async notifyRecipient(
+    recipientTelegramUserId: string,
+    _senderUserId: string,
+  ): Promise<void> {
+    if (!this.botRef) return;
+    try {
+      await this.botRef.api.sendMessage(
+        parseInt(recipientTelegramUserId, 10),
+        "You have received tokens in your wallet! Open the Aegis app to view your balance.",
+      );
+      console.log(
+        `[Handler] notified recipient telegramUserId=${recipientTelegramUserId}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[Handler] could not notify recipient telegramUserId=${recipientTelegramUserId}:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 

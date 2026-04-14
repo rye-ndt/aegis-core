@@ -17,6 +17,8 @@ export interface IToolManifestRecord {
   chainIds:         string;   // raw JSON string of number[]
   createdAtEpoch:   number;
   updatedAtEpoch:   number;
+  requiredFields?:  string | null;   // JSON string — dual-schema human-readable fields
+  finalSchema?:     string | null;   // JSON string — dual-schema machine-readable fields
 }
 
 export interface IToolManifestDB {

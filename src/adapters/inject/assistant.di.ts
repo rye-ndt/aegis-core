@@ -46,6 +46,8 @@ import { SseRegistry } from '../implementations/output/sse/sseRegistry';
 import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
 import { SigningRequestUseCaseImpl } from '../../use-cases/implementations/signingRequest.usecase';
 import type { ISigningRequestUseCase } from '../../use-cases/interface/input/signingRequest.interface';
+import { ResolverEngineImpl } from '../implementations/output/resolver/resolverEngine';
+import type { IResolverEngine } from '../../use-cases/interface/output/resolver.interface';
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -72,6 +74,7 @@ export class AssistantInject {
   private _redis: Redis | null = null;
   private _sseRegistry: SseRegistry | null = null;
   private _signingRequestUseCase: ISigningRequestUseCase | null = null;
+  private _resolverEngine: IResolverEngine | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -325,6 +328,18 @@ export class AssistantInject {
       );
     }
     return this._signingRequestUseCase;
+  }
+
+  getResolverEngine(): IResolverEngine {
+    if (!this._resolverEngine) {
+      this._resolverEngine = new ResolverEngineImpl(
+        this.getTokenRegistryService(),
+        this.getSqlDB().userProfiles,
+        this.getTelegramHandleResolver(),
+        this.getPrivyAuthService(),
+      );
+    }
+    return this._resolverEngine;
   }
 
   getPortfolioUseCase(): IPortfolioUseCase {

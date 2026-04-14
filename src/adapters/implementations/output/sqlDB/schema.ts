@@ -121,6 +121,8 @@ export const toolManifests = pgTable("tool_manifests", {
   isVerified:       boolean("is_verified").notNull().default(false),
   isActive:         boolean("is_active").notNull().default(true),
   chainIds:         text("chain_ids").notNull(),
+  requiredFields:   text("required_fields"),
+  finalSchema:      text("final_schema"),
   createdAtEpoch:   integer("created_at_epoch").notNull(),
   updatedAtEpoch:   integer("updated_at_epoch").notNull(),
 });

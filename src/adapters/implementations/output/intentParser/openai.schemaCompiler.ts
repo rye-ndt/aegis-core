@@ -6,11 +6,17 @@ import type { ToolManifest } from "../../../../use-cases/interface/output/toolMa
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 
 const CompileSchema = z.object({
-  paramsJson: z.string(),
-  missingQuestion: z.string().nullable(),
-  fromTokenSymbol: z.string().nullable(),
-  toTokenSymbol: z.string().nullable(),
-  telegramHandle: z.string().nullable(),
+  paramsJson:           z.string(),
+  missingQuestion:      z.string().nullable(),
+  fromTokenSymbol:      z.string().nullable(),
+  toTokenSymbol:        z.string().nullable(),
+  telegramHandle:       z.string().nullable(),
+  /**
+   * JSON-encoded Partial<Record<string, string>> present only for dual-schema tools.
+   * Keys are RESOLVER_FIELD enum values; values are the raw human-provided strings.
+   * null when the tool does not define requiredFields.
+   */
+  resolverFieldsJson:   z.string().nullable(),
 });
 
 function stripAddressFields(inputSchema: Record<string, unknown>): Record<string, unknown> {
@@ -37,6 +43,26 @@ function buildSystemPrompt(
 
   console.log(`[OpenAISchemaCompiler] addressFields=${JSON.stringify(addressFields)} visibleSchema=${JSON.stringify(visibleSchema)}`);
 
+  let dualSchemaBlock = "";
+  const hasDualSchema =
+    manifest.requiredFields &&
+    typeof manifest.requiredFields === "object" &&
+    Object.keys(manifest.requiredFields).length > 0;
+
+  if (hasDualSchema) {
+    dualSchemaBlock = `
+
+This tool uses the dual-schema extraction model.
+Extract values for these resolver fields from the conversation:
+${JSON.stringify(manifest.requiredFields, null, 2)}
+
+Emit them as a JSON-encoded string in resolverFieldsJson.
+Keys must exactly match the requiredFields property names
+(e.g. "fromTokenSymbol", "toTokenSymbol", "readableAmount", "userHandle").
+Only include keys where the user has explicitly provided a value.
+Use null for resolverFieldsJson if no resolver fields were found.`;
+  }
+
   return `You are a field extractor for a DeFi transaction agent.
 
 Tool schema (inputSchema):
@@ -55,7 +81,8 @@ Instructions:
 - If all required fields are filled, set missingQuestion to null.
 - Do not include auto-filled fields in params output.
 - If the user mentions a Telegram handle as the recipient (a word starting with @ followed by alphanumerics/underscores/hyphens, referring to a *person*, not a protocol, token name, or brand), extract it into telegramHandle without the @ prefix (e.g. "rye-ndt"). Only set this when the intent is to send tokens TO that specific person. If no person handle is mentioned, set telegramHandle to null.
-- Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.`;
+- Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.
+- Set resolverFieldsJson to null if this tool does not use the dual-schema model.${dualSchemaBlock}`;
 }
 
 export class OpenAISchemaCompiler implements ISchemaCompiler {
@@ -94,17 +121,34 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
 
     const params = JSON.parse(parsed.paramsJson) as Record<string, unknown>;
 
-    console.log(`[OpenAISchemaCompiler] params=${JSON.stringify(params)} missingQuestion=${parsed.missingQuestion} from=${parsed.fromTokenSymbol} to=${parsed.toTokenSymbol}`);
+    console.log(
+      `[OpenAISchemaCompiler] params=${JSON.stringify(params)} missingQuestion=${parsed.missingQuestion} from=${parsed.fromTokenSymbol} to=${parsed.toTokenSymbol} resolverFieldsJson=${parsed.resolverFieldsJson}`,
+    );
 
     const tokenSymbols: CompileResult["tokenSymbols"] = {};
     if (parsed.fromTokenSymbol) tokenSymbols.from = parsed.fromTokenSymbol;
     if (parsed.toTokenSymbol) tokenSymbols.to = parsed.toTokenSymbol;
+
+    let resolverFields: Partial<Record<string, string>> | undefined;
+    if (parsed.resolverFieldsJson) {
+      try {
+        resolverFields = JSON.parse(parsed.resolverFieldsJson) as Partial<
+          Record<string, string>
+        >;
+      } catch {
+        // Malformed JSON from LLM — fall through to undefined (legacy path continues)
+        console.warn(
+          "[OpenAISchemaCompiler] could not parse resolverFieldsJson, ignoring",
+        );
+      }
+    }
 
     return {
       params,
       missingQuestion: parsed.missingQuestion,
       tokenSymbols,
       telegramHandle: parsed.telegramHandle ?? undefined,
+      resolverFields,
     };
   }
 

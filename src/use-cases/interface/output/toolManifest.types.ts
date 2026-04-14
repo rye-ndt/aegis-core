@@ -72,6 +72,17 @@ export const ToolManifestSchema = z.object({
   }).optional(),
   revenueWallet: z.string().optional(),                             // contributor 0x address
   chainIds:      z.array(z.number()).min(1),
+  /**
+   * Human-readable schema: the LLM extracts these fields from natural language.
+   * Keys must be values of RESOLVER_FIELD enum.
+   * Shape: JSON Schema object — same format as inputSchema.
+   */
+  requiredFields: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * Machine-readable schema: fields populated by the resolver pipeline after
+   * all requiredFields resolvers have run successfully.
+   */
+  finalSchema: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type ToolManifest = z.infer<typeof ToolManifestSchema>;
@@ -95,5 +106,7 @@ export function deserializeManifest(record: IToolManifestRecord): ToolManifest {
       : undefined,
     revenueWallet:    record.revenueWallet ?? undefined,
     chainIds:         JSON.parse(record.chainIds) as number[],
+    requiredFields:   record.requiredFields ? JSON.parse(record.requiredFields) as Record<string, unknown> : undefined,
+    finalSchema:      record.finalSchema    ? JSON.parse(record.finalSchema)    as Record<string, unknown> : undefined,
   };
 }

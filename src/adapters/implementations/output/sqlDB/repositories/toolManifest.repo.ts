@@ -127,6 +127,8 @@ export class DrizzleToolManifestRepo implements IToolManifestDB {
       isVerified:       row.isVerified,
       isActive:         row.isActive,
       chainIds:         row.chainIds,
+      requiredFields:   row.requiredFields ?? null,
+      finalSchema:      row.finalSchema    ?? null,
       createdAtEpoch:   row.createdAtEpoch,
       updatedAtEpoch:   row.updatedAtEpoch,
     };
