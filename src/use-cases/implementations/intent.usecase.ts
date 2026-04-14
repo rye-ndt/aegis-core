@@ -27,6 +27,7 @@ import type { IToolIndexService } from "../interface/output/toolIndex.interface"
 import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
 import type { IIntentClassifier } from "../interface/output/intentClassifier.interface";
 import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
+import type { ICommandToolMappingDB } from "../interface/output/repository/commandToolMapping.repo";
 
 const CONFIDENCE_THRESHOLD = 0.7;
 
@@ -43,6 +44,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly toolIndexService: IToolIndexService | undefined,
     private readonly intentClassifier: IIntentClassifier,
     private readonly schemaCompiler: ISchemaCompiler,
+    private readonly commandToolMappingDB?: ICommandToolMappingDB,
   ) {}
 
   async parseAndExecute(params: {
@@ -276,11 +278,31 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     intentType: USER_INTENT_TYPE,
     messages: string[],
   ): Promise<{ toolId: string; manifest: ToolManifest } | null> {
+    // 1. Check explicit command→tool mapping first.
+    // intentType is an INTENT_COMMAND value like "/buy" — strip the slash for DB lookup.
+    if (this.commandToolMappingDB) {
+      const bareCommand = (intentType as string).replace(/^\//, "");
+      const mapping = await this.commandToolMappingDB.findByCommand(bareCommand);
+      if (mapping) {
+        const record = await this.toolManifestDB.findByToolId(mapping.toolId);
+        if (record?.isActive) {
+          console.log(
+            `[IntentUseCase] selectTool → explicit mapping: command="${bareCommand}" → toolId="${mapping.toolId}"`,
+          );
+          return { toolId: record.toolId, manifest: deserializeManifest(record) };
+        }
+        console.log(
+          `[IntentUseCase] selectTool: explicit mapping exists for "${bareCommand}" but tool "${mapping.toolId}" is inactive/missing — falling back to RAG`,
+        );
+      }
+    }
+
+    // 2. Fallback: existing RAG / ILIKE discovery.
     const query = `${intentType} ${messages.join(" ")}`;
     const manifests = await this.discoverRelevantTools(query);
     if (manifests.length === 0) return null;
     const top = manifests[0]!;
-    console.log(`[IntentUseCase] selectTool → ${top.toolId} (${manifests.length} candidates)`);
+    console.log(`[IntentUseCase] selectTool → RAG: ${top.toolId} (${manifests.length} candidates)`);
     return { toolId: top.toolId, manifest: top };
   }
 

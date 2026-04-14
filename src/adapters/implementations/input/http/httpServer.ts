@@ -9,6 +9,7 @@ import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { ISseRegistry } from "../../../../use-cases/interface/output/sse/sseRegistry.interface";
+import type { ICommandMappingUseCase } from "../../../../use-cases/interface/input/commandMapping.interface";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -43,6 +44,7 @@ export class HttpApiServer {
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
     private readonly sseRegistry?: ISseRegistry,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
+    private readonly commandMappingUseCase?: ICommandMappingUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -106,6 +108,16 @@ export class HttpApiServer {
     }
     if (method === 'POST' && url.pathname === '/sign-response') {
       return this.handlePostSignResponse(req, res);
+    }
+    if (method === 'POST' && url.pathname === '/command-mappings') {
+      return this.handlePostCommandMapping(req, res);
+    }
+    if (method === 'GET' && url.pathname === '/command-mappings') {
+      return this.handleGetCommandMappings(req, res);
+    }
+    if (method === 'DELETE' && url.pathname.startsWith('/command-mappings/')) {
+      const command = decodeURIComponent(url.pathname.split('/command-mappings/')[1] ?? '');
+      return this.handleDeleteCommandMapping(req, res, command);
     }
 
     res.writeHead(404);
@@ -402,6 +414,69 @@ export class HttpApiServer {
       if (message === 'SIGNING_REQUEST_NOT_FOUND') return this.sendJson(res, 404, { error: 'Request not found' });
       if (message === 'SIGNING_REQUEST_EXPIRED') return this.sendJson(res, 410, { error: 'Request expired' });
       if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });
+      throw err;
+    }
+  }
+
+  // ── Command mapping handlers ─────────────────────────────────────────────────
+
+  private async handlePostCommandMapping(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    if (!this.commandMappingUseCase) {
+      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+    }
+    let body: unknown;
+    try {
+      body = await this.readJson(req);
+    } catch {
+      return this.sendJson(res, 400, { error: "Invalid JSON" });
+    }
+    const parsed = z.object({
+      command: z.string().min(1),
+      toolId:  z.string().min(1),
+    }).safeParse(body);
+    if (!parsed.success) {
+      return this.sendJson(res, 400, { error: "command and toolId are required", details: parsed.error.issues });
+    }
+    try {
+      const result = await this.commandMappingUseCase.setMapping(parsed.data.command, parsed.data.toolId);
+      return this.sendJson(res, 201, result);
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (msg.startsWith("UNKNOWN_COMMAND")) return this.sendJson(res, 400, { error: msg });
+      if (msg.startsWith("TOOL_NOT_FOUND"))  return this.sendJson(res, 404, { error: msg });
+      throw err;
+    }
+  }
+
+  private async handleGetCommandMappings(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    if (!this.commandMappingUseCase) {
+      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+    }
+    const mappings = await this.commandMappingUseCase.listMappings();
+    return this.sendJson(res, 200, { mappings });
+  }
+
+  private async handleDeleteCommandMapping(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+    command: string,
+  ): Promise<void> {
+    if (!this.commandMappingUseCase) {
+      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+    }
+    if (!command) return this.sendJson(res, 400, { error: "command is required" });
+    try {
+      await this.commandMappingUseCase.deleteMapping(command);
+      return this.sendJson(res, 200, { command, deleted: true });
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (msg.startsWith("MAPPING_NOT_FOUND")) return this.sendJson(res, 404, { error: msg });
       throw err;
     }
   }

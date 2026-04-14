@@ -48,6 +48,8 @@ import { SigningRequestUseCaseImpl } from '../../use-cases/implementations/signi
 import type { ISigningRequestUseCase } from '../../use-cases/interface/input/signingRequest.interface';
 import { ResolverEngineImpl } from '../implementations/output/resolver/resolverEngine';
 import type { IResolverEngine } from '../../use-cases/interface/output/resolver.interface';
+import { CommandMappingUseCase } from '../../use-cases/implementations/commandMapping.usecase';
+import type { ICommandMappingUseCase } from '../../use-cases/interface/input/commandMapping.interface';
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -75,6 +77,7 @@ export class AssistantInject {
   private _sseRegistry: SseRegistry | null = null;
   private _signingRequestUseCase: ISigningRequestUseCase | null = null;
   private _resolverEngine: IResolverEngine | null = null;
+  private _commandMappingUseCase: ICommandMappingUseCase | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -237,6 +240,7 @@ export class AssistantInject {
         this.getToolIndexService(),
         this.getIntentClassifier(),
         this.getSchemaCompiler(),
+        db.commandToolMappings,
       );
     }
     return this._intentUseCase;
@@ -386,6 +390,17 @@ export class AssistantInject {
     return this._telegramHandleResolver;
   }
 
+  getCommandMappingUseCase(): ICommandMappingUseCase {
+    if (!this._commandMappingUseCase) {
+      const db = this.getSqlDB();
+      this._commandMappingUseCase = new CommandMappingUseCase(
+        db.commandToolMappings,
+        db.toolManifests,
+      );
+    }
+    return this._commandMappingUseCase;
+  }
+
   getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
@@ -400,6 +415,7 @@ export class AssistantInject {
       this.getSqlDB().pendingDelegations,
       this.getSseRegistry(),
       signingRequestUseCase,
+      this.getCommandMappingUseCase(),
     );
   }
 }
