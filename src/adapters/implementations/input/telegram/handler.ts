@@ -65,6 +65,27 @@ interface OrchestratorSession {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Returns true when the message clearly expresses a fiat / stablecoin amount
+ * that a non-crypto user would write, e.g.:
+ *   "send @alice $5"  |  "send @bob 5 dollars"  |  "send @charlie 5 bucks"
+ *   "pay @dave 10 usd"  |  "transfer 3.50 usdc to @eve"
+ *
+ * When detected and no explicit token symbol was extracted by the LLM,
+ * the handler automatically injects USDC as the source token so the user
+ * never has to be asked which stablecoin they meant.
+ */
+function detectStablecoinIntent(text: string): boolean {
+  // Matches:
+  //   $N  |  $N.NN
+  //   N dollar | N dollars
+  //   N buck   | N bucks
+  //   N usd    | N usdc   (case-insensitive)
+  const FIAT_PATTERN =
+    /\$\s*\d+(\.\d+)|(\d+(\.\d+)?)\s*(dollars?|bucks?|usdc?)\b/i;
+  return FIAT_PATTERN.test(text);
+}
+
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
   private sessionCache = new Map<
@@ -524,6 +545,26 @@ export class TelegramAssistantHandler {
       partialParams: {},
     });
 
+    // ── Stablecoin auto-detection ─────────────────────────────────────────────
+    // Non-crypto users write "$5", "5 dollars", "5 bucks", etc. without naming a
+    // token. When detected (and the LLM didn't already extract a from-token),
+    // we silently default to USDC so no follow-up question is needed.
+    if (
+      detectStablecoinIntent(text) &&
+      !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
+      !compileResult.tokenSymbols?.from
+    ) {
+      console.log(`[Handler] stablecoin intent detected — injecting USDC as fromToken`);
+      compileResult.resolverFields = {
+        ...compileResult.resolverFields,
+        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
+      };
+      compileResult.tokenSymbols = {
+        ...compileResult.tokenSymbols,
+        from: "USDC",
+      };
+    }
+
     const newSession: OrchestratorSession = {
       stage: "compile",
       conversationId: this.conversations.get(chatId) ?? "",
@@ -596,6 +637,23 @@ export class TelegramAssistantHandler {
       partialParams: {},
     });
 
+    // ── Stablecoin auto-detection ─────────────────────────────────────────────
+    if (
+      detectStablecoinIntent(text) &&
+      !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
+      !compileResult.tokenSymbols?.from
+    ) {
+      console.log(`[Handler] stablecoin intent detected — injecting USDC as fromToken`);
+      compileResult.resolverFields = {
+        ...compileResult.resolverFields,
+        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
+      };
+      compileResult.tokenSymbols = {
+        ...compileResult.tokenSymbols,
+        from: "USDC",
+      };
+    }
+
     const newSession: OrchestratorSession = {
       stage: "compile",
       conversationId: this.conversations.get(chatId) ?? "",
@@ -656,6 +714,28 @@ export class TelegramAssistantHandler {
       userId,
       partialParams: session.partialParams,
     });
+
+    // ── Stablecoin auto-detection ─────────────────────────────────────────────
+    // Check the full message history: the user may have said "$5" in an earlier
+    // turn that is now being continued. Detection is therefore sticky.
+    const anyFiatMessage = session.messages.some(detectStablecoinIntent);
+    if (
+      anyFiatMessage &&
+      !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
+      !session.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
+      !compileResult.tokenSymbols?.from &&
+      !session.tokenSymbols.from
+    ) {
+      console.log(`[Handler] stablecoin intent detected (history) — injecting USDC as fromToken`);
+      compileResult.resolverFields = {
+        ...compileResult.resolverFields,
+        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
+      };
+      compileResult.tokenSymbols = {
+        ...compileResult.tokenSymbols,
+        from: "USDC",
+      };
+    }
 
     session.partialParams = {
       ...session.partialParams,
