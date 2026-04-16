@@ -11,6 +11,7 @@ import type {
   IRegisterInput,
 } from "../interface/input/auth.interface";
 import type { IPrivyAuthService } from "../interface/output/privyAuth.interface";
+import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 
 const BCRYPT_ROUNDS = 10;
 
@@ -20,6 +21,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     private readonly jwtSecret: string,
     private readonly jwtExpiresIn: string,
     private readonly privyAuthService?: IPrivyAuthService,
+    private readonly telegramSessionDB?: ITelegramSessionDB,
   ) {}
 
   async register(input: IRegisterInput): Promise<{ userId: string }> {
@@ -83,7 +85,18 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now };
     }
 
-    return this.issueJwt(user.id, user.email);
+    const result = this.issueJwt(user.id, user.email);
+
+    // If a Telegram chatId was provided, link it now in the same call.
+    if (input.telegramChatId && this.telegramSessionDB) {
+      await this.telegramSessionDB.upsert({
+        telegramChatId: input.telegramChatId,
+        userId: user.id,
+        expiresAtEpoch: result.expiresAtEpoch,
+      });
+    }
+
+    return result;
   }
 
   private issueJwt(userId: string, email: string): { token: string; expiresAtEpoch: number; userId: string } {

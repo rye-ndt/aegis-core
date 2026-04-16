@@ -7,7 +7,7 @@
 
 ## What it is
 
-A non-custodial, intent-based AI trading agent on Avalanche, backed by Hexagonal Architecture (Ports & Adapters). Users authenticate via Privy (Google OAuth), link their session with `/auth <token>` in Telegram. The agent parses natural language intents, simulates them via ERC-4337 UserOperations, and submits them on-chain via Session Keys. Users can send tokens to any Telegram handle — the bot resolves the handle to an EVM wallet via MTProto + Privy. The frontend connects via SSE to receive signing requests pushed from the bot. Use cases depend only on interfaces; adapters never depend on each other; DI wiring lives entirely in `src/adapters/inject/`.
+A non-custodial, intent-based AI trading agent on Avalanche, backed by Hexagonal Architecture (Ports & Adapters). Users authenticate via Privy (Google OAuth or Telegram). When the Mini App logs in, it passes the user's Telegram chatId to `POST /auth/privy`, which automatically links the session — no manual `/auth <token>` step needed. The agent parses natural language intents (including fiat shortcuts like "$5"), simulates them via ERC-4337 UserOperations, and submits them on-chain via Session Keys. Users can send tokens to any Telegram handle — the bot resolves the handle to an EVM wallet via MTProto + Privy. The frontend connects via SSE to receive signing requests pushed from the bot. Use cases depend only on interfaces; adapters never depend on each other; DI wiring lives entirely in `src/adapters/inject/`.
 
 ## Tech stack
 
@@ -32,7 +32,7 @@ src/
 ├── use-cases/
 │   ├── implementations/
 │   │   ├── assistant.usecase.ts    # chat(), listConversations(), getConversation()
-│   │   ├── auth.usecase.ts         # loginWithPrivy() — verifies Privy token, returns JWT
+│   │   ├── auth.usecase.ts         # loginWithPrivy() — verifies Privy token, returns JWT; optionally upserts telegram_sessions if telegramChatId provided
 │   │   ├── intent.usecase.ts       # parseAndExecute() → confirmAndExecute()
 │   │   ├── signingRequest.usecase.ts # createRequest() → SSE push → resolveRequest() → notify
 │   │   ├── tokenIngestion.usecase.ts # ingest() — fetch → map → upsert token registry
@@ -113,7 +113,7 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
 | Method   | Route                      | Auth               | Purpose                                                  |
 | -------- | -------------------------- | ------------------ | -------------------------------------------------------- |
-| `POST`   | `/auth/privy`              | None               | Verify Privy token → `{ token, expiresAtEpoch, userId }` |
+| `POST`   | `/auth/privy`              | None               | Verify Privy token → `{ token, expiresAtEpoch, userId }`; optional `telegramChatId` body field links the Telegram session atomically |
 | `GET`    | `/intent/:intentId`        | JWT                | Fetch intent + execution status                          |
 | `GET`    | `/portfolio`               | JWT                | On-chain balances for user's SCA                         |
 | `GET`    | `/tokens?chainId=`         | None               | List verified tokens for a chain                         |
@@ -134,7 +134,7 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 | Command                                | Behavior                                                                           |
 | -------------------------------------- | ---------------------------------------------------------------------------------- |
 | `/start`                               | Welcome message; prompts authentication if not logged in                           |
-| `/auth <privy_token>`                  | Verifies Privy token, links userId to Telegram chat                                |
+| `/auth <privy_token>`                  | Verifies Privy token, links userId to Telegram chat (fallback; Mini App users are linked automatically via `POST /auth/privy`) |
 | `/logout`                              | Deletes session from DB + cache                                                    |
 | `/new`                                 | Clears active conversation ID (starts fresh thread)                                |
 | `/history`                             | Shows last 10 messages of the current conversation                                 |
@@ -304,3 +304,32 @@ message:text
 **New solver:** implement `ISolver` in `output/solver/static/` or `restful/` → register in `AssistantInject.getSolverRegistry()`.
 
 **New token crawler source:** implement `ITokenCrawlerJob` → swap in `AssistantInject.getTokenCrawlerJob()`.
+
+---
+
+## Recent changes
+
+### 2026-04-16 — Telegram Login Support
+
+**Goal:** Eliminate the manual `/auth <token>` step for Mini App users.
+
+**What changed:**
+- `IPrivyLoginInput` (`auth.interface.ts`) gains optional `telegramChatId?: string`.
+- `AuthUseCaseImpl` (`auth.usecase.ts`) accepts an optional `ITelegramSessionDB` as a 5th constructor arg. After issuing the JWT, it upserts a `telegram_sessions` row when `telegramChatId` is present. The field is validated as numeric-string at the HTTP layer before reaching the use-case.
+- `POST /auth/privy` (`httpServer.ts`) Zod schema extended: `telegramChatId: z.string().regex(/^\d+$/).optional()`. A non-numeric value returns 400 before any business logic runs.
+- `AssistantInject.getAuthUseCase()` (`assistant.di.ts`) now passes `db.telegramSessions` as the 5th arg.
+- `bot.on("message:web_app_data", ...)` (`handler.ts`) is kept untouched as a backward-compat fallback; a comment marks it as superseded.
+- No schema migrations — `telegram_sessions` already had the right shape.
+- No new routes, no new interfaces, no new enums.
+
+**Architecture audit:** `AuthUseCaseImpl` imports only from `use-cases/interface/output/repository/` (output port). No adapter imports in use-cases. No adapter-to-adapter dependencies introduced.
+
+### 2026-04-15 — Fiat / Stablecoin Intent Auto-detection
+
+**Goal:** Non-crypto users writing `"send @alice $5"` or `"5 dollars"` should not be asked which token they mean.
+
+**What changed:**
+- Module-level `detectStablecoinIntent(text)` pure function added to `handler.ts`. Matches `$N`, `N dollars`, `N bucks`, `N usd`, `N usdc` (case-insensitive, requires a numeric value).
+- After every `compileSchema` call (in `startCommandSession`, `startLegacySession`, `continueCompileLoop`) the function is checked. If the user used fiat language and the LLM did not extract a `fromTokenSymbol`, USDC is injected into both `resolverFields[FROM_TOKEN_SYMBOL]` and `tokenSymbols.from`.
+- Detection is sticky across multi-turn sessions (checks the full message history in `continueCompileLoop`).
+- No new interfaces, no new DB tables, no new enums.

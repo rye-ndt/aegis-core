@@ -291,6 +291,7 @@ export class AssistantInject {
         process.env.JWT_SECRET ?? "",
         process.env.JWT_EXPIRES_IN ?? "7d",
         this.getPrivyAuthService(),
+        db.telegramSessions,
       );
     }
     return this._authUseCase;
