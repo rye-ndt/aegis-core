@@ -132,13 +132,19 @@ export class HttpApiServer {
       return this.sendJson(res, 400, { error: "Invalid JSON" });
     }
 
-    const parsed = z.object({ privyToken: z.string().min(1) }).safeParse(body);
+    const parsed = z.object({
+      privyToken: z.string().min(1),
+      telegramChatId: z.string().regex(/^\d+$/).optional(),
+    }).safeParse(body);
     if (!parsed.success) {
-      return this.sendJson(res, 400, { error: "privyToken is required" });
+      return this.sendJson(res, 400, { error: "privyToken is required", details: parsed.error.issues });
     }
 
     try {
-      const result = await this.authUseCase.loginWithPrivy({ privyToken: parsed.data.privyToken });
+      const result = await this.authUseCase.loginWithPrivy({
+        privyToken: parsed.data.privyToken,
+        telegramChatId: parsed.data.telegramChatId,
+      });
       return this.sendJson(res, 200, result);
     } catch (err) {
       if (

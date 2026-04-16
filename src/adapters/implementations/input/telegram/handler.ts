@@ -373,6 +373,8 @@ export class TelegramAssistantHandler {
       }
     });
 
+    // NOTE: Superseded by the optional telegramChatId field in POST /auth/privy.
+    // Kept for backward compatibility with Mini App versions that still call sendData.
     bot.on("message:web_app_data", async (ctx) => {
       const raw = ctx.message.web_app_data?.data;
       if (!raw) return;

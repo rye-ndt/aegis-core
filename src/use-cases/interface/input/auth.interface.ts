@@ -11,6 +11,7 @@ export interface ILoginInput {
 
 export interface IPrivyLoginInput {
   privyToken: string;
+  telegramChatId?: string;   // optional — link session during login
 }
 
 export interface IAuthUseCase {
