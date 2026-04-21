@@ -31,7 +31,7 @@ export class ViemClientAdapter implements IChainReader {
     chain: Chain;
   }) {
     this.chainId = params.chainId;
-    const transport = http(params.rpcUrl);
+    const transport = http(params.rpcUrl, { timeout: 10_000 });
 
     this.publicClient = createPublicClient({ chain: params.chain, transport });
 
