@@ -276,6 +276,7 @@ export class AssistantInject {
       const tokenRegistryService = this.getTokenRegistryService();
       const viemClient = this.getViemClient();
       const userProfileDB = sqlDB.userProfiles;
+      const userProfileCache = this.getUserProfileCache();
 
       const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
@@ -283,7 +284,7 @@ export class AssistantInject {
         // Existing static tools
         r.register(new WebSearchTool(webSearchService));
         r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
-        r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId));
+        r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId, userProfileCache));
 
         // System tools — always available, no DB registration needed
         for (const tool of this.getSystemToolProvider().getTools(userId, conversationId)) {
@@ -293,7 +294,6 @@ export class AssistantInject {
         // Per-user DB tools (developer-registered HTTP query tools)
         const httpToolDB = this.getSqlDB().httpQueryTools;
         const userHttpTools = await httpToolDB.findActiveByUser(userId);
-        const userProfileCache = this.getUserProfileCache();
         const encryptionKey = process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY;
 
         for (const toolConfig of userHttpTools) {
