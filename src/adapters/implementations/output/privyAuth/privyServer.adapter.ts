@@ -15,8 +15,14 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
 
     // Privy linkedAccounts is a discriminated union — only google_oauth entries carry `email`
     const googleAccount = user.linkedAccounts.find((a) => a.type === "google_oauth");
+    const telegramAccount = user.linkedAccounts.find((a) => a.type === "telegram");
+    const telegramFallback = telegramAccount && "telegramUserId" in telegramAccount
+      ? `tg_${(telegramAccount as { telegramUserId: string }).telegramUserId}@privy.local`
+      : undefined;
+
     const email = (googleAccount && "email" in googleAccount ? googleAccount.email as string : undefined)
       ?? (user as unknown as { email?: string }).email
+      ?? telegramFallback
       ?? "";
 
     if (!email) throw new Error("PRIVY_NO_EMAIL");

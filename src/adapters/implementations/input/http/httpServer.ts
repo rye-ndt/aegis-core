@@ -34,7 +34,6 @@ export class HttpApiServer {
 
   constructor(
     private readonly authUseCase: IAuthUseCase,
-    _unused: null,
     private readonly port: number,
     private readonly jwtSecret?: string,
     private readonly intentUseCase?: IIntentUseCase,
@@ -105,6 +104,11 @@ export class HttpApiServer {
     }
     if (method === 'GET' && url.pathname === '/events') {
       return this.handleGetEvents(req, res, url);
+    }
+    
+    if (method === 'GET' && /^\/sign-requests\/([a-zA-Z0-9-]+)$/.test(url.pathname)) {
+      const match = url.pathname.match(/^\/sign-requests\/([a-zA-Z0-9-]+)$/);
+      if (match) return this.handleGetSignRequest(req, res, url, match[1]);
     }
     if (method === 'POST' && url.pathname === '/sign-response') {
       return this.handlePostSignResponse(req, res);
@@ -375,14 +379,38 @@ export class HttpApiServer {
       return;
     }
 
+    const authedUserId: string = userId;
+
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
+    res.flushHeaders();
 
-    this.sseRegistry.connect(userId, res);
+    this.sseRegistry.connect(authedUserId, res);
+
+    // Replay any pending signing request the user may have missed
+    // (covers the case where the mini app opens after the bot already pushed the event).
+    if (this.signingRequestUseCase) {
+      this.signingRequestUseCase.getPendingForUser(authedUserId).then((pending) => {
+        if (!pending) return;
+        const now = Math.floor(Date.now() / 1000);
+        if (pending.expiresAt <= now) return;
+        this.sseRegistry!.push(authedUserId, {
+          type: 'sign_request',
+          requestId: pending.requestId,
+          to: pending.to,
+          value: pending.value,
+          data: pending.data,
+          description: pending.description,
+          expiresAt: pending.expiresAt,
+        });
+      }).catch((err) => {
+        console.error('[SSE] replay pending signing request failed:', err);
+      });
+    }
   }
 
   private async handlePostSignResponse(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -421,6 +449,28 @@ export class HttpApiServer {
       if (message === 'SIGNING_REQUEST_EXPIRED') return this.sendJson(res, 410, { error: 'Request expired' });
       if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });
       throw err;
+    }
+  }
+
+  private async handleGetSignRequest(req: http.IncomingMessage, res: http.ServerResponse, url: URL, requestId: string): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+    if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
+
+    try {
+      const request = await this.signingRequestUseCase.getRequest(requestId, userId);
+      if (!request) return this.sendJson(res, 404, { error: 'Request not found' });
+      return this.sendJson(res, 200, {
+        requestId: request.requestId,
+        to: request.to,
+        value: request.value,
+        data: request.data,
+        description: request.description,
+        expiresAt: request.expiresAt,
+        status: request.status
+      });
+    } catch (err) {
+      this.sendJson(res, 500, { error: 'Internal error' });
     }
   }
 

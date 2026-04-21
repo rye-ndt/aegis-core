@@ -132,10 +132,10 @@ export class TelegramAssistantHandler {
     bot.command("start", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
-        const keyboard = new InlineKeyboard().text(
-          "Sign in with Google",
-          "auth:login",
-        );
+        const miniAppUrl = process.env.MINI_APP_URL;
+        const keyboard = miniAppUrl
+          ? new InlineKeyboard().webApp("Open Aegis", miniAppUrl)
+          : new InlineKeyboard().text("Sign in with Google", "auth:login");
         await ctx.reply(
           "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
           { reply_markup: keyboard },
@@ -367,6 +367,7 @@ export class TelegramAssistantHandler {
             { parse_mode: "Markdown" },
           );
         }
+        await this.sendMiniAppButton(ctx as any, requestId);
       } catch (err) {
         console.error("Error creating signing request:", err);
         await ctx.reply("Failed to create signing request. Please try again.");
@@ -482,7 +483,9 @@ export class TelegramAssistantHandler {
         if (!existing) {
           if (command) {
             // Command-driven path (new deterministic pipeline)
-            console.log(`[Handler] command=${command}, starting command session`);
+            console.log(
+              `[Handler] command=${command}, starting command session`,
+            );
             await this.startCommandSession(ctx, chatId, userId, command, text);
           } else {
             // Legacy free-form text path
@@ -556,7 +559,9 @@ export class TelegramAssistantHandler {
       !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
       !compileResult.tokenSymbols?.from
     ) {
-      console.log(`[Handler] stablecoin intent detected — injecting USDC as fromToken`);
+      console.log(
+        `[Handler] stablecoin intent detected — injecting USDC as fromToken`,
+      );
       compileResult.resolverFields = {
         ...compileResult.resolverFields,
         [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
@@ -645,7 +650,9 @@ export class TelegramAssistantHandler {
       !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
       !compileResult.tokenSymbols?.from
     ) {
-      console.log(`[Handler] stablecoin intent detected — injecting USDC as fromToken`);
+      console.log(
+        `[Handler] stablecoin intent detected — injecting USDC as fromToken`,
+      );
       compileResult.resolverFields = {
         ...compileResult.resolverFields,
         [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
@@ -695,10 +702,7 @@ export class TelegramAssistantHandler {
     userId: string,
     session: OrchestratorSession,
   ): Promise<void> {
-    const MAX_COMPILE_TURNS = parseInt(
-      process.env.MAX_TOOL_ROUNDS ?? "10",
-      10,
-    );
+    const MAX_COMPILE_TURNS = parseInt(process.env.MAX_TOOL_ROUNDS ?? "10", 10);
 
     if (session.compileTurns >= MAX_COMPILE_TURNS) {
       this.orchestratorSessions.delete(chatId);
@@ -728,7 +732,9 @@ export class TelegramAssistantHandler {
       !compileResult.tokenSymbols?.from &&
       !session.tokenSymbols.from
     ) {
-      console.log(`[Handler] stablecoin intent detected (history) — injecting USDC as fromToken`);
+      console.log(
+        `[Handler] stablecoin intent detected (history) — injecting USDC as fromToken`,
+      );
       compileResult.resolverFields = {
         ...compileResult.resolverFields,
         [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
@@ -863,8 +869,10 @@ export class TelegramAssistantHandler {
   ): Promise<void> {
     session.stage = "token_disambig";
     session.disambiguation = {
-      resolvedFrom: err.slot === "to" ? (session.resolved?.fromToken ?? null) : null,
-      resolvedTo: err.slot === "from" ? (session.resolved?.toToken ?? null) : null,
+      resolvedFrom:
+        err.slot === "to" ? (session.resolved?.fromToken ?? null) : null,
+      resolvedTo:
+        err.slot === "from" ? (session.resolved?.toToken ?? null) : null,
       awaitingSlot: err.slot,
       fromCandidates: err.slot === "from" ? err.candidates : [],
       toCandidates: err.slot === "to" ? err.candidates : [],
@@ -916,9 +924,7 @@ export class TelegramAssistantHandler {
       selected = candidates[index - 1];
     } else {
       const normalized = text.trim().toUpperCase();
-      selected = candidates.find(
-        (c) => c.symbol.toUpperCase() === normalized,
-      );
+      selected = candidates.find((c) => c.symbol.toUpperCase() === normalized);
     }
 
     if (!selected) {
@@ -1003,7 +1009,8 @@ export class TelegramAssistantHandler {
     }
 
     // Merge resolved values into partialParams so buildRequestBody can use them
-    if (resolved.rawAmount) session.partialParams.amountRaw = resolved.rawAmount;
+    if (resolved.rawAmount)
+      session.partialParams.amountRaw = resolved.rawAmount;
     if (resolved.recipientAddress)
       session.partialParams.recipient = resolved.recipientAddress;
     if (resolved.senderAddress)
@@ -1036,6 +1043,19 @@ export class TelegramAssistantHandler {
 
     this.orchestratorSessions.delete(chatId);
 
+    let requestId: string | undefined;
+    if (this.signingRequestUseCase) {
+      const res = await this.signingRequestUseCase.createRequest({
+        userId,
+        chatId,
+        to: calldata.to,
+        value: calldata.value,
+        data: calldata.data,
+        description: session.manifest.name,
+      });
+      requestId = res.requestId;
+    }
+
     // Phase 4: show finalSchema (if defined) or fall back to legacy format
     if (session.manifest.finalSchema) {
       const finalSchemaFilled = this.populateFinalSchema(
@@ -1045,11 +1065,7 @@ export class TelegramAssistantHandler {
       );
       await this.safeSend(
         ctx,
-        this.buildFinalSchemaConfirmation(
-          session,
-          finalSchemaFilled,
-          calldata,
-        ),
+        this.buildFinalSchemaConfirmation(session, finalSchemaFilled, calldata),
       );
     } else {
       await this.safeSend(
@@ -1063,6 +1079,7 @@ export class TelegramAssistantHandler {
       );
     }
 
+    await this.sendMiniAppButton(ctx, requestId);
     await this.tryCreateDelegationRequest(
       ctx,
       userId,
@@ -1120,7 +1137,7 @@ export class TelegramAssistantHandler {
       `Value: ${calldata.value}`,
       `\`\`\`\n${calldata.data}\n\`\`\``,
       "",
-      "Type /confirm to execute or /cancel to abort.",
+      "Open the Aegis app to review and sign this transaction.",
     ];
     return lines.join("\n");
   }
@@ -1171,7 +1188,8 @@ export class TelegramAssistantHandler {
       }
     }
 
-    const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0]! : null;
+    const resolvedFrom =
+      fromCandidates.length === 1 ? fromCandidates[0]! : null;
     const resolvedTo = toCandidates.length === 1 ? toCandidates[0]! : null;
 
     if (fromCandidates.length > 1) {
@@ -1234,9 +1252,7 @@ export class TelegramAssistantHandler {
     resolvedFrom: ITokenRecord | null,
     resolvedTo: ITokenRecord | null,
   ): Promise<void> {
-    const amountHuman = session.partialParams.amountHuman as
-      | string
-      | undefined;
+    const amountHuman = session.partialParams.amountHuman as string | undefined;
 
     let calldata: { to: string; data: string; value: string };
     try {
@@ -1264,10 +1280,30 @@ export class TelegramAssistantHandler {
     }
 
     this.orchestratorSessions.delete(chatId);
+
+    let requestId: string | undefined;
+    if (this.signingRequestUseCase) {
+      const res = await this.signingRequestUseCase.createRequest({
+        userId,
+        chatId,
+        to: calldata.to,
+        value: calldata.value,
+        data: calldata.data,
+        description: session.manifest.name,
+      });
+      requestId = res.requestId;
+    }
+
     await this.safeSend(
       ctx,
-      this.buildConfirmationMessage(session, calldata, resolvedFrom, resolvedTo),
+      this.buildConfirmationMessage(
+        session,
+        calldata,
+        resolvedFrom,
+        resolvedTo,
+      ),
     );
+    await this.sendMiniAppButton(ctx, requestId);
     await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
   }
 
@@ -1305,10 +1341,31 @@ export class TelegramAssistantHandler {
         userId,
         zerodevMessage: delegationMsg,
       });
+
       await ctx.reply(this.buildDelegationPrompt(delegationMsg));
     } catch (err) {
       console.error("[Handler] delegation request error:", err);
     }
+  }
+
+  private async sendMiniAppButton(
+    ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
+    requestId?: string,
+  ): Promise<void> {
+    const miniAppUrlBase = process.env.MINI_APP_URL;
+    if (!miniAppUrlBase) return;
+    let url = miniAppUrlBase;
+    if (requestId) {
+      url += url.includes("?")
+        ? `&requestId=${requestId}`
+        : `?requestId=${requestId}`;
+    }
+    console.log("[sendMiniAppButton] Generated URL:", url);
+    const keyboard = new InlineKeyboard().webApp("Open Aegis to Sign", url);
+    await ctx.reply(
+      "Tap the button below to review and sign this transaction in Aegis.",
+      { reply_markup: keyboard },
+    );
   }
 
   // ── Message builders ─────────────────────────────────────────────────────────
@@ -1351,9 +1408,7 @@ export class TelegramAssistantHandler {
       const amountHuman = partialParams.amountHuman as string | undefined;
       if (amountHuman) {
         const raw = toRaw(amountHuman, fromToken.decimals);
-        lines.push(
-          `  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`,
-        );
+        lines.push(`  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`);
       }
     }
 
@@ -1372,7 +1427,7 @@ export class TelegramAssistantHandler {
       "",
       `\`\`\`json\n${JSON.stringify(partialParams, null, 2)}\n\`\`\``,
     );
-    lines.push("", "Type /confirm to execute or /cancel to abort.");
+    lines.push("", "Open the Aegis app to review and sign this transaction.");
 
     return lines.join("\n");
   }
@@ -1417,14 +1472,11 @@ export class TelegramAssistantHandler {
     await ctx.reply(`Resolving @${handle}...`);
     let telegramUserId: string;
     try {
-      telegramUserId =
-        await this.telegramHandleResolver.resolveHandle(handle);
+      telegramUserId = await this.telegramHandleResolver.resolveHandle(handle);
       console.log(
         `[Handler] resolved @${handle} → telegramUserId=${telegramUserId}`,
       );
-      await ctx.reply(
-        `@${handle} → Telegram ID: \`${telegramUserId}\``,
-      );
+      await ctx.reply(`@${handle} → Telegram ID: \`${telegramUserId}\``);
     } catch (err) {
       const isNotFound = err instanceof TelegramHandleNotFoundError;
       const msg = isNotFound

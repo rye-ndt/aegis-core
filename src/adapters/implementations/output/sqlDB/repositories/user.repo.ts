@@ -59,6 +59,13 @@ export class DrizzleUserRepo implements IUserDB {
     return this.toIUser(rows[0]);
   }
 
+  async linkPrivyDid(userId: string, privyDid: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ privyDid })
+      .where(eq(users.id, userId));
+  }
+
   async findByPrivyDid(privyDid: string): Promise<IUser | null> {
     const rows = await this.db
       .select()

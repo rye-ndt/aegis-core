@@ -25,6 +25,7 @@ export interface IUser extends UserInit {}
 export interface IUserDB {
   create(user: UserInit): Promise<void>;
   update(user: UserUpdate): Promise<void>;
+  linkPrivyDid(userId: string, privyDid: string): Promise<void>;
   findById(id: string): Promise<IUser | undefined>;
   findByEmail(email: string): Promise<IUser | null>;
   findByPrivyDid(privyDid: string): Promise<IUser | null>;
