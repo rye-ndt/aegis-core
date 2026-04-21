@@ -67,4 +67,31 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
 
     this.onResolved(record.chatId, params.txHash, rejected);
   }
+
+  async getPendingForUser(userId: string) {
+    const record = await this.cache.findPendingByUserId(userId);
+    if (!record) return null;
+    return {
+      requestId: record.id,
+      to: record.to,
+      value: record.value,
+      data: record.data,
+      description: record.description,
+      expiresAt: record.expiresAt,
+    };
+  }
+
+  async getRequest(requestId: string, userId: string) {
+    const record = await this.cache.findById(requestId);
+    if (!record || record.userId !== userId) return null;
+    return {
+      requestId: record.id,
+      to: record.to,
+      value: record.value,
+      data: record.data,
+      description: record.description,
+      expiresAt: record.expiresAt,
+      status: record.status,
+    };
+  }
 }

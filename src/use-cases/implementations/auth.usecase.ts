@@ -11,6 +11,7 @@ import type {
   IRegisterInput,
 } from "../interface/input/auth.interface";
 import type { IPrivyAuthService } from "../interface/output/privyAuth.interface";
+import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 
 const BCRYPT_ROUNDS = 10;
@@ -65,7 +66,24 @@ export class AuthUseCaseImpl implements IAuthUseCase {
 
     const { privyDid, email } = await this.privyAuthService.verifyToken(input.privyToken);
 
-    let user = await this.userDB.findByPrivyDid(privyDid);
+    // When a telegramChatId is provided, the user opening the Mini App is already
+    // known to the bot via telegram_sessions. Reuse that existing userId so that
+    // any pending signing requests (which were created with that userId) remain
+    // accessible. Fall back to privyDid lookup only when no prior session exists.
+    let user: IUser | null = null;
+    if (input.telegramChatId && this.telegramSessionDB) {
+      const existingSession = await this.telegramSessionDB.findByChatId(input.telegramChatId);
+      if (existingSession) {
+        user = await this.userDB.findById(existingSession.userId) ?? null;
+        if (user && user.privyDid !== privyDid) {
+          await this.userDB.linkPrivyDid(user.id, privyDid);
+        }
+      }
+    }
+
+    if (!user) {
+      user = await this.userDB.findByPrivyDid(privyDid);
+    }
 
     if (!user) {
       const userId = newUuid();
@@ -82,12 +100,11 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         updatedAtEpoch: now,
       });
 
-      user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now };
+      user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
     }
 
     const result = this.issueJwt(user.id, user.email);
 
-    // If a Telegram chatId was provided, link it now in the same call.
     if (input.telegramChatId && this.telegramSessionDB) {
       await this.telegramSessionDB.upsert({
         telegramChatId: input.telegramChatId,

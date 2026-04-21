@@ -16,7 +16,6 @@ import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecas
 import { ViemClientAdapter } from "../implementations/output/blockchain/viemClient";
 import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
 import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
-import { TraderJoeSolver } from "../implementations/output/solver/restful/traderJoe.solver";
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
 import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
@@ -133,13 +132,7 @@ export class AssistantInject {
         INTENT_ACTION.CLAIM_REWARDS,
         new ClaimRewardsSolver(process.env.REWARD_CONTROLLER_ADDRESS ?? ""),
       );
-      this._solverRegistry.register(
-        INTENT_ACTION.SWAP,
-        new TraderJoeSolver(
-          process.env.TRADERJOE_API_URL ?? "https://api.traderjoexyz.com",
-          chainId,
-        ),
-      );
+
     }
     return this._solverRegistry;
   }
@@ -406,7 +399,6 @@ export class AssistantInject {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
       this.getAuthUseCase(),
-      null,
       port,
       process.env.JWT_SECRET,
       this.getIntentUseCase(),
