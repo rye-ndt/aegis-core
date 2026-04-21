@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ISchemaCompiler, CompileResult } from "../../../../use-cases/interface/output/schemaCompiler.interface";
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 
 const CompileSchema = z.object({
   paramsJson:           z.string(),
@@ -78,7 +79,7 @@ ${JSON.stringify(partialParams, null, 2)}
 
 Instructions:
 - Scan the conversation and extract as many inputSchema fields as possible.
-- If the user mentions a token symbol (e.g. "USDC", "AVAX", "FUJI", "MOON"), extract it as fromTokenSymbol or toTokenSymbol.
+- If the user mentions a token symbol (e.g. "USDC", "${CHAIN_CONFIG.nativeSymbol}", "MOON"), extract it as fromTokenSymbol or toTokenSymbol.
 - If any required field (from inputSchema.required) is still missing, set missingQuestion to a short, natural question to ask the user.
 - If all required fields are filled, set missingQuestion to null.
 - Do not include auto-filled fields in params output.

@@ -57,6 +57,11 @@ import { DrizzleHttpQueryToolRepo } from "../implementations/output/sqlDB/reposi
 import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
 import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
 import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
+import { PrivyWalletDataProvider } from "../implementations/output/walletData/privy.walletDataProvider";
+import { SystemToolProviderConcrete } from "../implementations/output/systemToolProvider.concrete";
+import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
+import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
+import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -88,9 +93,11 @@ export class AssistantInject {
   private _resolverEngine: IResolverEngine | null = null;
   private _commandMappingUseCase: ICommandMappingUseCase | null = null;
   private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
+  private _walletDataProvider: IWalletDataProvider | null = null;
+  private _systemToolProvider: ISystemToolProvider | null = null;
 
   private getChainId(): number {
-    return parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    return CHAIN_CONFIG.chainId;
   }
 
   getSqlDB(): DrizzleSqlDB {
@@ -106,9 +113,10 @@ export class AssistantInject {
   getViemClient(): ViemClientAdapter {
     if (!this._viemClient) {
       this._viemClient = new ViemClientAdapter({
-        rpcUrl: process.env.AVAX_RPC_URL ?? "https://api.avax-test.network/ext/bc/C/rpc",
+        rpcUrl: CHAIN_CONFIG.rpcUrl,
         botPrivateKey: "",
-        chainId: this.getChainId(),
+        chainId: CHAIN_CONFIG.chainId,
+        chain: CHAIN_CONFIG.chain,
       });
     }
     return this._viemClient;
@@ -271,10 +279,18 @@ export class AssistantInject {
 
       const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
+
+        // Existing static tools
         r.register(new WebSearchTool(webSearchService));
         r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
         r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId));
 
+        // System tools — always available, no DB registration needed
+        for (const tool of this.getSystemToolProvider().getTools(userId, conversationId)) {
+          r.register(tool);
+        }
+
+        // Per-user DB tools (developer-registered HTTP query tools)
         const httpToolDB = this.getSqlDB().httpQueryTools;
         const userHttpTools = await httpToolDB.findActiveByUser(userId);
         const userProfileCache = this.getUserProfileCache();
@@ -445,6 +461,27 @@ export class AssistantInject {
       );
     }
     return this._httpQueryToolUseCase;
+  }
+
+  getWalletDataProvider(): IWalletDataProvider {
+    if (!this._walletDataProvider) {
+      this._walletDataProvider = new PrivyWalletDataProvider(
+        process.env.PRIVY_APP_ID ?? "",
+        process.env.PRIVY_APP_SECRET ?? "",
+      );
+    }
+    return this._walletDataProvider;
+  }
+
+  getSystemToolProvider(): ISystemToolProvider {
+    if (!this._systemToolProvider) {
+      this._systemToolProvider = new SystemToolProviderConcrete(
+        this.getIntentUseCase(),
+        this.getWalletDataProvider(),
+        this.getUserProfileCache(),
+      );
+    }
+    return this._systemToolProvider;
   }
 
   getCommandMappingUseCase(): ICommandMappingUseCase {

@@ -1,5 +1,6 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
+import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { CONVERSATION_STATUSES } from "../../helpers/enums/statuses.enum";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
 import type {
@@ -25,7 +26,7 @@ import type {
 } from "../interface/output/repository/message.repo";
 
 const DEFAULT_SYSTEM_PROMPT =
-  "You are an AI trading assistant on Avalanche. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.";
+  `You are an AI trading assistant on ${CHAIN_CONFIG.name}. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.`;
 const DEFAULT_MAX_TOOL_ROUNDS = 10;
 
 interface IToolResult {

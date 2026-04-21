@@ -1,11 +1,13 @@
 services:
-  jarvis:
+  app:
     build: .
-    image: jarvis-v0.0.1
     env_file: .env
     environment:
+      HTTP_API_PORT: "4000"
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+    ports:
+      - "4000:4000"
     depends_on:
       - redis
       - postgres
@@ -16,6 +18,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
   postgres:
@@ -32,3 +36,4 @@ services:
 
 volumes:
   pgdata:
+  redis_data:

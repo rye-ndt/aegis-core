@@ -3,6 +3,7 @@ import { Api, Bot } from "grammy";
 import { AssistantInject } from "./adapters/inject/assistant.di";
 import { TelegramBot } from "./adapters/implementations/input/telegram/bot";
 import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/handler";
+import { CHAIN_CONFIG } from "./helpers/chainConfig";
 
 (async () => {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -41,7 +42,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     token,
     inject.getIntentUseCase(),
     inject.getPortfolioUseCase(),
-    parseInt(process.env.CHAIN_ID ?? "43113", 10),
+    CHAIN_CONFIG.chainId,
     sqlDB.userProfiles,
     sqlDB.pendingDelegations,
     inject.getDelegationRequestBuilder(),

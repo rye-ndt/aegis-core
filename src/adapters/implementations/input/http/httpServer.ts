@@ -1,6 +1,7 @@
 import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
@@ -215,7 +216,7 @@ export class HttpApiServer {
       return this.sendJson(res, 503, { error: "Token registry not available" });
     }
     const chainIdStr = url.searchParams.get("chainId");
-    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : parseInt(process.env.CHAIN_ID ?? "43113", 10);
+    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : CHAIN_CONFIG.chainId;
     const tokens = await this.portfolioUseCase.listTokens(chainId);
     return this.sendJson(res, 200, { tokens });
   }
