@@ -1,6 +1,6 @@
 import { PrivyClient } from "@privy-io/server-auth";
 import type { User } from "@privy-io/server-auth";
-import type { IPrivyAuthService, PrivyVerifiedUser } from "../../../../use-cases/interface/output/privyAuth.interface";
+import type { IPrivyAuthService, PrivyUserProfile } from "../../../../use-cases/interface/output/privyAuth.interface";
 
 export class PrivyServerAuthAdapter implements IPrivyAuthService {
   private client: PrivyClient;
@@ -9,24 +9,61 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
     this.client = new PrivyClient(appId, appSecret);
   }
 
-  async verifyToken(accessToken: string): Promise<PrivyVerifiedUser> {
+  async verifyToken(accessToken: string): Promise<PrivyUserProfile> {
     const claims = await this.client.verifyAuthToken(accessToken);
     const user = await this.client.getUser(claims.userId);
 
-    // Privy linkedAccounts is a discriminated union — only google_oauth entries carry `email`
     const googleAccount = user.linkedAccounts.find((a) => a.type === "google_oauth");
     const telegramAccount = user.linkedAccounts.find((a) => a.type === "telegram");
-    const telegramFallback = telegramAccount && "telegramUserId" in telegramAccount
-      ? `tg_${(telegramAccount as { telegramUserId: string }).telegramUserId}@privy.local`
+
+    const googleEmail = (googleAccount && "email" in googleAccount)
+      ? (googleAccount as { email: string }).email
       : undefined;
 
-    const email = (googleAccount && "email" in googleAccount ? googleAccount.email as string : undefined)
+    const telegramUserId = (telegramAccount && "telegramUserId" in telegramAccount)
+      ? (telegramAccount as { telegramUserId: string }).telegramUserId
+      : undefined;
+
+    const telegramUsername = (telegramAccount && "username" in telegramAccount)
+      ? (telegramAccount as { username?: string }).username
+      : undefined;
+
+    const telegramFallbackEmail = telegramUserId
+      ? `tg_${telegramUserId}@privy.local`
+      : undefined;
+
+    const email = googleEmail
       ?? (user as unknown as { email?: string }).email
-      ?? telegramFallback
+      ?? telegramFallbackEmail
       ?? "";
 
     if (!email) throw new Error("PRIVY_NO_EMAIL");
-    return { privyDid: claims.userId, email };
+
+    const embeddedWallet = user.linkedAccounts.find(
+      (a) => a.type === "wallet" && (a as { walletClientType?: string }).walletClientType === "privy",
+    );
+
+    const linkedExternalWallets = user.linkedAccounts
+      .filter((a) => a.type === "wallet" && (a as { walletClientType?: string }).walletClientType !== "privy")
+      .map((a) => (a as { address: string }).address)
+      .filter(Boolean);
+
+    const privyCreatedAt = user.createdAt
+      ? Math.floor(new Date(user.createdAt).getTime() / 1000)
+      : undefined;
+
+    return {
+      privyDid: claims.userId,
+      email,
+      googleEmail,
+      telegramUserId,
+      telegramUsername,
+      embeddedWalletAddress: embeddedWallet && "address" in embeddedWallet
+        ? (embeddedWallet as { address: string }).address
+        : undefined,
+      linkedExternalWallets,
+      privyCreatedAt,
+    };
   }
 
   async getOrCreateWalletByTelegramId(telegramUserId: string): Promise<string> {

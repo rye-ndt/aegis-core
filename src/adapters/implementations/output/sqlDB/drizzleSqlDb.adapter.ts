@@ -13,6 +13,7 @@ import { DrizzleToolManifestRepo } from "./repositories/toolManifest.repo";
 import { DrizzleCommandToolMappingRepo } from "./repositories/commandToolMapping.repo";
 import { DrizzleFeeRecordRepo } from "./repositories/feeRecord.repo";
 import { DrizzlePendingDelegationRepo } from "./repositories/pendingDelegation.repo";
+import { DrizzleHttpQueryToolRepo } from "./repositories/httpQueryTool.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -27,6 +28,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly feeRecords: DrizzleFeeRecordRepo;
   readonly pendingDelegations: DrizzlePendingDelegationRepo;
   readonly commandToolMappings: DrizzleCommandToolMappingRepo;
+  readonly httpQueryTools: DrizzleHttpQueryToolRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -42,6 +44,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.feeRecords = new DrizzleFeeRecordRepo(this.db);
     this.pendingDelegations = new DrizzlePendingDelegationRepo(this.db);
     this.commandToolMappings = new DrizzleCommandToolMappingRepo(this.db);
+    this.httpQueryTools = new DrizzleHttpQueryToolRepo(this.db);
   }
 
 }

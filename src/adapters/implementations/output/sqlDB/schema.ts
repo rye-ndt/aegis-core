@@ -159,3 +159,27 @@ export const commandToolMappings = pgTable("command_tool_mappings", {
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
+
+export const httpQueryTools = pgTable("http_query_tools", {
+  id:                uuid("id").primaryKey(),
+  userId:            uuid("user_id").notNull(),
+  name:              text("name").notNull(),
+  description:       text("description").notNull(),
+  endpoint:          text("endpoint").notNull(),
+  method:            text("method").notNull(),
+  requestBodySchema: text("request_body_schema").notNull(),
+  isActive:          boolean("is_active").notNull().default(true),
+  createdAtEpoch:    integer("created_at_epoch").notNull(),
+  updatedAtEpoch:    integer("updated_at_epoch").notNull(),
+}, (t) => ({
+  userNameUniq: unique().on(t.userId, t.name),
+}));
+
+export const httpQueryToolHeaders = pgTable("http_query_tool_headers", {
+  id:             uuid("id").primaryKey(),
+  toolId:         uuid("tool_id").notNull(),
+  headerKey:      text("header_key").notNull(),
+  headerValue:    text("header_value").notNull(),
+  isEncrypted:    boolean("is_encrypted").notNull().default(false),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+});

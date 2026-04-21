@@ -1,12 +1,11 @@
 import { MESSAGE_ROLE } from "../../../../helpers/enums/messageRole.enum";
-import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 
 export interface Message {
   id: string;
   conversationId: string;
   role: MESSAGE_ROLE;
   content: string;
-  toolName?: TOOL_TYPE;
+  toolName?: string;
   toolCallId?: string;
   toolCallsJson?: string;
   compressedAtEpoch?: number | null;

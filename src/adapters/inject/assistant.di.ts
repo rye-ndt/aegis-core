@@ -49,12 +49,22 @@ import { ResolverEngineImpl } from '../implementations/output/resolver/resolverE
 import type { IResolverEngine } from '../../use-cases/interface/output/resolver.interface';
 import { CommandMappingUseCase } from '../../use-cases/implementations/commandMapping.usecase';
 import type { ICommandMappingUseCase } from '../../use-cases/interface/input/commandMapping.interface';
+import { BotTelegramNotifier } from "../implementations/output/telegram/botNotifier";
+import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
+import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
+import type { Bot } from "grammy";
+import { DrizzleHttpQueryToolRepo } from "../implementations/output/sqlDB/repositories/httpQueryTool.repo";
+import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
+import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
+import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
   private useCase: IAssistantUseCase | null = null;
   private _authUseCase: IAuthUseCase | null = null;
   private _intentUseCase: IIntentUseCase | null = null;
+  private _userProfileCache: IUserProfileCache | null = null;
+  private _bot: Bot | null = null;
   private _viemClient: ViemClientAdapter | null = null;
   private _solverRegistry: SolverRegistry | null = null;
   private _intentParser: OpenAIIntentParser | null = null;
@@ -77,6 +87,7 @@ export class AssistantInject {
   private _signingRequestUseCase: ISigningRequestUseCase | null = null;
   private _resolverEngine: IResolverEngine | null = null;
   private _commandMappingUseCase: ICommandMappingUseCase | null = null;
+  private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
 
   private getChainId(): number {
     return parseInt(process.env.CHAIN_ID ?? "43113", 10);
@@ -258,11 +269,32 @@ export class AssistantInject {
       const viemClient = this.getViemClient();
       const userProfileDB = sqlDB.userProfiles;
 
-      const registryFactory = (userId: string, conversationId: string): IToolRegistry => {
+      const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
         r.register(new WebSearchTool(webSearchService));
         r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
         r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId));
+
+        const httpToolDB = this.getSqlDB().httpQueryTools;
+        const userHttpTools = await httpToolDB.findActiveByUser(userId);
+        const userProfileCache = this.getUserProfileCache();
+        const encryptionKey = process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY;
+
+        for (const toolConfig of userHttpTools) {
+          const headers = await httpToolDB.getHeaders(toolConfig.id);
+          r.register(
+            new HttpQueryTool(
+              toolConfig,
+              headers,
+              userId,
+              userProfileCache,
+              userProfileDB,
+              orchestrator,
+              encryptionKey,
+            ),
+          );
+        }
+
         return r;
       };
 
@@ -276,15 +308,36 @@ export class AssistantInject {
     return this.useCase;
   }
 
+  setBot(bot: Bot): void {
+    this._bot = bot;
+  }
+
+  getBot(): Bot | undefined {
+    return this._bot ?? undefined;
+  }
+
+  getUserProfileCache(): IUserProfileCache | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._userProfileCache) {
+      this._userProfileCache = new RedisUserProfileCache(redis);
+    }
+    return this._userProfileCache;
+  }
+
   getAuthUseCase(): IAuthUseCase {
     if (!this._authUseCase) {
       const db = this.getSqlDB();
+      const bot = this.getBot();
+      const notifier = bot ? new BotTelegramNotifier(bot) : undefined;
       this._authUseCase = new AuthUseCaseImpl(
         db.users,
         process.env.JWT_SECRET ?? "",
         process.env.JWT_EXPIRES_IN ?? "7d",
         this.getPrivyAuthService(),
         db.telegramSessions,
+        notifier,
+        this.getUserProfileCache(),
       );
     }
     return this._authUseCase;
@@ -384,6 +437,16 @@ export class AssistantInject {
     return this._telegramHandleResolver;
   }
 
+  getHttpQueryToolUseCase(): IHttpQueryToolUseCase {
+    if (!this._httpQueryToolUseCase) {
+      this._httpQueryToolUseCase = new HttpQueryToolUseCaseImpl(
+        this.getSqlDB().httpQueryTools,
+        process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY,
+      );
+    }
+    return this._httpQueryToolUseCase;
+  }
+
   getCommandMappingUseCase(): ICommandMappingUseCase {
     if (!this._commandMappingUseCase) {
       const db = this.getSqlDB();
@@ -409,6 +472,8 @@ export class AssistantInject {
       this.getSseRegistry(),
       signingRequestUseCase,
       this.getCommandMappingUseCase(),
+      this.getUserProfileCache(),
+      this.getHttpQueryToolUseCase(),
     );
   }
 }

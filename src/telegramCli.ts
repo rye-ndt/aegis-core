@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Api } from "grammy";
+import { Api, Bot } from "grammy";
 import { AssistantInject } from "./adapters/inject/assistant.di";
 import { TelegramBot } from "./adapters/implementations/input/telegram/bot";
 import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/handler";
@@ -23,6 +23,9 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
       await tgApi.sendMessage(chatId, `Transaction submitted.\nTx hash: \`${txHash ?? 'unknown'}\``, { parse_mode: 'Markdown' });
     }
   };
+
+  const rawBot = new Bot(token);
+  inject.setBot(rawBot);
 
   const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved);
   const httpServer = inject.getHttpApiServer(signingRequestUseCase);
@@ -48,7 +51,7 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
     inject.getResolverEngine(),
   );
 
-  const bot = new TelegramBot(token, handler);
+  const bot = new TelegramBot(rawBot, handler);
 
   console.log("Onchain Agent Telegram is up and running.");
 

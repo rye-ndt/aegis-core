@@ -2,7 +2,6 @@ import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import { CONVERSATION_STATUSES } from "../../helpers/enums/statuses.enum";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
-import { TOOL_TYPE } from "../../helpers/enums/toolType.enum";
 import type {
   IAssistantUseCase,
   IChatInput,
@@ -40,7 +39,7 @@ interface IToolResult {
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly orchestrator: ILLMOrchestrator,
-    private readonly registryFactory: (userId: string, conversationId: string) => IToolRegistry,
+    private readonly registryFactory: (userId: string, conversationId: string) => Promise<IToolRegistry>,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
   ) {}
@@ -76,7 +75,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const systemPrompt =
       `${DEFAULT_SYSTEM_PROMPT}\n\nCurrent datetime: ${new Date().toISOString()}.`;
 
-    const toolRegistry = this.registryFactory(input.userId, conversationId);
+    const toolRegistry = await this.registryFactory(input.userId, conversationId);
     const availableTools = toolRegistry.getAll().map((t) => t.definition());
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";
@@ -122,7 +121,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
             conversationId,
             role: MESSAGE_ROLE.TOOL,
             content: JSON.stringify(r.result.data ?? r.result.error),
-            toolName: r.toolName as TOOL_TYPE,
+            toolName: r.toolName,
             toolCallId: r.toolCallId,
             createdAtEpoch: newCurrentUTCEpoch(),
           }),
@@ -193,7 +192,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     toolRegistry: IToolRegistry,
   ): Promise<IToolResult> {
     const start = Date.now();
-    const tool = toolRegistry.getByName(call.toolName as TOOL_TYPE);
+    const tool = toolRegistry.getByName(call.toolName);
 
     if (!tool) {
       return {

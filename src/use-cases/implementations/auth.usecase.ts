@@ -13,16 +13,23 @@ import type {
 import type { IPrivyAuthService } from "../interface/output/privyAuth.interface";
 import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
+import type { ITelegramNotifier } from "../interface/output/telegramNotifier.interface";
+import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
 
 const BCRYPT_ROUNDS = 10;
 
 export class AuthUseCaseImpl implements IAuthUseCase {
+  private static readonly WELCOME_BACK_TEXT =
+    "You're now signed in to Aegis!\n\nYou can:\n• Describe a trade — the agent will parse and execute it\n• Send /new to start a fresh conversation\n• Send /history to see recent messages\n• Send /logout to sign out";
+
   constructor(
     private readonly userDB: IUserDB,
     private readonly jwtSecret: string,
     private readonly jwtExpiresIn: string,
     private readonly privyAuthService?: IPrivyAuthService,
     private readonly telegramSessionDB?: ITelegramSessionDB,
+    private readonly telegramNotifier?: ITelegramNotifier,
+    private readonly userProfileCache?: IUserProfileCache,
   ) {}
 
   async register(input: IRegisterInput): Promise<{ userId: string }> {
@@ -64,7 +71,8 @@ export class AuthUseCaseImpl implements IAuthUseCase {
   async loginWithPrivy(input: IPrivyLoginInput): Promise<{ token: string; expiresAtEpoch: number; userId: string }> {
     if (!this.privyAuthService) throw new Error("PRIVY_NOT_CONFIGURED");
 
-    const { privyDid, email } = await this.privyAuthService.verifyToken(input.privyToken);
+    const profile = await this.privyAuthService.verifyToken(input.privyToken);
+    const { privyDid, email } = profile;
 
     // When a telegramChatId is provided, the user opening the Mini App is already
     // known to the bot via telegram_sessions. Reuse that existing userId so that
@@ -110,6 +118,24 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         telegramChatId: input.telegramChatId,
         userId: user.id,
         expiresAtEpoch: result.expiresAtEpoch,
+      });
+    }
+
+    // Store Privy profile in Redis
+    if (this.userProfileCache) {
+      const ttlSeconds = result.expiresAtEpoch - Math.floor(Date.now() / 1000);
+      await this.userProfileCache.store(user.id, profile, ttlSeconds).catch((err) => {
+        console.error("[Auth] failed to store user profile:", err);
+      });
+    }
+
+    // Notify the user on Telegram
+    if (input.telegramChatId && this.telegramNotifier) {
+      await this.telegramNotifier.sendMessage(
+        input.telegramChatId,
+        AuthUseCaseImpl.WELCOME_BACK_TEXT,
+      ).catch((err) => {
+        console.error("[Auth] failed to send Telegram welcome message:", err);
       });
     }
 

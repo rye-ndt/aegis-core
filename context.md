@@ -72,3 +72,39 @@ None automated.
 - `telegramChatId` absent → endpoint behaves exactly as before (bot's `/auth` command unaffected).
 - Non-numeric `telegramChatId` → 400 returned before `loginWithPrivy` is called.
 - FE change (Step 5 of the plan) lives in `fe/privy-auth` and must be applied separately.
+
+---
+
+## 2026-04-21T04:44 — Backend Login Flow Revamp
+
+### Task summary
+Implemented the backend login flow revamp as per `login-flow-revamp-plan.md`.
+1. Added send welcome message logic after `/logout` or unauthenticated `/start`.
+2. Expanded `PrivyVerifiedUser` to `PrivyUserProfile` to fetch full user info.
+3. Added abstract layers and implementations for `ITelegramNotifier` and `IUserProfileCache`.
+4. Cached the full Privy profile into Redis upon login and wired it to dependency injection.
+5. Added `GET /user/profile` HTTP API endpoint to expose user profile data.
+
+### Files modified
+- `src/use-cases/interface/output/telegramNotifier.interface.ts` (NEW)
+- `src/adapters/implementations/output/telegram/botNotifier.ts` (NEW)
+- `src/use-cases/interface/output/cache/userProfile.cache.ts` (NEW)
+- `src/adapters/implementations/output/cache/redis.userProfile.ts` (NEW)
+- `src/use-cases/interface/output/privyAuth.interface.ts`
+- `src/adapters/implementations/output/privyAuth/privyServer.adapter.ts`
+- `src/use-cases/implementations/auth.usecase.ts`
+- `src/adapters/implementations/input/telegram/handler.ts`
+- `src/adapters/inject/assistant.di.ts`
+- `src/adapters/implementations/input/telegram/bot.ts`
+- `src/telegramCli.ts`
+- `src/adapters/implementations/input/http/httpServer.ts`
+
+### Commands executed
+- `/opt/homebrew/bin/node ./node_modules/.bin/tsc --noEmit` → EXIT:0
+
+### Tests run
+None automated. Compiled successfully.
+
+### Known risks / assumptions
+- `telegramCli.ts` modified to inject raw `Bot` into DI early.
+- Redis cache failures logged but do not block authentication (fail open).

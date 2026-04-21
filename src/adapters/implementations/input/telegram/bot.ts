@@ -2,10 +2,7 @@ import { Bot } from "grammy";
 import type { TelegramAssistantHandler } from "./handler";
 
 export class TelegramBot {
-  private bot: Bot;
-
-  constructor(token: string, handler: TelegramAssistantHandler) {
-    this.bot = new Bot(token);
+  constructor(private bot: Bot, handler: TelegramAssistantHandler) {
     handler.register(this.bot);
   }
 

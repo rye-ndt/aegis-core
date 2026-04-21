@@ -99,6 +99,13 @@
       "when": 1776171738608,
       "tag": "0016_rich_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1776755782217,
+      "tag": "0014_complex_scarlet_spider",
+      "breakpoints": true
     }
   ]
 }

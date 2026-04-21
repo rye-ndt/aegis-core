@@ -10,6 +10,8 @@ import type { IPendingDelegationDB } from "../../../../use-cases/interface/outpu
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { ISseRegistry } from "../../../../use-cases/interface/output/sse/sseRegistry.interface";
 import type { ICommandMappingUseCase } from "../../../../use-cases/interface/input/commandMapping.interface";
+import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
+import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/input/httpQueryTool.interface";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -44,6 +46,8 @@ export class HttpApiServer {
     private readonly sseRegistry?: ISseRegistry,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
     private readonly commandMappingUseCase?: ICommandMappingUseCase,
+    private readonly userProfileCache?: IUserProfileCache,
+    private readonly httpQueryToolUseCase?: IHttpQueryToolUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -60,7 +64,7 @@ export class HttpApiServer {
 
     // CORS — allow the mini app dev server and any deployed origin
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     if (method === 'OPTIONS') {
       res.writeHead(204);
@@ -70,6 +74,9 @@ export class HttpApiServer {
 
     if (method === "POST" && url.pathname === "/auth/privy") {
       return this.handlePrivyLogin(req, res);
+    }
+    if (method === 'GET' && url.pathname === '/user/profile') {
+      return this.handleGetUserProfile(req, res);
     }
     if (method === "GET" && url.pathname.startsWith("/intent/")) {
       return this.handleGetIntent(req, res, url);
@@ -123,6 +130,16 @@ export class HttpApiServer {
       const command = decodeURIComponent(url.pathname.split('/command-mappings/')[1] ?? '');
       return this.handleDeleteCommandMapping(req, res, command);
     }
+    if (method === 'POST' && url.pathname === '/http-tools') {
+      return this.handlePostHttpTool(req, res);
+    }
+    if (method === 'GET' && url.pathname === '/http-tools') {
+      return this.handleGetHttpTools(req, res);
+    }
+    if (method === 'DELETE' && url.pathname.startsWith('/http-tools/')) {
+      const id = url.pathname.split('/http-tools/')[1]?.trim() ?? '';
+      return this.handleDeleteHttpTool(req, res, id);
+    }
 
     res.writeHead(404);
     res.end("Not found");
@@ -159,6 +176,16 @@ export class HttpApiServer {
       }
       throw err;
     }
+  }
+
+  private async handleGetUserProfile(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.userProfileCache) return this.sendJson(res, 503, { error: "Profile cache not available" });
+
+    const profile = await this.userProfileCache.get(userId);
+    if (!profile) return this.sendJson(res, 404, { error: "Profile not found or expired" });
+    return this.sendJson(res, 200, profile);
   }
 
   private async handleGetIntent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
@@ -533,6 +560,67 @@ export class HttpApiServer {
     } catch (err) {
       const msg = toErrorMessage(err);
       if (msg.startsWith("MAPPING_NOT_FOUND")) return this.sendJson(res, 404, { error: msg });
+      throw err;
+    }
+  }
+
+  private async handlePostHttpTool(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
+
+    let body: unknown;
+    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+
+    const parsed = z.object({
+      name: z.string().regex(/^[a-z][a-z0-9_]{0,62}$/, "must be snake_case, start with letter, max 63 chars"),
+      description: z.string().min(1),
+      endpoint: z.string().url(),
+      method: z.enum(["GET", "POST", "PUT"]),
+      requestBodySchema: z.record(z.string(), z.unknown()),
+      headers: z.array(z.object({
+        key: z.string().min(1),
+        value: z.string().min(1),
+        encrypt: z.boolean(),
+      })).default([]),
+    }).safeParse(body);
+
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
+
+    try {
+      const result = await this.httpQueryToolUseCase.register({ userId, ...parsed.data });
+      return this.sendJson(res, 201, result);
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (msg.startsWith("INVALID_TOOL_NAME")) return this.sendJson(res, 400, { error: msg });
+      if (msg.startsWith("INVALID_ENDPOINT_URL")) return this.sendJson(res, 400, { error: msg });
+      if (msg.startsWith("ENCRYPTION_KEY_NOT_CONFIGURED")) return this.sendJson(res, 503, { error: msg });
+      throw err;
+    }
+  }
+
+  private async handleGetHttpTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
+
+    const tools = await this.httpQueryToolUseCase.list(userId);
+    return this.sendJson(res, 200, { tools });
+  }
+
+  private async handleDeleteHttpTool(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
+    if (!id) return this.sendJson(res, 400, { error: "Tool ID required" });
+
+    try {
+      await this.httpQueryToolUseCase.deactivate(id, userId);
+      return this.sendJson(res, 200, { id, deactivated: true });
+    } catch (err) {
+      const msg = toErrorMessage(err);
+      if (msg === "TOOL_NOT_FOUND") return this.sendJson(res, 404, { error: msg });
+      if (msg === "TOOL_FORBIDDEN") return this.sendJson(res, 403, { error: msg });
       throw err;
     }
   }

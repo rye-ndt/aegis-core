@@ -121,6 +121,18 @@ export class TelegramAssistantHandler {
 
   // ── Bot registration ─────────────────────────────────────────────────────────
 
+  private async sendWelcomeWithLoginButton(chatId: number): Promise<void> {
+    const miniAppUrl = process.env.MINI_APP_URL;
+    const keyboard = miniAppUrl
+      ? new InlineKeyboard().webApp("Open Aegis", miniAppUrl)
+      : new InlineKeyboard().text("Sign in with Google", "auth:login");
+    await this.botRef!.api.sendMessage(
+      chatId,
+      "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
+      { reply_markup: keyboard },
+    );
+  }
+
   register(bot: Bot): void {
     this.botRef = bot;
 
@@ -132,14 +144,7 @@ export class TelegramAssistantHandler {
     bot.command("start", async (ctx) => {
       const session = await this.ensureAuthenticated(ctx.chat.id);
       if (!session) {
-        const miniAppUrl = process.env.MINI_APP_URL;
-        const keyboard = miniAppUrl
-          ? new InlineKeyboard().webApp("Open Aegis", miniAppUrl)
-          : new InlineKeyboard().text("Sign in with Google", "auth:login");
-        await ctx.reply(
-          "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
-          { reply_markup: keyboard },
-        );
+        await this.sendWelcomeWithLoginButton(ctx.chat.id);
         return;
       }
       await ctx.reply(
@@ -203,6 +208,7 @@ export class TelegramAssistantHandler {
       this.sessionCache.delete(chatId);
       this.conversations.delete(chatId);
       await ctx.reply("Logged out. Your session has been invalidated.");
+      await this.sendWelcomeWithLoginButton(chatId);
     });
 
     bot.command("new", async (ctx) => {
