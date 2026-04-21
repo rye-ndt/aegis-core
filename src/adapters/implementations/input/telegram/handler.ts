@@ -1,4 +1,5 @@
 import type { Bot } from "grammy";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import { InlineKeyboard } from "grammy";
 import { toRaw } from "../../../../helpers/bigint";
 import {
@@ -106,10 +107,7 @@ export class TelegramAssistantHandler {
     private readonly botToken?: string,
     private readonly intentUseCase?: IIntentUseCase,
     private readonly portfolioUseCase?: IPortfolioUseCase,
-    private readonly chainId: number = parseInt(
-      process.env.CHAIN_ID ?? "43113",
-      10,
-    ),
+    private readonly chainId: number = CHAIN_CONFIG.chainId,
     private readonly userProfileRepo?: IUserProfileDB,
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
     private readonly delegationBuilder?: IDelegationRequestBuilder,

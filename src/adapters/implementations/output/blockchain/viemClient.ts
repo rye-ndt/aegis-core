@@ -6,7 +6,7 @@ import {
   type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { avalancheFuji, avalanche } from "viem/chains";
+import type { Chain } from "viem/chains";
 import type { IChainReader } from "../../../../use-cases/interface/output/blockchain/chainReader.interface";
 
 const ERC20_BALANCE_ABI = [
@@ -28,18 +28,18 @@ export class ViemClientAdapter implements IChainReader {
     rpcUrl: string;
     botPrivateKey: string;
     chainId: number;
+    chain: Chain;
   }) {
     this.chainId = params.chainId;
-    const chain = params.chainId === 43114 ? avalanche : avalancheFuji;
     const transport = http(params.rpcUrl);
 
-    this.publicClient = createPublicClient({ chain, transport });
+    this.publicClient = createPublicClient({ chain: params.chain, transport });
 
     const isValidKey = /^(0x)?[0-9a-fA-F]{64}$/.test(params.botPrivateKey.trim());
     if (isValidKey) {
       const key = params.botPrivateKey.trim();
       const account = privateKeyToAccount((key.startsWith("0x") ? key : `0x${key}`) as `0x${string}`);
-      this.walletClient = createWalletClient({ account, chain, transport });
+      this.walletClient = createWalletClient({ account, chain: params.chain, transport });
     } else {
       this.walletClient = null;
     }

@@ -8,6 +8,7 @@ import type {
 } from "../../../../use-cases/interface/output/intentParser.interface";
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { WINDOW_SIZE } from "./intent.validator";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 
 const BUILTIN_ACTIONS = Object.values(INTENT_ACTION).join(" | ");
 
@@ -27,14 +28,14 @@ const ResponseSchema = z.object({
   intent: IntentSchema.nullable(),
 });
 
-const BASE_SYSTEM_PROMPT = `You are an intent parser for an Avalanche DeFi trading agent.
+const BASE_SYSTEM_PROMPT = `You are an intent parser for a ${CHAIN_CONFIG.name} DeFi trading agent.
 The user may have spread their intent across several messages — extract the combined intent from all messages.
 
 If the user is NOT asking for any on-chain action (e.g. chatting, asking a question, greeting), return: { "intent": null }
 
 If the user IS requesting an on-chain action, extract:
 - action: one of the built-in actions (${BUILTIN_ACTIONS}) OR a dynamic toolId if applicable
-- fromTokenSymbol: token the user wants to spend/send (e.g. "AVAX", "USDC")
+- fromTokenSymbol: token the user wants to spend/send (e.g. "${CHAIN_CONFIG.nativeSymbol}", "USDC")
 - toTokenSymbol: token the user wants to receive (swaps only)
 - amountHuman: human-readable amount as a string (e.g. "1.5", "100")
 - slippageBps: slippage in basis points if specified; default 50 for swaps

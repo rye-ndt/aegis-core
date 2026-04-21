@@ -1,5 +1,6 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { toErrorMessage } from "../../helpers/errors/toErrorMessage";
+import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { extractAddressFields } from "../../helpers/schema/addressFields";
 import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
@@ -137,7 +138,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       return {
         intentId,
         status: INTENT_STATUSES.REJECTED,
-        humanSummary: `I couldn't understand that intent clearly (confidence: ${Math.round(intent.confidence * 100)}%). Could you rephrase? For example: "Swap 100 USDC for AVAX" or "Claim my rewards".`,
+        humanSummary: `I couldn't understand that intent clearly (confidence: ${Math.round(intent.confidence * 100)}%). Could you rephrase? For example: "Swap 100 USDC for ${CHAIN_CONFIG.nativeSymbol}" or "Claim my rewards".`,
         requiresConfirmation: false,
       };
     }

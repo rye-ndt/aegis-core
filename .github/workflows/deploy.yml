@@ -1,0 +1,51 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+
+env:
+  REGION: asia-southeast1        # change to your preferred region
+  SERVICE: aegis-be              # Cloud Run service name
+  REGISTRY: asia-southeast1-docker.pkg.dev  # match REGION
+  IMAGE: ${{ vars.GCP_PROJECT_ID }}/aegis/be
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write            # required for Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE_URI=${{ env.REGISTRY }}/${{ env.IMAGE }}:${{ github.sha }}
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+
+      - uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE }}
+          region: ${{ env.REGION }}
+          image: ${{ env.IMAGE_URI }}
+          flags: |
+            --min-instances=1
+            --max-instances=3
+            --memory=512Mi
+            --cpu=1
+            --timeout=3600
+            --no-cpu-throttling

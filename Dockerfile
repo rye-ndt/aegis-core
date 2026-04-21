@@ -15,5 +15,8 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY drizzle ./drizzle
 
+# Cloud Run injects PORT; remap to HTTP_API_PORT which the app reads.
+EXPOSE 8080
+
 USER node
-CMD ["node", "dist/telegramCli.js"]
+CMD ["sh", "-c", "HTTP_API_PORT=${PORT:-8080} node dist/telegramCli.js"]

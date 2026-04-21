@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { TOOL_TYPE } from "../../../../helpers/enums/toolType.enum";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import type {
   ITool,
   IToolDefinition,
@@ -12,7 +13,7 @@ import { newUuid } from "../../../../helpers/uuid";
 
 const InputSchema = z.object({
   rawInput: z.string().min(1).describe(
-    "The user's raw trading intent message. E.g. 'Swap 100 USDC for AVAX' or 'Claim my rewards'.",
+    `The user's raw trading intent message. E.g. 'Swap 100 USDC for ${CHAIN_CONFIG.nativeSymbol}' or 'Claim my rewards'.`,
   ),
 });
 
