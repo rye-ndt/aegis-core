@@ -360,8 +360,6 @@ export class AssistantInject {
       const notifier = bot ? new BotTelegramNotifier(bot) : undefined;
       this._authUseCase = new AuthUseCaseImpl(
         db.users,
-        process.env.JWT_SECRET ?? "",
-        process.env.JWT_EXPIRES_IN ?? "7d",
         this.getPrivyAuthService(),
         db.telegramSessions,
         notifier,

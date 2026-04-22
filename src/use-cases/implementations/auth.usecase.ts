@@ -1,14 +1,10 @@
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import { USER_STATUSES } from "../../helpers/enums/statuses.enum";
 import type { IUserDB } from "../interface/output/repository/user.repo";
 import type {
   IAuthUseCase,
-  ILoginInput,
   IPrivyLoginInput,
-  IRegisterInput,
 } from "../interface/input/auth.interface";
 import type { IPrivyAuthService } from "../interface/output/privyAuth.interface";
 import type { IUser } from "../interface/output/repository/user.repo";
@@ -17,7 +13,7 @@ import type { ITelegramNotifier } from "../interface/output/telegramNotifier.int
 import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
 import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
 
-const BCRYPT_ROUNDS = 10;
+const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 export class AuthUseCaseImpl implements IAuthUseCase {
   private static readonly WELCOME_BACK_TEXT =
@@ -25,8 +21,6 @@ export class AuthUseCaseImpl implements IAuthUseCase {
 
   constructor(
     private readonly userDB: IUserDB,
-    private readonly jwtSecret: string,
-    private readonly jwtExpiresIn: string,
     private readonly privyAuthService?: IPrivyAuthService,
     private readonly telegramSessionDB?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
@@ -34,43 +28,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     private readonly tokenDelegationDB?: ITokenDelegationDB,
   ) {}
 
-  async register(input: IRegisterInput): Promise<{ userId: string }> {
-    const existing = await this.userDB.findByEmail(input.email);
-    if (existing) throw new Error("EMAIL_TAKEN");
-
-    const hashedPassword = await bcrypt.hash(input.password, BCRYPT_ROUNDS);
-    const now = newCurrentUTCEpoch();
-    const userId = newUuid();
-
-    await this.userDB.create({
-      id: userId,
-      userName: input.username,
-      hashedPassword,
-      email: input.email,
-      status: USER_STATUSES.ACTIVE,
-      createdAtEpoch: now,
-      updatedAtEpoch: now,
-    });
-
-    return { userId };
-  }
-
-  async login(input: ILoginInput): Promise<{ token: string; expiresAtEpoch: number; userId: string }> {
-    const user = await this.userDB.findByEmail(input.email);
-    if (!user || !user.hashedPassword) throw new Error("INVALID_CREDENTIALS");
-
-    const match = await bcrypt.compare(input.password, user.hashedPassword);
-    if (!match) throw new Error("INVALID_CREDENTIALS");
-
-    return this.issueJwt(user.id, user.email);
-  }
-
-  async validateToken(token: string): Promise<{ userId: string; expiresAtEpoch: number }> {
-    const payload = jwt.verify(token, this.jwtSecret) as { userId: string; exp: number };
-    return { userId: payload.userId, expiresAtEpoch: payload.exp };
-  }
-
-  async loginWithPrivy(input: IPrivyLoginInput): Promise<{ token: string; expiresAtEpoch: number; userId: string }> {
+  async loginWithPrivy(input: IPrivyLoginInput): Promise<{ expiresAtEpoch: number; userId: string }> {
     if (!this.privyAuthService) throw new Error("PRIVY_NOT_CONFIGURED");
 
     const profile = await this.privyAuthService.verifyToken(input.privyToken);
@@ -113,25 +71,22 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
     }
 
-    const result = this.issueJwt(user.id, user.email);
+    const expiresAtEpoch = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
 
     if (input.telegramChatId && this.telegramSessionDB) {
       await this.telegramSessionDB.upsert({
         telegramChatId: input.telegramChatId,
         userId: user.id,
-        expiresAtEpoch: result.expiresAtEpoch,
+        expiresAtEpoch,
       });
     }
 
-    // Store Privy profile in Redis
     if (this.userProfileCache) {
-      const ttlSeconds = result.expiresAtEpoch - Math.floor(Date.now() / 1000);
-      await this.userProfileCache.store(user.id, profile, ttlSeconds).catch((err) => {
+      await this.userProfileCache.store(user.id, profile, SESSION_TTL_SECONDS).catch((err) => {
         console.error("[Auth] failed to store user profile:", err);
       });
     }
 
-    // Notify the user on Telegram
     if (input.telegramChatId && this.telegramNotifier) {
       await this.telegramNotifier.sendMessage(
         input.telegramChatId,
@@ -141,8 +96,6 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       });
     }
 
-    // Proactive onboarding: if the user has no active delegations, prompt them
-    // to open the mini app and set spending limits.
     if (input.telegramChatId && this.telegramNotifier && this.tokenDelegationDB) {
       const delegations = await this.tokenDelegationDB.findActiveByUserId(user.id).catch(() => []);
       if (delegations.length === 0) {
@@ -160,7 +113,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       }
     }
 
-    return result;
+    return { userId: user.id, expiresAtEpoch };
   }
 
   async resolveUserId(privyToken: string): Promise<string | null> {
@@ -172,13 +125,5 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     } catch {
       return null;
     }
-  }
-
-  private issueJwt(userId: string, email: string): { token: string; expiresAtEpoch: number; userId: string } {
-    const token = jwt.sign({ userId, email }, this.jwtSecret, {
-      expiresIn: this.jwtExpiresIn as jwt.SignOptions["expiresIn"],
-    });
-    const { exp } = jwt.decode(token) as { exp: number };
-    return { token, expiresAtEpoch: exp, userId };
   }
 }

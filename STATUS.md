@@ -112,26 +112,28 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 
 | Method   | Route                      | Auth            | Purpose                                                                    |
 | -------- | -------------------------- | --------------- | -------------------------------------------------------------------------- |
-| `POST`   | `/auth/privy`              | None            | Verify Privy token → JWT; optional `telegramChatId` links Telegram session |
-| `GET`    | `/intent/:intentId`        | JWT             | Fetch intent + execution status                                            |
-| `GET`    | `/portfolio`               | JWT             | On-chain balances for user's SCA                                           |
+| `POST`   | `/auth/privy`              | None            | Verify Privy token; upsert user + link Telegram session; returns `{ userId, expiresAtEpoch }` |
+| `GET`    | `/intent/:intentId`        | Privy           | Fetch intent + execution status                                            |
+| `GET`    | `/portfolio`               | Privy           | On-chain balances for user's SCA                                           |
 | `GET`    | `/tokens?chainId=`         | None            | List verified tokens for a chain                                           |
-| `POST`   | `/tools`                   | JWT             | Register a dynamic tool manifest                                           |
+| `POST`   | `/tools`                   | Privy           | Register a dynamic tool manifest                                           |
 | `GET`    | `/tools`                   | None            | List active tool manifests                                                 |
-| `DELETE` | `/tools/:toolId`           | JWT             | Deactivate a tool manifest                                                 |
-| `POST`   | `/http-tools`              | JWT             | Register an HTTP query tool with encrypted headers                         |
-| `GET`    | `/http-tools`              | JWT             | List user's registered HTTP query tools                                    |
-| `DELETE` | `/http-tools/:id`          | JWT             | Delete an HTTP query tool                                                  |
-| `GET`    | `/user/profile`            | JWT             | Fetch user profile (SCA, session key, privyDid)                            |
-| `POST`   | `/persistent`              | None            | Persist a session delegation record                                        |
+| `DELETE` | `/tools/:toolId`           | Privy           | Deactivate a tool manifest                                                 |
+| `POST`   | `/http-tools`              | Privy           | Register an HTTP query tool with encrypted headers                         |
+| `GET`    | `/http-tools`              | Privy           | List user's registered HTTP query tools                                    |
+| `DELETE` | `/http-tools/:id`          | Privy           | Delete an HTTP query tool                                                  |
+| `GET`    | `/user/profile`            | Privy           | Fetch user profile (SCA, session key, privyDid)                            |
+| `POST`   | `/persistent`              | None (opt Privy)| Persist a session delegation record; writes SCA to user_profiles if auth present |
 | `GET`    | `/permissions?public_key=` | None            | Fetch delegation record by session key address                             |
-| `GET`    | `/delegation/pending`      | JWT             | Fetch latest pending delegation                                            |
-| `POST`   | `/delegation/:id/signed`   | JWT             | Mark a pending delegation as signed                                        |
-| `GET`    | `/events`                  | JWT / `?token=` | SSE stream — `sign_request` events                                         |
-| `POST`   | `/sign-response`           | JWT             | Submit txHash or rejection for a signing request                           |
-| `GET`    | `/preference`              | JWT             | Fetch user preference (`aegisGuardEnabled`)                                |
-| `POST`   | `/preference`              | JWT             | Upsert user preference                                                     |
-| `POST`   | `/aegis-guard/grant`       | JWT             | Store approved ERC20 spending delegation in Redis                          |
+| `GET`    | `/delegation/pending`      | Privy           | Fetch latest pending delegation                                            |
+| `POST`   | `/delegation/:id/signed`   | Privy           | Mark a pending delegation as signed                                        |
+| `GET`    | `/events`                  | Privy / `?token=`| SSE stream — `sign_request` events                                        |
+| `POST`   | `/sign-response`           | Privy           | Submit txHash or rejection for a signing request                           |
+| `GET`    | `/preference`              | Privy           | Fetch user preference (`aegisGuardEnabled`)                                |
+| `POST`   | `/preference`              | Privy           | Upsert user preference                                                     |
+| `GET`    | `/delegation/grant`        | Privy           | List active token delegations for user                                     |
+| `POST`   | `/delegation/grant`        | Privy           | Upsert token spending delegations                                          |
+| `GET`    | `/delegation/approval-params` | Privy        | Default token list + suggested limits for approval UI                      |
 
 ## Telegram commands
 
@@ -183,7 +185,7 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | Table                     | Purpose                                                           |
 | ------------------------- | ----------------------------------------------------------------- |
 | `users`                   | Account record                                                    |
-| `telegram_sessions`       | Telegram chat ID → userId + JWT expiry                            |
+| `telegram_sessions`       | Telegram chat ID → userId + session expiry (7-day window)         |
 | `conversations`           | Per-user threads                                                  |
 | `messages`                | All turns (user / assistant / tool / assistant_tool_call)         |
 | `user_profiles`           | SCA address, session key, scope, status, privyDid                 |
@@ -216,8 +218,6 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | `OPENAI_MODEL`                    | `gpt-4o`                                     | LLM model                               |
 | `ANTHROPIC_API_KEY`               | —                                            | Unused orchestrator (kept for fallback) |
 | `TELEGRAM_BOT_TOKEN`              | —                                            | Telegram bot                            |
-| `JWT_SECRET`                      | —                                            | JWT signing                             |
-| `JWT_EXPIRES_IN`                  | `7d`                                         | Token lifetime                          |
 | `HTTP_API_PORT`                   | `4000`                                       | HTTP server port                        |
 | `TAVILY_API_KEY`                  | —                                            | Web search                              |
 | `MAX_TOOL_ROUNDS`                 | `10`                                         | Max agentic tool rounds per chat        |
@@ -251,6 +251,8 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 - Comments only where code cannot explain itself. No JSDoc, no section dividers.
 - DB facade: `assistant.di.ts` holds `DrizzleSqlDB`; repos are properties on it.
 - Migrations: always `npm run db:generate && npm run db:migrate`. Never raw SQL.
+- **Authentication:** Privy token only. No backend-issued JWTs. HTTP endpoints call `authUseCase.resolveUserId(token)` which does `verifyTokenLite` (local crypto) + DB lookup. The token travels as `Authorization: Bearer <privyToken>` or `?token=` (SSE only).
+- **No direct SQL in migrations:** Schema changes and seed data must go through Drizzle (`npm run db:generate && npm run db:migrate`). No raw `INSERT`/`ALTER`/`CREATE` statements executed directly against the DB outside of Drizzle migration files.
 
 ## Patterns
 
