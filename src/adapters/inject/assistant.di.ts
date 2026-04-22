@@ -41,8 +41,9 @@ import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/
 import { DelegationRequestBuilder } from '../implementations/output/delegation/delegationRequestBuilder';
 import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
 import Redis from 'ioredis';
-import { SseRegistry } from '../implementations/output/sse/sseRegistry';
 import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
+import { RedisMiniAppRequestCache } from '../implementations/output/cache/redis.miniAppRequest';
+import type { IMiniAppRequestCache } from '../../use-cases/interface/output/cache/miniAppRequest.cache';
 import { SigningRequestUseCaseImpl } from '../../use-cases/implementations/signingRequest.usecase';
 import type { ISigningRequestUseCase } from '../../use-cases/interface/input/signingRequest.interface';
 import { ResolverEngineImpl } from '../implementations/output/resolver/resolverEngine';
@@ -50,6 +51,7 @@ import type { IResolverEngine } from '../../use-cases/interface/output/resolver.
 import { CommandMappingUseCase } from '../../use-cases/implementations/commandMapping.usecase';
 import type { ICommandMappingUseCase } from '../../use-cases/interface/input/commandMapping.interface';
 import { BotTelegramNotifier } from "../implementations/output/telegram/botNotifier";
+import type { ITelegramNotifier } from "../../use-cases/interface/output/telegramNotifier.interface";
 import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
 import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
 import type { Bot } from "grammy";
@@ -94,7 +96,7 @@ export class AssistantInject {
   private _delegationRequestBuilder: DelegationRequestBuilder | null = null;
   private _telegramHandleResolver: GramjsTelegramResolver | null = null;
   private _redis: Redis | null = null;
-  private _sseRegistry: SseRegistry | null = null;
+  private _miniAppRequestCache: IMiniAppRequestCache | null = null;
   private _signingRequestUseCase: ISigningRequestUseCase | null = null;
   private _resolverEngine: IResolverEngine | null = null;
   private _commandMappingUseCase: ICommandMappingUseCase | null = null;
@@ -154,7 +156,6 @@ export class AssistantInject {
 
   getSolverRegistry(): SolverRegistry {
     if (!this._solverRegistry) {
-      const chainId = this.getChainId();
       this._solverRegistry = new SolverRegistry([], this.getSqlDB().toolManifests);
       this._solverRegistry.register(
         INTENT_ACTION.CLAIM_REWARDS,
@@ -293,17 +294,14 @@ export class AssistantInject {
       const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
 
-        // Existing static tools
         r.register(new WebSearchTool(webSearchService));
         r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
         r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId, userProfileCache));
 
-        // System tools — always available, no DB registration needed
         for (const tool of this.getSystemToolProvider().getTools(userId, conversationId)) {
           r.register(tool);
         }
 
-        // Per-user DB tools (developer-registered HTTP query tools)
         const httpToolDB = this.getSqlDB().httpQueryTools;
         const userHttpTools = await httpToolDB.findActiveByUser(userId);
         const encryptionKey = process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY;
@@ -388,8 +386,19 @@ export class AssistantInject {
     return this._sessionDelegationCache;
   }
 
-  getAegisGuardCache(): undefined {
-    return undefined;
+  getMiniAppRequestCache(): IMiniAppRequestCache | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._miniAppRequestCache) {
+      this._miniAppRequestCache = new RedisMiniAppRequestCache(redis);
+    }
+    return this._miniAppRequestCache;
+  }
+
+  getTelegramNotifier(): ITelegramNotifier | undefined {
+    const bot = this.getBot();
+    if (!bot) return undefined;
+    return new BotTelegramNotifier(bot);
   }
 
   getTokenDelegationRepo(): ITokenDelegationDB {
@@ -423,11 +432,6 @@ export class AssistantInject {
     return this._userOpExecutor;
   }
 
-  getSseRegistry(): SseRegistry {
-    if (!this._sseRegistry) this._sseRegistry = new SseRegistry();
-    return this._sseRegistry;
-  }
-
   getSigningRequestUseCase(
     onResolved: (chatId: number, txHash: string | undefined, rejected: boolean) => void,
   ): ISigningRequestUseCase | undefined {
@@ -436,7 +440,6 @@ export class AssistantInject {
     if (!this._signingRequestUseCase) {
       this._signingRequestUseCase = new SigningRequestUseCaseImpl(
         new RedisSigningRequestCache(redis),
-        this.getSseRegistry(),
         onResolved,
       );
     }
@@ -552,7 +555,7 @@ export class AssistantInject {
       this.getToolRegistrationUseCase(),
       this.getSessionDelegationUseCase(),
       this.getSqlDB().pendingDelegations,
-      this.getSseRegistry(),
+      this.getMiniAppRequestCache(),
       signingRequestUseCase,
       this.getCommandMappingUseCase(),
       this.getUserProfileCache(),
@@ -560,6 +563,8 @@ export class AssistantInject {
       this.getSqlDB().userPreferences,
       this.getTokenDelegationRepo(),
       this.getSqlDB().userProfiles,
+      this.getSqlDB().telegramSessions,
+      this.getTelegramNotifier(),
     );
   }
 }

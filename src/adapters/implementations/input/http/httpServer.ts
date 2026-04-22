@@ -2,6 +2,8 @@ import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { newUuid } from "../../../../helpers/uuid";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
@@ -9,32 +11,65 @@ import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/i
 import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/input/sessionDelegation.interface";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
-import type { ISseRegistry } from "../../../../use-cases/interface/output/sse/sseRegistry.interface";
 import type { ICommandMappingUseCase } from "../../../../use-cases/interface/input/commandMapping.interface";
 import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
 import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/input/httpQueryTool.interface";
 import type { IUserPreferencesDB } from "../../../../use-cases/interface/output/repository/userPreference.repo";
-import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
-import type { NewTokenDelegation } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { ITokenDelegationDB, NewTokenDelegation } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
+import type { ITelegramNotifier } from "../../../../use-cases/interface/output/telegramNotifier.interface";
+import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type {
+  MiniAppResponse,
+  AuthResponse,
+  SignResponse,
+  ApproveResponse,
+  ApproveRequest,
+} from "./miniAppRequest.types";
+import type { DelegationRecord as SessionDelegationRecord } from "../../../../use-cases/interface/output/cache/sessionDelegation.cache";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 
-const PermissionSchema = z.object({
-  tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  maxAmount: z.string().regex(/^\d+$/),
-  validUntil: z.number().int().positive(),
-});
-
-const DelegationRecordSchema = z.object({
-  publicKey: z.string().min(1),
-  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  smartAccountAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  signerAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-  permissions: z.array(PermissionSchema).min(1),
-  grantedAt: z.number().int().positive(),
-});
+const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
+  z.object({
+    requestId: z.string().min(1),
+    requestType: z.literal('auth'),
+    privyToken: z.string().min(1),
+    telegramChatId: z.string().min(1),
+  }),
+  z.object({
+    requestId: z.string().min(1),
+    requestType: z.literal('sign'),
+    privyToken: z.string().min(1),
+    txHash: z.string().optional(),
+    rejected: z.boolean().optional(),
+  }),
+  z.object({
+    requestId: z.string().min(1),
+    requestType: z.literal('approve'),
+    privyToken: z.string().min(1),
+    subtype: z.enum(['session_key', 'aegis_guard']),
+    delegationRecord: z.object({
+      publicKey: z.string().min(1),
+      address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      smartAccountAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      signerAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      permissions: z.array(z.unknown()),
+      grantedAt: z.number().int().positive(),
+    }).optional(),
+    aegisGrant: z.object({
+      sessionKeyAddress: z.string().min(1),
+      smartAccountAddress: z.string().min(1),
+      tokens: z.array(z.object({
+        address: z.string().min(1),
+        limit: z.string().min(1),
+        validUntil: z.number().int().positive(),
+      })),
+    }).optional(),
+    rejected: z.boolean().optional(),
+  }),
+]);
 
 export class HttpApiServer {
   private server: http.Server;
@@ -48,7 +83,7 @@ export class HttpApiServer {
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
     private readonly sessionDelegationUseCase?: ISessionDelegationUseCase,
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
-    private readonly sseRegistry?: ISseRegistry,
+    private readonly miniAppRequestCache?: IMiniAppRequestCache,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
     private readonly commandMappingUseCase?: ICommandMappingUseCase,
     private readonly userProfileCache?: IUserProfileCache,
@@ -56,6 +91,8 @@ export class HttpApiServer {
     private readonly userPreferencesRepo?: IUserPreferencesDB,
     private readonly tokenDelegationRepo?: ITokenDelegationDB,
     private readonly userProfileDB?: IUserProfileDB,
+    private readonly telegramSessionRepo?: ITelegramSessionDB,
+    private readonly telegramNotifier?: ITelegramNotifier,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -104,9 +141,6 @@ export class HttpApiServer {
     if (method === "DELETE" && url.pathname.startsWith("/tools/")) {
       return this.handleDeleteTool(req, res, url);
     }
-    if (method === 'POST' && url.pathname === '/persistent') {
-      return this.handlePostPersistent(req, res);
-    }
     if (method === 'GET' && url.pathname === '/permissions') {
       return this.handleGetPermissions(req, res, url);
     }
@@ -117,16 +151,12 @@ export class HttpApiServer {
       const id = url.pathname.split('/')[2] ?? '';
       return this.handlePostDelegationSigned(req, res, id);
     }
-    if (method === 'GET' && url.pathname === '/events') {
-      return this.handleGetEvents(req, res, url);
+    if (method === 'GET' && /^\/request\/([^/]+)$/.test(url.pathname)) {
+      const match = url.pathname.match(/^\/request\/([^/]+)$/);
+      if (match) return this.handleGetMiniAppRequest(req, res, match[1]!);
     }
-    
-    if (method === 'GET' && /^\/sign-requests\/([a-zA-Z0-9-]+)$/.test(url.pathname)) {
-      const match = url.pathname.match(/^\/sign-requests\/([a-zA-Z0-9-]+)$/);
-      if (match) return this.handleGetSignRequest(req, res, url, match[1]);
-    }
-    if (method === 'POST' && url.pathname === '/sign-response') {
-      return this.handlePostSignResponse(req, res);
+    if (method === 'POST' && url.pathname === '/response') {
+      return this.handlePostResponse(req, res);
     }
     if (method === 'POST' && url.pathname === '/command-mappings') {
       return this.handlePostCommandMapping(req, res);
@@ -300,69 +330,6 @@ export class HttpApiServer {
     return this.sendJson(res, 200, { tools });
   }
 
-  private async handlePostPersistent(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    if (!this.sessionDelegationUseCase) {
-      return this.sendJson(res, 503, { error: 'Session delegation store not available' });
-    }
-
-    let body: unknown;
-    try {
-      body = await this.readJson(req);
-    } catch {
-      return this.sendJson(res, 400, { error: 'Invalid JSON' });
-    }
-
-    const parsed = DelegationRecordSchema.safeParse(body);
-    if (!parsed.success) {
-      return this.sendJson(res, 400, {
-        error: 'Invalid delegation record',
-        details: parsed.error.issues,
-      });
-    }
-
-    await this.sessionDelegationUseCase.save(parsed.data);
-    console.log(`[Delegation] Stored record for address ${parsed.data.address}`);
-
-    // If the request includes a valid JWT, write the SCA + EOA into user_profiles
-    // so that confirmAndExecute can find the smart account address later.
-    const userId = await this.extractUserId(req);
-    if (userId && this.userProfileDB) {
-      const now = newCurrentUTCEpoch();
-      try {
-        const existing = await this.userProfileDB.findByUserId(userId);
-        if (!existing) {
-          await this.userProfileDB.upsert({
-            userId,
-            smartAccountAddress: parsed.data.smartAccountAddress,
-            eoaAddress: parsed.data.signerAddress,
-            createdAtEpoch: now,
-            updatedAtEpoch: now,
-          });
-        } else {
-          await this.userProfileDB.update({
-            userId,
-            telegramChatId: existing.telegramChatId,
-            smartAccountAddress: parsed.data.smartAccountAddress,
-            eoaAddress: existing.eoaAddress ?? parsed.data.signerAddress,
-            sessionKeyAddress: existing.sessionKeyAddress,
-            sessionKeyScope: existing.sessionKeyScope,
-            sessionKeyStatus: existing.sessionKeyStatus,
-            sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
-            updatedAtEpoch: now,
-          });
-        }
-        console.log(`[Delegation] Upserted user_profiles for userId=${userId} sca=${parsed.data.smartAccountAddress}`);
-      } catch (err) {
-        console.error(`[Delegation] Failed to upsert user_profiles for userId=${userId}:`, err);
-      }
-    }
-
-    return this.sendJson(res, 201, { address: parsed.data.address, saved: true });
-  }
-
   private async handleGetPermissions(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -377,8 +344,6 @@ export class HttpApiServer {
       return this.sendJson(res, 400, { error: 'public_key query parameter is required' });
     }
 
-    // The query parameter must be a 42-char Ethereum address (0x + 40 hex).
-    // The frontend should pass the session key `address` field, not the raw compressed public key.
     if (!/^0x[0-9a-fA-F]{40}$/.test(param)) {
       return this.sendJson(res, 400, {
         error: 'public_key must be a valid Ethereum address (0x followed by 40 hex characters)',
@@ -434,68 +399,35 @@ export class HttpApiServer {
     }
   }
 
-  private async handleGetEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    if (!this.sseRegistry) {
-      this.sendJson(res, 503, { error: 'SSE service not available' });
-      return;
+  // ── GET /request/:requestId (no auth) ────────────────────────────────────────
+
+  private async handleGetMiniAppRequest(
+    _req: http.IncomingMessage,
+    res: http.ServerResponse,
+    requestId: string,
+  ): Promise<void> {
+    if (!this.miniAppRequestCache) {
+      return this.sendJson(res, 503, { error: 'Mini app request service not available' });
     }
 
-    // EventSource cannot set Authorization header — accept ?token= as fallback
-    const authHeader = req.headers.authorization;
-    let userId: string | null = null;
-    if (authHeader?.startsWith('Bearer ')) {
-      userId = await this.authUseCase.resolveUserId(authHeader.slice(7));
-    }
-    if (!userId) {
-      const token = url.searchParams.get('token');
-      if (token) {
-        userId = await this.authUseCase.resolveUserId(token);
-      }
-    }
+    const request = await this.miniAppRequestCache.retrieve(requestId);
+    if (!request) return this.sendJson(res, 404, { error: 'Not found' });
 
-    if (!userId) {
-      this.sendJson(res, 401, { error: 'Unauthorized' });
-      return;
-    }
+    const now = newCurrentUTCEpoch();
+    if (request.expiresAt <= now) return this.sendJson(res, 410, { error: 'Expired' });
 
-    const authedUserId: string = userId;
-
-    res.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
-    res.flushHeaders();
-
-    this.sseRegistry.connect(authedUserId, res);
-
-    // Replay any pending signing request the user may have missed
-    // (covers the case where the mini app opens after the bot already pushed the event).
-    if (this.signingRequestUseCase) {
-      this.signingRequestUseCase.getPendingForUser(authedUserId).then((pending) => {
-        if (!pending) return;
-        const now = Math.floor(Date.now() / 1000);
-        if (pending.expiresAt <= now) return;
-        this.sseRegistry!.push(authedUserId, {
-          type: 'sign_request',
-          requestId: pending.requestId,
-          to: pending.to,
-          value: pending.value,
-          data: pending.data,
-          description: pending.description,
-          expiresAt: pending.expiresAt,
-        });
-      }).catch((err) => {
-        console.error('[SSE] replay pending signing request failed:', err);
-      });
-    }
+    return this.sendJson(res, 200, request);
   }
 
-  private async handlePostSignResponse(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
-    if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
+  // ── POST /response (Privy auth) ───────────────────────────────────────────────
+
+  private async handlePostResponse(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    if (!this.miniAppRequestCache) {
+      return this.sendJson(res, 503, { error: 'Mini app request service not available' });
+    }
 
     let body: unknown;
     try {
@@ -504,24 +436,97 @@ export class HttpApiServer {
       return this.sendJson(res, 400, { error: 'Invalid JSON' });
     }
 
-    const parsed = z.object({
-      requestId: z.string().min(1),
-      txHash: z.string().optional(),
-      rejected: z.boolean().optional(),
-    }).safeParse(body);
-
+    const parsed = MiniAppResponseSchema.safeParse(body);
     if (!parsed.success) {
       return this.sendJson(res, 400, { error: 'Invalid body', details: parsed.error.issues });
     }
 
+    const response = parsed.data as MiniAppResponse;
+
+    const userId = await this.authUseCase.resolveUserId(response.privyToken);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+
+    const request = await this.miniAppRequestCache.retrieve(response.requestId);
+    if (!request) return this.sendJson(res, 404, { error: 'Not found' });
+
+    if (response.requestType !== 'auth') {
+      const requestWithUser = request as { userId?: string };
+      if (requestWithUser.userId !== userId) {
+        return this.sendJson(res, 403, { error: 'Forbidden' });
+      }
+    }
+
+    if (response.requestType === 'auth') {
+      await this.handleAuthMiniAppResponse(response as AuthResponse, userId, res);
+    } else if (response.requestType === 'sign') {
+      await this.handleSignMiniAppResponse(response as SignResponse, userId, res);
+    } else if (response.requestType === 'approve') {
+      await this.handleApproveMiniAppResponse(response as ApproveResponse, userId, res);
+    } else {
+      return this.sendJson(res, 400, { error: 'Unknown requestType' });
+    }
+  }
+
+  private async handleAuthMiniAppResponse(
+    body: AuthResponse,
+    userId: string,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    await this.authUseCase.loginWithPrivy({
+      privyToken: body.privyToken,
+      telegramChatId: body.telegramChatId,
+    });
+
+    const chatId = parseInt(body.telegramChatId, 10);
+
+    await this.telegramNotifier?.sendMessage(String(chatId), "You're signed in. Try asking me anything.");
+
+    await this.miniAppRequestCache!.delete(body.requestId);
+
+    if (this.userProfileDB && this.miniAppRequestCache) {
+      const profile = await this.userProfileDB.findByUserId(userId);
+      if (!profile?.sessionKeyAddress) {
+        const now = newCurrentUTCEpoch();
+        const approveRequest: ApproveRequest = {
+          requestId: newUuid(),
+          requestType: 'approve',
+          subtype: 'session_key',
+          userId,
+          createdAt: now,
+          expiresAt: now + 600,
+        };
+        await this.miniAppRequestCache.store(approveRequest);
+        const miniAppUrl = process.env.MINI_APP_URL;
+        if (miniAppUrl) {
+          const url = `${miniAppUrl}?requestId=${approveRequest.requestId}`;
+          await this.telegramNotifier?.sendMessage(
+            String(chatId),
+            'Set up your session key to start transacting.',
+            { webAppButton: { label: 'Set up session key', url } },
+          );
+        }
+      }
+    }
+
+    return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
+  }
+
+  private async handleSignMiniAppResponse(
+    body: SignResponse,
+    userId: string,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    if (!this.signingRequestUseCase) {
+      return this.sendJson(res, 503, { error: 'Signing service not available' });
+    }
+
     try {
       await this.signingRequestUseCase.resolveRequest({
-        requestId: parsed.data.requestId,
+        requestId: body.requestId,
         userId,
-        txHash: parsed.data.txHash,
-        rejected: parsed.data.rejected,
+        txHash: body.txHash,
+        rejected: body.rejected,
       });
-      return this.sendJson(res, 200, { requestId: parsed.data.requestId, resolved: true });
     } catch (err) {
       const message = toErrorMessage(err);
       if (message === 'SIGNING_REQUEST_NOT_FOUND') return this.sendJson(res, 404, { error: 'Request not found' });
@@ -529,29 +534,80 @@ export class HttpApiServer {
       if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });
       throw err;
     }
+
+    await this.miniAppRequestCache!.delete(body.requestId);
+    return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
   }
 
-  private async handleGetSignRequest(req: http.IncomingMessage, res: http.ServerResponse, url: URL, requestId: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
-    if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
+  private async handleApproveMiniAppResponse(
+    body: ApproveResponse,
+    userId: string,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const chatIdStr = await this.resolveChatId(userId);
 
-    try {
-      const request = await this.signingRequestUseCase.getRequest(requestId, userId);
-      if (!request) return this.sendJson(res, 404, { error: 'Request not found' });
-      return this.sendJson(res, 200, {
-        requestId: request.requestId,
-        to: request.to,
-        value: request.value,
-        data: request.data,
-        description: request.description,
-        expiresAt: request.expiresAt,
-        status: request.status,
-        autoSign: request.autoSign,
-      });
-    } catch (err) {
-      this.sendJson(res, 500, { error: 'Internal error' });
+    if (body.rejected) {
+      if (chatIdStr) {
+        await this.telegramNotifier?.sendMessage(chatIdStr, 'Setup cancelled.');
+      }
+      await this.miniAppRequestCache!.delete(body.requestId);
+      return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
     }
+
+    if (body.subtype === 'session_key' && body.delegationRecord) {
+      if (!this.sessionDelegationUseCase) {
+        return this.sendJson(res, 503, { error: 'Session delegation service not available' });
+      }
+
+      await this.sessionDelegationUseCase.save(body.delegationRecord as unknown as SessionDelegationRecord);
+
+      if (this.userProfileDB) {
+        const now = newCurrentUTCEpoch();
+        const existing = await this.userProfileDB.findByUserId(userId);
+        const { smartAccountAddress, signerAddress } = body.delegationRecord;
+        if (!existing) {
+          await this.userProfileDB.upsert({
+            userId,
+            smartAccountAddress,
+            eoaAddress: signerAddress,
+            createdAtEpoch: now,
+            updatedAtEpoch: now,
+          });
+        } else {
+          await this.userProfileDB.update({
+            userId,
+            telegramChatId: existing.telegramChatId,
+            smartAccountAddress,
+            eoaAddress: existing.eoaAddress ?? signerAddress,
+            sessionKeyAddress: existing.sessionKeyAddress,
+            sessionKeyScope: existing.sessionKeyScope,
+            sessionKeyStatus: existing.sessionKeyStatus,
+            sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
+            updatedAtEpoch: now,
+          });
+        }
+      }
+
+      if (chatIdStr) {
+        await this.telegramNotifier?.sendMessage(chatIdStr, 'Session key installed. You can now execute transactions.');
+      }
+    } else if (body.subtype === 'aegis_guard' && body.aegisGrant) {
+      if (this.userPreferencesRepo) {
+        await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
+      }
+      if (chatIdStr) {
+        await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
+      }
+    }
+
+    await this.miniAppRequestCache!.delete(body.requestId);
+    return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
+  }
+
+  private async resolveChatId(userId: string): Promise<string | null> {
+    if (!this.telegramSessionRepo) return null;
+    const session = await this.telegramSessionRepo.findByUserId(userId);
+    return session ? session.telegramChatId : null;
   }
 
   // ── Command mapping handlers ─────────────────────────────────────────────────
@@ -703,10 +759,6 @@ export class HttpApiServer {
   }
 
   // ── Delegation endpoints ────────────────────────────────────────────────────
-  //
-  // GET  /delegation/approval-params  → build default token list + optional override
-  // POST /delegation/grant            → upsertMany delegations
-  // GET  /delegation/grant            → find active delegations for user
 
   private async handleGetDelegationApprovalParams(
     req: http.IncomingMessage,
@@ -720,7 +772,6 @@ export class HttpApiServer {
     const nowEpoch = Math.floor(Date.now() / 1000);
     const validUntil30Days = nowEpoch + 30 * 24 * 60 * 60;
 
-    // Default token list — USDC, USDT, AVAX (native)
     const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
     const tokens: Array<{
       tokenAddress: string;
@@ -730,7 +781,7 @@ export class HttpApiServer {
       validUntil: number;
     }> = [
       {
-        tokenAddress: "",      // resolved from DB below
+        tokenAddress: "",
         tokenSymbol: "USDC",
         tokenDecimals: 6,
         suggestedLimitRaw: (500n * 10n ** 6n).toString(),
@@ -752,11 +803,10 @@ export class HttpApiServer {
       },
     ];
 
-    // Try to resolve USDC / USDT addresses from portfolio use case (token registry)
     if (this.portfolioUseCase) {
       const registryTokens = await this.portfolioUseCase.listTokens(chainId).catch(() => []);
       for (const t of tokens) {
-        if (t.tokenAddress) continue; // already set (native)
+        if (t.tokenAddress) continue;
         const found = registryTokens.find(
           (rt) => rt.symbol.toUpperCase() === t.tokenSymbol.toUpperCase(),
         );
@@ -764,10 +814,8 @@ export class HttpApiServer {
       }
     }
 
-    // Remove tokens whose address could not be resolved
     const resolved = tokens.filter((t) => !!t.tokenAddress);
 
-    // Optional re-approval override: replace or append the matching entry
     const overrideAddress = url.searchParams.get("tokenAddress");
     const overrideAmount  = url.searchParams.get("amountRaw");
     if (overrideAddress && overrideAmount) {

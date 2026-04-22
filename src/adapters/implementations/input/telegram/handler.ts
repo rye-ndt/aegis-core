@@ -9,6 +9,7 @@ import {
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { newUuid } from "../../../../helpers/uuid";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
@@ -29,6 +30,13 @@ import type { ITelegramHandleResolver } from "../../../../use-cases/interface/ou
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IExecutionEstimator } from "../../../../use-cases/interface/output/executionEstimator.interface";
+import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type {
+  SignRequest,
+  AuthRequest,
+  ApproveRequest,
+  ApproveSubtype,
+} from "../../input/http/miniAppRequest.types";
 import type { CtxLike, OrchestratorSession } from "./handler.types";
 import {
   buildConfirmationMessage,
@@ -67,20 +75,96 @@ export class TelegramAssistantHandler {
     private readonly resolverEngine?: IResolverEngine,
     private readonly tokenDelegationDB?: ITokenDelegationDB,
     private readonly executionEstimator?: IExecutionEstimator,
+    private readonly miniAppRequestCache?: IMiniAppRequestCache,
   ) {}
 
   // ── Bot registration ─────────────────────────────────────────────────────────
 
   private async sendWelcomeWithLoginButton(chatId: number): Promise<void> {
-    const miniAppUrl = process.env.MINI_APP_URL;
-    const keyboard = miniAppUrl
-      ? new InlineKeyboard().webApp("Open Aegis", miniAppUrl)
-      : new InlineKeyboard().text("Sign in with Google", "auth:login");
+    const miniAppUrlBase = process.env.MINI_APP_URL;
+    if (!miniAppUrlBase) {
+      await this.botRef!.api.sendMessage(chatId, 'Welcome to Aegis.');
+      return;
+    }
+    const now = newCurrentUTCEpoch();
+    const request: AuthRequest = {
+      requestId: newUuid(),
+      requestType: 'auth',
+      telegramChatId: String(chatId),
+      createdAt: now,
+      expiresAt: now + 600,
+    };
+    if (this.miniAppRequestCache) {
+      await this.miniAppRequestCache.store(request);
+    }
+    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
     await this.botRef!.api.sendMessage(
       chatId,
-      "Welcome to the Onchain Agent.\n\nSign in with Google via the Aegis mini app to get started.",
-      { reply_markup: keyboard },
+      'Welcome to Aegis. Sign in to get started.',
+      { reply_markup: new InlineKeyboard().webApp('Open Aegis', url) },
     );
+  }
+
+  private async sendMiniAppButton(
+    ctx: CtxLike,
+    userId: string,
+    params: {
+      to: string;
+      value: string;
+      data: string;
+      description: string;
+      autoSign: boolean;
+    },
+  ): Promise<void> {
+    const miniAppUrlBase = process.env.MINI_APP_URL;
+    if (!miniAppUrlBase) return;
+
+    const now = newCurrentUTCEpoch();
+    const request: SignRequest = {
+      requestId: newUuid(),
+      requestType: 'sign',
+      userId,
+      ...params,
+      createdAt: now,
+      expiresAt: now + 600,
+    };
+    if (this.miniAppRequestCache) {
+      await this.miniAppRequestCache.store(request);
+    }
+
+    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
+    const buttonText = params.autoSign ? 'Execute Automatically' : 'Open Aegis to Sign';
+    const promptText = params.autoSign
+      ? 'Tap below to execute silently.'
+      : 'Tap below to review and sign.';
+    await ctx.reply(promptText, { reply_markup: new InlineKeyboard().webApp(buttonText, url) });
+  }
+
+  private async sendApproveButton(
+    chatId: number,
+    userId: string,
+    subtype: ApproveSubtype,
+    promptText: string,
+    buttonText: string,
+  ): Promise<void> {
+    const miniAppUrlBase = process.env.MINI_APP_URL;
+    if (!miniAppUrlBase) return;
+    const now = newCurrentUTCEpoch();
+    const request: ApproveRequest = {
+      requestId: newUuid(),
+      requestType: 'approve',
+      userId,
+      subtype,
+      createdAt: now,
+      expiresAt: now + 600,
+    };
+    if (this.miniAppRequestCache) {
+      await this.miniAppRequestCache.store(request);
+    }
+    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
+    await this.botRef!.api.sendMessage(chatId, promptText, {
+      reply_markup: new InlineKeyboard().webApp(buttonText, url),
+    });
   }
 
   register(bot: Bot): void {
@@ -272,7 +356,6 @@ export class TelegramAssistantHandler {
     await this.initSessionFromTool(ctx, chatId, userId, text, toolResult);
   }
 
-  /** Shared post-tool-selection logic: compile, inject defaults, build session, then proceed. */
   private async initSessionFromTool(
     ctx: CtxLike,
     chatId: number,
@@ -287,8 +370,6 @@ export class TelegramAssistantHandler {
       partialParams: {},
     });
 
-    // Non-crypto users write "$5", "5 dollars", etc. without naming a token.
-    // Silently default to USDC when detected and the LLM didn't extract a from-token.
     if (
       detectStablecoinIntent(text) &&
       !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
@@ -355,7 +436,6 @@ export class TelegramAssistantHandler {
       partialParams: session.partialParams,
     });
 
-    // Stablecoin detection is sticky: check the full message history.
     const anyFiatMessage = session.messages.some(detectStablecoinIntent);
     if (
       anyFiatMessage &&
@@ -650,7 +730,13 @@ export class TelegramAssistantHandler {
     } else {
       await this.safeSend(ctx, buildConfirmationMessage(session, calldata, resolved.fromToken, resolved.toToken));
     }
-    await this.sendMiniAppButton(ctx, undefined);
+    await this.sendMiniAppButton(ctx, userId, {
+      to: calldata.to,
+      value: calldata.value,
+      data: calldata.data,
+      description: session.manifest.name,
+      autoSign: false,
+    });
     await this.tryCreateDelegationRequest(ctx, userId, session, fromToken ?? null);
   }
 
@@ -692,14 +778,16 @@ export class TelegramAssistantHandler {
     }
 
     await this.safeSend(ctx, buildConfirmationMessage(session, calldata, resolvedFrom, resolvedTo));
-    await this.sendMiniAppButton(ctx, undefined);
+    await this.sendMiniAppButton(ctx, userId, {
+      to: calldata.to,
+      value: calldata.value,
+      data: calldata.data,
+      description: session.manifest.name,
+      autoSign: false,
+    });
     await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
   }
 
-  /**
-   * Checks delegation sufficiency and handles the response.
-   * Returns true if it sent a response (auto-sign or reapproval prompt), false to fall through.
-   */
   private async runDelegationCheck(
     ctx: CtxLike,
     chatId: number,
@@ -719,17 +807,14 @@ export class TelegramAssistantHandler {
 
     if (!estimationResult.shouldApproveMore) {
       console.log(`[Handler] delegation sufficient — pushing auto-sign request to Mini App for userId=${userId}`);
-      const { requestId } = await this.signingRequestUseCase!.createRequest({
-        userId,
-        chatId,
+      await this.safeSend(ctx, "✅ Check the Aegis mini app to complete the transaction automatically.");
+      await this.sendMiniAppButton(ctx, userId, {
         to: calldata.to,
         value: calldata.value,
         data: calldata.data,
         description: `Autonomous execution for ${session.manifest.name}`,
         autoSign: true,
       });
-      await this.safeSend(ctx, "✅ Check the Aegis mini app to complete the transaction automatically.");
-      await this.sendMiniAppButton(ctx as any, requestId, true);
       await this.tryCreateDelegationRequest(ctx, userId, session, fromToken);
       return true;
     }
@@ -778,25 +863,6 @@ export class TelegramAssistantHandler {
     } catch (err) {
       console.error("[Handler] delegation request error:", err);
     }
-  }
-
-  private async sendMiniAppButton(
-    ctx: CtxLike,
-    requestId?: string,
-    isAutoSign?: boolean,
-  ): Promise<void> {
-    const miniAppUrlBase = process.env.MINI_APP_URL;
-    if (!miniAppUrlBase) return;
-
-    let url = miniAppUrlBase;
-    if (requestId) url += url.includes("?") ? `&requestId=${requestId}` : `?requestId=${requestId}`;
-    if (isAutoSign) url += url.includes("?") ? `&autoSign=1` : `?autoSign=1`;
-
-    const buttonText = isAutoSign ? "Execute Automatically" : "Open Aegis to Sign";
-    const promptText = isAutoSign
-      ? "Tap the button below to execute this transaction silently in Aegis."
-      : "Tap the button below to review and sign this transaction in Aegis.";
-    await ctx.reply(promptText, { reply_markup: new InlineKeyboard().webApp(buttonText, url) });
   }
 
   private async resolveRecipientHandle(

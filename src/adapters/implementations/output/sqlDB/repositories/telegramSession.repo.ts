@@ -26,6 +26,21 @@ export class DrizzleTelegramSessionRepo implements ITelegramSessionDB {
     };
   }
 
+  async findByUserId(userId: string): Promise<ITelegramSession | null> {
+    const rows = await this.db
+      .select()
+      .from(telegramSessions)
+      .where(eq(telegramSessions.userId, userId))
+      .limit(1);
+    if (!rows[0]) return null;
+    return {
+      telegramChatId: rows[0].telegramChatId,
+      userId: rows[0].userId,
+      expiresAtEpoch: rows[0].expiresAtEpoch,
+      createdAtEpoch: rows[0].createdAtEpoch,
+    };
+  }
+
   async upsert(session: TelegramSessionUpsert): Promise<void> {
     await this.db
       .insert(telegramSessions)

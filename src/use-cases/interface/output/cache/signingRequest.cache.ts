@@ -17,5 +17,4 @@ export interface ISigningRequestCache {
   save(record: SigningRequestRecord): Promise<void>;
   findById(id: string): Promise<SigningRequestRecord | null>;
   resolve(id: string, status: 'approved' | 'rejected', txHash?: string): Promise<void>;
-  findPendingByUserId(userId: string): Promise<SigningRequestRecord | null>;
 }

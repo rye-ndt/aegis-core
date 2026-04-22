@@ -52,6 +52,7 @@ import { CHAIN_CONFIG } from "./helpers/chainConfig";
     inject.getResolverEngine(),
     inject.getTokenDelegationRepo(),
     inject.getExecutionEstimator(),
+    inject.getMiniAppRequestCache(),
   );
 
   const bot = new TelegramBot(rawBot, handler);
@@ -61,7 +62,6 @@ import { CHAIN_CONFIG } from "./helpers/chainConfig";
   process.on("SIGINT", async () => {
     console.log("\nShutting down…");
     tokenCrawlerJob.stop();
-    inject.getSseRegistry().stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();
