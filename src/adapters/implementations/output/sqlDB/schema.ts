@@ -183,3 +183,11 @@ export const httpQueryToolHeaders = pgTable("http_query_tool_headers", {
   isEncrypted:    boolean("is_encrypted").notNull().default(false),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
+
+export const userPreferences = pgTable('user_preferences', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().unique(),
+  aegisGuardEnabled: boolean('aegis_guard_enabled').notNull().default(false),
+  updatedAtEpoch: integer('updated_at_epoch').notNull(),
+});
+

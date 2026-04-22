@@ -13,6 +13,8 @@ import type { ISseRegistry } from "../../../../use-cases/interface/output/sse/ss
 import type { ICommandMappingUseCase } from "../../../../use-cases/interface/input/commandMapping.interface";
 import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
 import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/input/httpQueryTool.interface";
+import type { IUserPreferencesDB } from "../../../../use-cases/interface/output/repository/userPreference.repo";
+import type { IAegisGuardCache } from "../../../../use-cases/interface/output/cache/aegisGuard.cache";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -49,6 +51,8 @@ export class HttpApiServer {
     private readonly commandMappingUseCase?: ICommandMappingUseCase,
     private readonly userProfileCache?: IUserProfileCache,
     private readonly httpQueryToolUseCase?: IHttpQueryToolUseCase,
+    private readonly userPreferencesRepo?: IUserPreferencesDB,
+    private readonly aegisGuardCache?: IAegisGuardCache,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -140,6 +144,15 @@ export class HttpApiServer {
     if (method === 'DELETE' && url.pathname.startsWith('/http-tools/')) {
       const id = url.pathname.split('/http-tools/')[1]?.trim() ?? '';
       return this.handleDeleteHttpTool(req, res, id);
+    }
+    if (method === "GET" && url.pathname === "/preference") {
+      return this.handleGetPreference(req, res);
+    }
+    if (method === "POST" && url.pathname === "/preference") {
+      return this.handlePostPreference(req, res);
+    }
+    if (method === "POST" && url.pathname === "/aegis-guard/grant") {
+      return this.handlePostAegisGuardGrant(req, res);
     }
 
     res.writeHead(404);
@@ -624,6 +637,68 @@ export class HttpApiServer {
       if (msg === "TOOL_FORBIDDEN") return this.sendJson(res, 403, { error: msg });
       throw err;
     }
+  }
+
+  private async handleGetPreference(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Preferences service not available" });
+
+    const pref = await this.userPreferencesRepo.findByUserId(userId);
+    return this.sendJson(res, 200, { aegisGuardEnabled: pref?.aegisGuardEnabled ?? false });
+  }
+
+  private async handlePostPreference(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Preferences service not available" });
+
+    let body: unknown;
+    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+
+    const parsed = z.object({ aegisGuardEnabled: z.boolean() }).safeParse(body);
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
+
+    await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: parsed.data.aegisGuardEnabled });
+    return this.sendJson(res, 200, { ok: true });
+  }
+
+  private async handlePostAegisGuardGrant(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.aegisGuardCache || !this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Aegis Guard service not available" });
+
+    let body: unknown;
+    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+
+    const parsed = z.object({
+      sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      smartAccountAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      delegations: z.array(z.object({
+        tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        tokenSymbol: z.string().min(1).max(10),
+        tokenDecimals: z.number().int().min(0).max(18),
+        limitWei: z.string().regex(/^\d+$/),
+        validUntil: z.number().int().positive(),
+      })).min(1),
+    }).safeParse(body);
+
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
+
+    const now = Math.floor(Date.now() / 1000);
+    const maxValidUntil = Math.max(...parsed.data.delegations.map(d => d.validUntil));
+    let ttl = maxValidUntil - now;
+    if (ttl < 60) ttl = 60; // minimum 60s
+
+    await this.aegisGuardCache.saveGrant(userId, {
+      sessionKeyAddress: parsed.data.sessionKeyAddress,
+      smartAccountAddress: parsed.data.smartAccountAddress,
+      delegations: parsed.data.delegations,
+      grantedAt: now,
+    }, ttl);
+
+    await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
+    return this.sendJson(res, 200, { ok: true });
   }
 
   private extractUserId(req: http.IncomingMessage): string | null {

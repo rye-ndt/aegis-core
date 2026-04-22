@@ -4,6 +4,7 @@
 
 - Proactive agent: daily market sentiment → investment verdict
 - Temporarily disable RAG (speed/correctness); re-enable once tool count grows
+- Aegis Guard agent-side enforcement: before submitting any UserOp, check `aegisGuardCache.getGrant` + `getSpent` to enforce cumulative limits; call `addSpent` after confirmed on-chain execution
 
 ## What it is
 
@@ -46,9 +47,9 @@ src/
 │           ├── blockchain/     # ISmartAccountService, ISessionKeyService,
 │           │                   # IUserOperationBuilder, IPaymasterService
 │           ├── solver/         # ISolver, ISolverRegistry
-│           ├── cache/          # ISigningRequestCache, ISessionDelegationCache, IUserProfileCache
+│           ├── cache/          # ISigningRequestCache, ISessionDelegationCache, IUserProfileCache, IAegisGuardCache
 │           ├── sse/            # ISseRegistry
-│           ├── repository/     # 11 repo interfaces (users → httpQueryTools)
+│           ├── repository/     # 12 repo interfaces (users → userPreferences)
 │           ├── walletDataProvider.interface.ts  # IWalletDataProvider + DTOs (Privy-agnostic)
 │           ├── systemToolProvider.interface.ts  # ISystemToolProvider.getTools(userId, convId)
 │           ├── intentParser.interface.ts        # IntentPackage, SimulationReport
@@ -85,7 +86,7 @@ src/
 │           ├── toolIndex/      # PineconeToolIndexService
 │           ├── embedding/      # openai.embedding.ts
 │           ├── sse/            # SseRegistry
-│           ├── cache/          # redis.sessionDelegation, redis.signingRequest
+│           ├── cache/          # redis.sessionDelegation, redis.signingRequest, redis.aegisGuard
 │           ├── telegram/       # GramjsTelegramResolver (MTProto)
 │           ├── toolRegistry.concrete.ts
 │           ├── systemToolProvider.concrete.ts   # assembles 5 system tools
@@ -128,6 +129,9 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express.
 | `POST` | `/delegation/:id/signed` | JWT | Mark a pending delegation as signed |
 | `GET` | `/events` | JWT / `?token=` | SSE stream — `sign_request` events |
 | `POST` | `/sign-response` | JWT | Submit txHash or rejection for a signing request |
+| `GET` | `/preference` | JWT | Fetch user preference (`aegisGuardEnabled`) |
+| `POST` | `/preference` | JWT | Upsert user preference |
+| `POST` | `/aegis-guard/grant` | JWT | Store approved ERC20 spending delegation in Redis |
 
 ## Telegram commands
 
@@ -190,6 +194,18 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | `fee_records` | 1% protocol fee audit trail |
 | `http_query_tools` | Developer-registered HTTP tools — name, endpoint, method |
 | `http_query_tool_headers` | AES-256-GCM encrypted headers for HTTP tools |
+| `user_preferences` | Per-user flags — `aegisGuardEnabled` |
+
+## Redis key schema
+
+| Key | Value | TTL |
+| --- | ----- | --- |
+| `delegation:{sessionKeyAddress}` | JSON `DelegationRecord` | None |
+| `sign_req:{id}` | JSON signing request | 10 min |
+| `sign_req:pending:{userId}` | Signing request id | 10 min |
+| `user_profile:{userId}` | JSON user profile | 30 min |
+| `aegis_guard:grant:{userId}` | JSON `AegisGuardGrant` (sessionKey, smartAccount, delegations) | `max(validUntil) - now`, min 60 s |
+| `aegis_guard:spent:{userId}:{tokenAddress}` | Decimal wei string (cumulative spend) | Same as grant |
 
 ## Environment variables
 

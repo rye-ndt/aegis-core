@@ -62,6 +62,8 @@ import { SystemToolProviderConcrete } from "../implementations/output/systemTool
 import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
 import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
 import { CHAIN_CONFIG } from "../../helpers/chainConfig";
+import { RedisAegisGuardCache } from "../implementations/output/cache/redis.aegisGuard";
+import type { IAegisGuardCache } from "../../use-cases/interface/output/cache/aegisGuard.cache";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -95,6 +97,7 @@ export class AssistantInject {
   private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
   private _walletDataProvider: IWalletDataProvider | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
+  private _aegisGuardCache?: IAegisGuardCache;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -377,6 +380,15 @@ export class AssistantInject {
     return this._sessionDelegationCache;
   }
 
+  getAegisGuardCache(): IAegisGuardCache | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._aegisGuardCache) {
+      this._aegisGuardCache = new RedisAegisGuardCache(redis);
+    }
+    return this._aegisGuardCache;
+  }
+
   getSseRegistry(): SseRegistry {
     if (!this._sseRegistry) this._sseRegistry = new SseRegistry();
     return this._sseRegistry;
@@ -511,6 +523,8 @@ export class AssistantInject {
       this.getCommandMappingUseCase(),
       this.getUserProfileCache(),
       this.getHttpQueryToolUseCase(),
+      this.getSqlDB().userPreferences,
+      this.getAegisGuardCache(),
     );
   }
 }
