@@ -50,6 +50,8 @@ import { CHAIN_CONFIG } from "./helpers/chainConfig";
     inject.getPrivyAuthService(),
     signingRequestUseCase,
     inject.getResolverEngine(),
+    inject.getTokenDelegationRepo(),
+    inject.getExecutionEstimator(),
   );
 
   const bot = new TelegramBot(rawBot, handler);

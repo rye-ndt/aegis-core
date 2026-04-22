@@ -25,6 +25,17 @@ export interface ParseFromHistoryResult {
   manifest: ToolManifest | undefined;
 }
 
+export interface ConfirmAndExecuteParams {
+  intentId: string;
+  userId: string;
+  /** Pre-built calldata passed by the handler (avoids a redundant DB re-fetch). */
+  calldata?: { to: string; data: string; value: string };
+  /** ERC20 token address — used to record addSpent after execution. */
+  tokenAddress?: string;
+  /** Raw amount in token decimals — used to record addSpent after execution. */
+  amountRaw?: string;
+}
+
 export interface IIntentUseCase {
   parseAndExecute(params: {
     userId: string;
@@ -33,10 +44,8 @@ export interface IIntentUseCase {
     rawInput: string;
   }): Promise<IntentExecutionResult>;
 
-  confirmAndExecute(params: {
-    intentId: string;
-    userId: string;
-  }): Promise<IntentExecutionResult>;
+  confirmAndExecute(params: ConfirmAndExecuteParams): Promise<IntentExecutionResult & { txHash?: string }>;
+
 
   getHistory(userId: string): Promise<IntentPackage[]>;
 

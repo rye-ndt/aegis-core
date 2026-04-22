@@ -2,7 +2,7 @@ import type { ITokenRecord } from '../output/repository/tokenRegistry.repo';
 
 export type { ITokenRecord };
 
-export type PortfolioBalance = { symbol: string; address: string; balance: string };
+export type PortfolioBalance = { symbol: string; address: string; decimals: number; balance: string };
 export type PortfolioResult = { smartAccountAddress: string; balances: PortfolioBalance[] };
 export type WalletInfo = {
   smartAccountAddress: string | null;

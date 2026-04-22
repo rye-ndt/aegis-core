@@ -27,6 +27,7 @@ export class PortfolioUseCaseImpl implements IPortfolioUseCase {
       balances.push({
         symbol: token.symbol,
         address: token.address,
+        decimals: token.decimals,
         balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
       });
     }

@@ -191,3 +191,18 @@ export const userPreferences = pgTable('user_preferences', {
   updatedAtEpoch: integer('updated_at_epoch').notNull(),
 });
 
+export const tokenDelegations = pgTable('token_delegations', {
+  id:             uuid('id').primaryKey(),
+  userId:         uuid('user_id').notNull(),
+  tokenAddress:   text('token_address').notNull(),   // ERC20 address or 0xEeee…EEeE for native
+  tokenSymbol:    text('token_symbol').notNull(),
+  tokenDecimals:  integer('token_decimals').notNull(),
+  limitRaw:       text('limit_raw').notNull(),        // bigint as decimal string
+  spentRaw:       text('spent_raw').notNull().default('0'),
+  validUntil:     integer('valid_until').notNull(),   // unix epoch seconds
+  createdAtEpoch: integer('created_at_epoch').notNull(),
+  updatedAtEpoch: integer('updated_at_epoch').notNull(),
+}, (t) => ({
+  userTokenUniq: unique().on(t.userId, t.tokenAddress),
+}));
+

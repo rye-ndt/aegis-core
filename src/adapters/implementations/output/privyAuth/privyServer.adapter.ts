@@ -66,6 +66,11 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
     };
   }
 
+  async verifyTokenLite(accessToken: string): Promise<{ privyDid: string }> {
+    const claims = await this.client.verifyAuthToken(accessToken);
+    return { privyDid: claims.userId };
+  }
+
   async getOrCreateWalletByTelegramId(telegramUserId: string): Promise<string> {
     let user: User | null = null;
 
