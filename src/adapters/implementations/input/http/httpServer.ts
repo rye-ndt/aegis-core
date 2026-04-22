@@ -546,7 +546,8 @@ export class HttpApiServer {
         data: request.data,
         description: request.description,
         expiresAt: request.expiresAt,
-        status: request.status
+        status: request.status,
+        autoSign: request.autoSign,
       });
     } catch (err) {
       this.sendJson(res, 500, { error: 'Internal error' });

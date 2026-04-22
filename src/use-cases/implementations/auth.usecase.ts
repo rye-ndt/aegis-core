@@ -53,6 +53,14 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       user = await this.userDB.findByPrivyDid(privyDid);
     }
 
+    if (!user && email) {
+      const byEmail = await this.userDB.findByEmail(email);
+      if (byEmail) {
+        await this.userDB.linkPrivyDid(byEmail.id, privyDid);
+        user = { ...byEmail, privyDid };
+      }
+    }
+
     if (!user) {
       const userId = newUuid();
       const now = newCurrentUTCEpoch();

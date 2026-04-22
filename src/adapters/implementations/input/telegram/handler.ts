@@ -11,6 +11,7 @@ import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum"
 import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { newUuid } from "../../../../helpers/uuid";
 import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
@@ -169,41 +170,6 @@ export class TelegramAssistantHandler {
       );
     });
 
-    bot.command("auth", async (ctx) => {
-      const privyToken = ctx.match?.trim();
-      if (!privyToken) {
-        await ctx.reply(
-          "Usage: /auth <privy_token>\n\nGet your token from the Aegis mini app after signing in with Google.",
-        );
-        return;
-      }
-      try {
-        const { userId, expiresAtEpoch } =
-          await this.authUseCase.loginWithPrivy({ privyToken });
-        await this.telegramSessions.upsert({
-          telegramChatId: String(ctx.chat.id),
-          userId,
-          expiresAtEpoch,
-        });
-        this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
-        await ctx.reply(
-          "Authenticated with Google via Privy. You can now use the Onchain Agent.",
-        );
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error("[Auth] /auth loginWithPrivy failed:", err);
-        if (msg === "PRIVY_NOT_CONFIGURED") {
-          await ctx.reply(
-            "Authentication service is not configured on this server. Contact the admin.",
-          );
-        } else {
-          await ctx.reply(
-            "Invalid or expired token. Open the Aegis mini app, tap Copy to get a fresh token, then try again.",
-          );
-        }
-      }
-    });
-
     bot.command("logout", async (ctx) => {
       const chatId = ctx.chat.id;
       await this.telegramSessions.deleteByChatId(String(chatId));
@@ -211,175 +177,6 @@ export class TelegramAssistantHandler {
       this.conversations.delete(chatId);
       await ctx.reply("Logged out. Your session has been invalidated.");
       await this.sendWelcomeWithLoginButton(chatId);
-    });
-
-    bot.command("new", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      this.conversations.delete(ctx.chat.id);
-      await ctx.reply("Conversation reset. Starting fresh.");
-    });
-
-    bot.command("history", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      const conversationId = this.conversations.get(ctx.chat.id);
-      if (!conversationId) {
-        return ctx.reply("No active conversation yet. Send a message first.");
-      }
-      const messages = await this.assistantUseCase.getConversation({
-        userId: session.userId,
-        conversationId,
-      });
-      const text = messages
-        .slice(-10)
-        .map((m) => `${m.role === "user" ? "You" : "Agent"}: ${m.content}`)
-        .join("\n\n");
-      return ctx.reply(text || "No messages yet.");
-    });
-
-    bot.command("confirm", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      if (!this.intentUseCase) {
-        await ctx.reply("Intent execution not configured.");
-        return;
-      }
-      await ctx.replyWithChatAction("typing");
-      try {
-        const result = await this.confirmLatestIntent(session.userId);
-        await this.safeSend(ctx, result);
-
-        const pending = this.pendingRecipientNotifications.get(session.userId);
-        if (pending) {
-          this.pendingRecipientNotifications.delete(session.userId);
-          await this.notifyRecipient(pending.telegramUserId, session.userId);
-        }
-      } catch (err) {
-        console.error("Error confirming intent:", err);
-        await ctx.reply("Sorry, something went wrong. Please try again.");
-      }
-    });
-
-    bot.command("cancel", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      if (!this.intentUseCase) {
-        await ctx.reply("Intent execution not configured.");
-        return;
-      }
-      this.orchestratorSessions.delete(ctx.chat.id);
-      await ctx.reply("Intent cancelled. No transaction was submitted.");
-    });
-
-    bot.command("portfolio", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      await ctx.replyWithChatAction("typing");
-      try {
-        const portfolio = await this.fetchPortfolio(session.userId);
-        await this.safeSend(ctx, portfolio);
-      } catch (err) {
-        console.error("Error fetching portfolio:", err);
-        await ctx.reply("Sorry, couldn't fetch portfolio. Please try again.");
-      }
-    });
-
-    bot.command("wallet", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      try {
-        const info = await this.portfolioUseCase?.getWalletInfo(session.userId);
-        if (!info?.smartAccountAddress) {
-          await ctx.reply(
-            "No wallet found. Complete registration to deploy your Smart Contract Account.",
-          );
-          return;
-        }
-        const lines = [
-          "🔑 Wallet Info",
-          `Smart Account: \`${info.smartAccountAddress}\``,
-          info.sessionKeyAddress
-            ? `Session Key: \`${info.sessionKeyAddress}\``
-            : "Session Key: Not set",
-          `Session Key Status: ${info.sessionKeyStatus ?? "N/A"}`,
-        ];
-        if (info.sessionKeyExpiresAtEpoch) {
-          const expiresDate = new Date(info.sessionKeyExpiresAtEpoch * 1000)
-            .toISOString()
-            .split("T")[0];
-          lines.push(`Expires: ${expiresDate}`);
-        }
-        await this.safeSend(ctx, lines.join("\n"));
-      } catch (err) {
-        console.error("Error fetching wallet:", err);
-        await ctx.reply("Sorry, couldn't fetch wallet info. Please try again.");
-      }
-    });
-
-    bot.command("sign", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      if (!this.signingRequestUseCase) {
-        await ctx.reply("Signing service not configured.");
-        return;
-      }
-      const parts = ctx.match?.trim().split(/\s+/) ?? [];
-      if (parts.length < 4) {
-        await ctx.reply(
-          "Usage: /sign <to> <value_wei> <calldata_hex> <description...>",
-        );
-        return;
-      }
-      const [to, value, data, ...descParts] = parts;
-      const description = descParts.join(" ");
-      try {
-        const { requestId, pushed } =
-          await this.signingRequestUseCase.createRequest({
-            userId: session.userId,
-            chatId: ctx.chat.id,
-            to: to ?? "",
-            value: value ?? "0",
-            data: data ?? "0x",
-            description,
-          });
-        if (pushed) {
-          await ctx.reply(
-            `Signing request sent to your app.\nRequest ID: \`${requestId}\``,
-            { parse_mode: "Markdown" },
-          );
-        } else {
-          await ctx.reply(
-            `Signing request created but your app is not connected.\nRequest ID: \`${requestId}\`\n\nOpen the Aegis app and connect to receive signing requests.`,
-            { parse_mode: "Markdown" },
-          );
-        }
-        await this.sendMiniAppButton(ctx as any, requestId);
-      } catch (err) {
-        console.error("Error creating signing request:", err);
-        await ctx.reply("Failed to create signing request. Please try again.");
-      }
     });
 
     // NOTE: Superseded by the optional telegramChatId field in POST /auth/privy.
@@ -415,36 +212,6 @@ export class TelegramAssistantHandler {
         console.error("[Auth] web_app_data loginWithPrivy failed:", err);
         await ctx.reply(
           "Authentication failed. Please try again from the mini app.",
-        );
-      }
-    });
-
-    bot.on("message:photo", async (ctx) => {
-      const session = await this.ensureAuthenticated(ctx.chat.id);
-      if (!session) {
-        await ctx.reply("Please authenticate first. Use /auth <token>.");
-        return;
-      }
-      const conversationId = this.conversations.get(ctx.chat.id);
-      await ctx.replyWithChatAction("typing");
-      try {
-        const imageBase64Url = await this.downloadPhotoAsBase64(ctx);
-        const caption = ctx.message.caption?.trim() || "[image]";
-        const response = await this.assistantUseCase.chat({
-          userId: session.userId,
-          conversationId,
-          message: caption,
-          imageBase64Url,
-        });
-        this.conversations.set(ctx.chat.id, response.conversationId);
-        let reply = response.reply;
-        if (response.toolsUsed.length > 0)
-          reply += `\n\n[tools: ${response.toolsUsed.join(", ")}]`;
-        await this.safeSend(ctx, reply);
-      } catch (err) {
-        console.error("Error handling photo:", err);
-        await ctx.reply(
-          "Sorry, I couldn't process that image. Please try again.",
         );
       }
     });
@@ -1054,43 +821,64 @@ export class TelegramAssistantHandler {
     // ── Step A: Skip estimator for native token ────────────────────────────────────
     const fromToken = resolved.fromToken;
     const canCheckDelegation =
-      fromToken && !fromToken.isNative &&
-      this.tokenDelegationDB && this.executionEstimator;
+      fromToken &&
+      !fromToken.isNative &&
+      this.tokenDelegationDB &&
+      this.executionEstimator;
 
     if (canCheckDelegation) {
       // ── Step B: Run estimator ───────────────────────────────────────────────
-      const delegations = await this.tokenDelegationDB!.findActiveByUserId(userId);
+      const delegations =
+        await this.tokenDelegationDB!.findActiveByUserId(userId);
       const estimationResult = await this.executionEstimator!.estimate({
         delegations,
         intentTokenAddress: fromToken.address,
         intentTokenSymbol: fromToken.symbol,
-        intentAmountRaw: session.partialParams.amountRaw as string ?? "0",
-        intentAmountHuman: session.partialParams.amountHuman as string ?? "0",
+        intentAmountRaw: (session.partialParams.amountRaw as string) ?? "0",
+        intentAmountHuman: (session.partialParams.amountHuman as string) ?? "0",
       });
 
       if (!estimationResult.shouldApproveMore) {
         // ── Step C: Sufficient delegation → autonomous execution ──────────────────
-        console.log(`[Handler] delegation sufficient — autonomous execution for userId=${userId}`);
-        const execResult = await this.intentUseCase!.confirmAndExecute({
-          intentId: `auto_${Date.now()}`,
+        console.log(
+          `[Handler] delegation sufficient — pushing auto-sign request to Mini App for userId=${userId}`,
+        );
+        const { requestId } = await this.signingRequestUseCase!.createRequest({
           userId,
-          calldata,
-          tokenAddress: fromToken.address,
-          amountRaw: session.partialParams.amountRaw as string | undefined,
+          chatId,
+          to: calldata.to,
+          value: calldata.value,
+          data: calldata.data,
+          description: `Autonomous execution for ${session.manifest.name}`,
+          autoSign: true,
         });
-        await this.safeSend(ctx, execResult.humanSummary);
+        await this.safeSend(
+          ctx,
+          "✅ Check the Aegis mini app to complete the transaction automatically.",
+        );
+        await this.sendMiniAppButton(ctx as any, requestId, true);
         await this.tryCreateDelegationRequest(ctx, userId, session, fromToken);
         return;
       }
 
       // ── Step D: Insufficient delegation → re-approval prompt ────────────────
-      const amountHumanNum = parseFloat(session.partialParams.amountHuman as string ?? "0");
+      const amountHumanNum = parseFloat(
+        (session.partialParams.amountHuman as string) ?? "0",
+      );
       const topUp = Math.max(amountHumanNum, 100);
-      const rawForReapproval = (BigInt(Math.round(topUp)) * 10n ** BigInt(fromToken.decimals)).toString();
+      const rawForReapproval = (
+        BigInt(Math.round(topUp)) *
+        10n ** BigInt(fromToken.decimals)
+      ).toString();
       const miniAppUrlBase = process.env.MINI_APP_URL ?? "";
       const reapprovalUrl = `${miniAppUrlBase}?reapproval=1&tokenAddress=${encodeURIComponent(fromToken.address)}&amountRaw=${rawForReapproval}`;
-      const keyboard = new InlineKeyboard().webApp("Approve More", reapprovalUrl);
-      await ctx.reply(estimationResult.displayMessage, { reply_markup: keyboard });
+      const keyboard = new InlineKeyboard().webApp(
+        "Approve More",
+        reapprovalUrl,
+      );
+      await ctx.reply(estimationResult.displayMessage, {
+        reply_markup: keyboard,
+      });
       return;
     }
 
@@ -1322,43 +1110,69 @@ export class TelegramAssistantHandler {
 
     // ── Step A: Skip estimator for native token ────────────────────────────────────
     const canCheckDelegation =
-      resolvedFrom && !resolvedFrom.isNative &&
-      this.tokenDelegationDB && this.executionEstimator;
+      resolvedFrom &&
+      !resolvedFrom.isNative &&
+      this.tokenDelegationDB &&
+      this.executionEstimator;
 
     if (canCheckDelegation) {
       // ── Step B: Run estimator ───────────────────────────────────────────────
-      const delegations = await this.tokenDelegationDB!.findActiveByUserId(userId);
+      const delegations =
+        await this.tokenDelegationDB!.findActiveByUserId(userId);
       const estimationResult = await this.executionEstimator!.estimate({
         delegations,
         intentTokenAddress: resolvedFrom!.address,
         intentTokenSymbol: resolvedFrom!.symbol,
-        intentAmountRaw: session.partialParams.amountRaw as string ?? "0",
-        intentAmountHuman: session.partialParams.amountHuman as string ?? "0",
+        intentAmountRaw: (session.partialParams.amountRaw as string) ?? "0",
+        intentAmountHuman: (session.partialParams.amountHuman as string) ?? "0",
       });
 
       if (!estimationResult.shouldApproveMore) {
         // ── Step C: Sufficient delegation → autonomous execution ──────────────────
-        console.log(`[Handler] delegation sufficient — autonomous execution for userId=${userId}`);
-        const execResult = await this.intentUseCase!.confirmAndExecute({
-          intentId: `auto_${Date.now()}`,
+        console.log(
+          `[Handler] delegation sufficient — pushing auto-sign request to Mini App for userId=${userId}`,
+        );
+        const { requestId } = await this.signingRequestUseCase!.createRequest({
           userId,
-          calldata,
-          tokenAddress: resolvedFrom!.address,
-          amountRaw: session.partialParams.amountRaw as string | undefined,
+          chatId,
+          to: calldata.to,
+          value: calldata.value,
+          data: calldata.data,
+          description: `Autonomous execution for ${session.manifest.name}`,
+          autoSign: true,
         });
-        await this.safeSend(ctx, execResult.humanSummary);
-        await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
+        await this.safeSend(
+          ctx,
+          "✅ Check the Aegis mini app to complete the transaction automatically.",
+        );
+        await this.sendMiniAppButton(ctx as any, requestId, true);
+        await this.tryCreateDelegationRequest(
+          ctx,
+          userId,
+          session,
+          resolvedFrom,
+        );
         return;
       }
 
       // ── Step D: Insufficient delegation → re-approval prompt ────────────────
-      const amountHumanNum = parseFloat(session.partialParams.amountHuman as string ?? "0");
+      const amountHumanNum = parseFloat(
+        (session.partialParams.amountHuman as string) ?? "0",
+      );
       const topUp = Math.max(amountHumanNum, 100);
-      const rawForReapproval = (BigInt(Math.round(topUp)) * 10n ** BigInt(resolvedFrom!.decimals)).toString();
+      const rawForReapproval = (
+        BigInt(Math.round(topUp)) *
+        10n ** BigInt(resolvedFrom!.decimals)
+      ).toString();
       const miniAppUrlBase = process.env.MINI_APP_URL ?? "";
       const reapprovalUrl = `${miniAppUrlBase}?reapproval=1&tokenAddress=${encodeURIComponent(resolvedFrom!.address)}&amountRaw=${rawForReapproval}`;
-      const keyboard = new InlineKeyboard().webApp("Approve More", reapprovalUrl);
-      await ctx.reply(estimationResult.displayMessage, { reply_markup: keyboard });
+      const keyboard = new InlineKeyboard().webApp(
+        "Approve More",
+        reapprovalUrl,
+      );
+      await ctx.reply(estimationResult.displayMessage, {
+        reply_markup: keyboard,
+      });
       return;
     }
 
@@ -1420,6 +1234,7 @@ export class TelegramAssistantHandler {
   private async sendMiniAppButton(
     ctx: { reply: (text: string, opts?: object) => Promise<unknown> },
     requestId?: string,
+    isAutoSign?: boolean,
   ): Promise<void> {
     const miniAppUrlBase = process.env.MINI_APP_URL;
     if (!miniAppUrlBase) return;
@@ -1429,12 +1244,18 @@ export class TelegramAssistantHandler {
         ? `&requestId=${requestId}`
         : `?requestId=${requestId}`;
     }
+    if (isAutoSign) {
+      url += url.includes("?") ? `&autoSign=1` : `?autoSign=1`;
+    }
     console.log("[sendMiniAppButton] Generated URL:", url);
-    const keyboard = new InlineKeyboard().webApp("Open Aegis to Sign", url);
-    await ctx.reply(
-      "Tap the button below to review and sign this transaction in Aegis.",
-      { reply_markup: keyboard },
-    );
+    const buttonText = isAutoSign
+      ? "Execute Automatically"
+      : "Open Aegis to Sign";
+    const promptText = isAutoSign
+      ? "Tap the button below to execute this transaction silently in Aegis."
+      : "Tap the button below to review and sign this transaction in Aegis.";
+    const keyboard = new InlineKeyboard().webApp(buttonText, url);
+    await ctx.reply(promptText, { reply_markup: keyboard });
   }
 
   // ── Message builders ─────────────────────────────────────────────────────────
@@ -1628,37 +1449,6 @@ export class TelegramAssistantHandler {
     await this.safeSend(ctx, response.reply);
   }
 
-  private async confirmLatestIntent(userId: string): Promise<string> {
-    if (!this.intentUseCase) return "Intent execution not configured.";
-    const result = await this.intentUseCase.confirmAndExecute({
-      intentId: "__latest__",
-      userId,
-    });
-    return result.humanSummary;
-  }
-
-  private async fetchPortfolio(userId: string): Promise<string> {
-    if (!this.portfolioUseCase) {
-      return "Portfolio service not configured.";
-    }
-    const result = await this.portfolioUseCase.getPortfolio(userId);
-    if (!result) {
-      return "No Smart Contract Account found. Please complete registration.";
-    }
-
-    const rows: string[] = [
-      "💼 Portfolio",
-      `SCA: \`${result.smartAccountAddress}\``,
-      "",
-      "Token | Balance",
-      "------|-------",
-    ];
-    for (const b of result.balances) {
-      rows.push(`${b.symbol} | ${b.balance}`);
-    }
-    return rows.join("\n");
-  }
-
   private async ensureAuthenticated(
     chatId: number,
   ): Promise<{ userId: string } | null> {
@@ -1692,41 +1482,5 @@ export class TelegramAssistantHandler {
     } catch {
       await ctx.reply(text);
     }
-  }
-
-  private async notifyRecipient(
-    recipientTelegramUserId: string,
-    _senderUserId: string,
-  ): Promise<void> {
-    if (!this.botRef) return;
-    try {
-      await this.botRef.api.sendMessage(
-        parseInt(recipientTelegramUserId, 10),
-        "You have received tokens in your wallet! Open the Aegis app to view your balance.",
-      );
-      console.log(
-        `[Handler] notified recipient telegramUserId=${recipientTelegramUserId}`,
-      );
-    } catch (err) {
-      console.warn(
-        `[Handler] could not notify recipient telegramUserId=${recipientTelegramUserId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-  }
-
-  private async downloadPhotoAsBase64(ctx: {
-    message: { photo?: { file_id: string }[] };
-    api: { getFile: (fileId: string) => Promise<{ file_path?: string }> };
-  }): Promise<string> {
-    const photos = ctx.message.photo;
-    if (!photos) throw new Error("Photo message missing photo field");
-    const fileId = photos[photos.length - 1].file_id;
-    const file = await ctx.api.getFile(fileId);
-    const token = this.botToken ?? process.env.TELEGRAM_BOT_TOKEN ?? "";
-    const url = `https://api.telegram.org/file/bot${token}/${file.file_path}`;
-    const response = await fetch(url);
-    const buffer = await response.arrayBuffer();
-    return `data:image/jpeg;base64,${Buffer.from(buffer).toString("base64")}`;
   }
 }

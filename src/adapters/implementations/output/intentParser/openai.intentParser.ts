@@ -19,7 +19,10 @@ const IntentSchema = z.object({
   amountHuman: z.string().nullable(),
   slippageBps: z.number().nullable(),
   recipient: z.string().nullable(),
-  params: z.object({}).catchall(z.union([z.string(), z.number(), z.boolean(), z.null()])).nullable(),
+  params: z
+    .object({})
+    .catchall(z.union([z.string(), z.number(), z.boolean(), z.null()]))
+    .nullable(),
   confidence: z.number().min(0).max(1),
   isOnChainAction: z.boolean(),
 });
@@ -35,7 +38,8 @@ If the user is NOT asking for any on-chain action (e.g. chatting, asking a quest
 
 If the user IS requesting an on-chain action, extract:
 - action: one of the built-in actions (${BUILTIN_ACTIONS}) OR a dynamic toolId if applicable
-- fromTokenSymbol: token the user wants to spend/send (e.g. "${CHAIN_CONFIG.nativeSymbol}", "USDC")
+- fromTokenSymbol: token the user wants to spend/send (e.g. "${CHAIN_CONFIG.nativeSymbol}", "USDC"). 
+  notice that $ symbol, with no ticker will be intepreted as USDC token
 - toTokenSymbol: token the user wants to receive (swaps only)
 - amountHuman: human-readable amount as a string (e.g. "1.5", "100")
 - slippageBps: slippage in basis points if specified; default 50 for swaps
@@ -50,7 +54,9 @@ function buildSystemPrompt(relevantManifests: ToolManifest[]): string {
   if (relevantManifests.length === 0) return BASE_SYSTEM_PROMPT;
 
   const toolLines = relevantManifests.map((t) => {
-    const props = (t.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+    const props =
+      (t.inputSchema as { properties?: Record<string, unknown> }).properties ??
+      {};
     const requiredInputs = Object.keys(props).join(", ");
     return `- toolId: "${t.toolId}" | [${t.protocolName}] ${t.description} | Tags: ${t.tags.join(", ")} | Required inputs: ${requiredInputs}`;
   });
@@ -101,7 +107,16 @@ export class OpenAIIntentParser implements IIntentParser {
 
     if (parsed.intent === null || !parsed.intent.isOnChainAction) return null;
 
-    const { action, fromTokenSymbol, toTokenSymbol, amountHuman, slippageBps, recipient, params, confidence } = parsed.intent;
+    const {
+      action,
+      fromTokenSymbol,
+      toTokenSymbol,
+      amountHuman,
+      slippageBps,
+      recipient,
+      params,
+      confidence,
+    } = parsed.intent;
     return {
       action,
       confidence,
@@ -110,7 +125,9 @@ export class OpenAIIntentParser implements IIntentParser {
       ...(toTokenSymbol != null && { toTokenSymbol }),
       ...(amountHuman != null && { amountHuman }),
       ...(slippageBps != null && { slippageBps }),
-      ...(recipient != null && { recipient: recipient as IntentPackage["recipient"] }),
+      ...(recipient != null && {
+        recipient: recipient as IntentPackage["recipient"],
+      }),
       ...(params != null && { params }),
     };
   }

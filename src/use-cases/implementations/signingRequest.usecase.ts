@@ -18,6 +18,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     value: string;
     data: string;
     description: string;
+    autoSign?: boolean;
   }): Promise<{ requestId: string; pushed: boolean }> {
     const id = newUuid();
     const now = newCurrentUTCEpoch();
@@ -32,6 +33,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       status: 'pending' as const,
       createdAt: now,
       expiresAt: now + 300,
+      autoSign: params.autoSign,
     };
 
     await this.cache.save(record);
@@ -44,6 +46,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       data: params.data,
       description: params.description,
       expiresAt: record.expiresAt,
+      autoSign: params.autoSign,
     });
 
     return { requestId: id, pushed };
@@ -78,6 +81,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       data: record.data,
       description: record.description,
       expiresAt: record.expiresAt,
+      autoSign: record.autoSign,
     };
   }
 
@@ -92,6 +96,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       description: record.description,
       expiresAt: record.expiresAt,
       status: record.status,
+      autoSign: record.autoSign,
     };
   }
 }

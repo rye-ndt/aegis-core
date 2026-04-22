@@ -6,6 +6,7 @@ export interface ISigningRequestUseCase {
     value: string;
     data: string;
     description: string;
+    autoSign?: boolean;
   }): Promise<{ requestId: string; pushed: boolean }>;
 
   resolveRequest(params: {
@@ -22,6 +23,7 @@ export interface ISigningRequestUseCase {
     data: string;
     description: string;
     expiresAt: number;
+    autoSign?: boolean;
   } | null>;
 
   getRequest(requestId: string, userId: string): Promise<{
@@ -32,5 +34,6 @@ export interface ISigningRequestUseCase {
     description: string;
     expiresAt: number;
     status: string;
+    autoSign?: boolean;
   } | null>;
 }

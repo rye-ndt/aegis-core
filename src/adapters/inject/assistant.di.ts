@@ -407,6 +407,10 @@ export class AssistantInject {
     const botKey = process.env.BOT_PRIVATE_KEY;
     const bundlerUrl = process.env.AVAX_BUNDLER_URL;
     if (!botKey || !bundlerUrl) return undefined;
+    if (!/^(0x)?[0-9a-fA-F]{64}$/.test(botKey.trim())) {
+      console.error("[getUserOpExecutor] BOT_PRIVATE_KEY is not a valid 32-byte hex private key — autonomous execution disabled");
+      return undefined;
+    }
     if (!this._userOpExecutor) {
       const key = (botKey.startsWith('0x') ? botKey : `0x${botKey}`) as `0x${string}`;
       this._userOpExecutor = new ZerodevUserOpExecutor(
