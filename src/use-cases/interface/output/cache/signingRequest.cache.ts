@@ -10,6 +10,7 @@ export type SigningRequestRecord = {
   txHash?: string;
   createdAt: number;
   expiresAt: number;
+  autoSign?: boolean;
 };
 
 export interface ISigningRequestCache {
