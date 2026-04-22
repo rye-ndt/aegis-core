@@ -62,8 +62,12 @@ import { SystemToolProviderConcrete } from "../implementations/output/systemTool
 import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
 import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
 import { CHAIN_CONFIG } from "../../helpers/chainConfig";
-import { RedisAegisGuardCache } from "../implementations/output/cache/redis.aegisGuard";
-import type { IAegisGuardCache } from "../../use-cases/interface/output/cache/aegisGuard.cache";
+import { DrizzleTokenDelegationRepo } from "../implementations/output/sqlDB/repositories/tokenDelegation.repo";
+import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
+import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
+import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
+import { ZerodevUserOpExecutor } from "../implementations/output/blockchain/zerodevExecutor";
+import type { IUserOpExecutor } from "../../use-cases/interface/output/blockchain/userOpExecutor.interface";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -97,7 +101,9 @@ export class AssistantInject {
   private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
   private _walletDataProvider: IWalletDataProvider | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
-  private _aegisGuardCache?: IAegisGuardCache;
+  private _tokenDelegationRepo: ITokenDelegationDB | null = null;
+  private _executionEstimator: IExecutionEstimator | null = null;
+  private _userOpExecutor: IUserOpExecutor | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -256,6 +262,9 @@ export class AssistantInject {
         this.getIntentClassifier(),
         this.getSchemaCompiler(),
         db.commandToolMappings,
+        db.intentExecutions,
+        db.tokenDelegations,
+        this.getUserOpExecutor(),
       );
     }
     return this._intentUseCase;
@@ -357,6 +366,7 @@ export class AssistantInject {
         db.telegramSessions,
         notifier,
         this.getUserProfileCache(),
+        db.tokenDelegations,
       );
     }
     return this._authUseCase;
@@ -380,13 +390,35 @@ export class AssistantInject {
     return this._sessionDelegationCache;
   }
 
-  getAegisGuardCache(): IAegisGuardCache | undefined {
-    const redis = this.getRedis();
-    if (!redis) return undefined;
-    if (!this._aegisGuardCache) {
-      this._aegisGuardCache = new RedisAegisGuardCache(redis);
+  getAegisGuardCache(): undefined {
+    return undefined;
+  }
+
+  getTokenDelegationRepo(): ITokenDelegationDB {
+    return this.getSqlDB().tokenDelegations;
+  }
+
+  getExecutionEstimator(): IExecutionEstimator | undefined {
+    if (!this._executionEstimator) {
+      this._executionEstimator = new DeterministicExecutionEstimator();
     }
-    return this._aegisGuardCache;
+    return this._executionEstimator;
+  }
+
+  getUserOpExecutor(): IUserOpExecutor | undefined {
+    const botKey = process.env.BOT_PRIVATE_KEY;
+    const bundlerUrl = process.env.AVAX_BUNDLER_URL;
+    if (!botKey || !bundlerUrl) return undefined;
+    if (!this._userOpExecutor) {
+      const key = (botKey.startsWith('0x') ? botKey : `0x${botKey}`) as `0x${string}`;
+      this._userOpExecutor = new ZerodevUserOpExecutor(
+        key,
+        bundlerUrl,
+        CHAIN_CONFIG.rpcUrl,
+        CHAIN_CONFIG.chain,
+      );
+    }
+    return this._userOpExecutor;
   }
 
   getSseRegistry(): SseRegistry {
@@ -524,7 +556,8 @@ export class AssistantInject {
       this.getUserProfileCache(),
       this.getHttpQueryToolUseCase(),
       this.getSqlDB().userPreferences,
-      this.getAegisGuardCache(),
+      this.getTokenDelegationRepo(),
+      this.getSqlDB().userProfiles,
     );
   }
 }

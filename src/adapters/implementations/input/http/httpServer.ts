@@ -14,9 +14,11 @@ import type { ICommandMappingUseCase } from "../../../../use-cases/interface/inp
 import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
 import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/input/httpQueryTool.interface";
 import type { IUserPreferencesDB } from "../../../../use-cases/interface/output/repository/userPreference.repo";
-import type { IAegisGuardCache } from "../../../../use-cases/interface/output/cache/aegisGuard.cache";
+import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { NewTokenDelegation } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
-import jwt from "jsonwebtoken";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 
 const PermissionSchema = z.object({
@@ -40,7 +42,7 @@ export class HttpApiServer {
   constructor(
     private readonly authUseCase: IAuthUseCase,
     private readonly port: number,
-    private readonly jwtSecret?: string,
+    _jwtSecret?: string,
     private readonly intentUseCase?: IIntentUseCase,
     private readonly portfolioUseCase?: IPortfolioUseCase,
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
@@ -52,7 +54,8 @@ export class HttpApiServer {
     private readonly userProfileCache?: IUserProfileCache,
     private readonly httpQueryToolUseCase?: IHttpQueryToolUseCase,
     private readonly userPreferencesRepo?: IUserPreferencesDB,
-    private readonly aegisGuardCache?: IAegisGuardCache,
+    private readonly tokenDelegationRepo?: ITokenDelegationDB,
+    private readonly userProfileDB?: IUserProfileDB,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -151,8 +154,14 @@ export class HttpApiServer {
     if (method === "POST" && url.pathname === "/preference") {
       return this.handlePostPreference(req, res);
     }
-    if (method === "POST" && url.pathname === "/aegis-guard/grant") {
-      return this.handlePostAegisGuardGrant(req, res);
+    if (method === "GET" && url.pathname === "/delegation/approval-params") {
+      return this.handleGetDelegationApprovalParams(req, res, url);
+    }
+    if (method === "POST" && url.pathname === "/delegation/grant") {
+      return this.handlePostDelegationGrant(req, res);
+    }
+    if (method === "GET" && url.pathname === "/delegation/grant") {
+      return this.handleGetDelegationGrant(req, res);
     }
 
     res.writeHead(404);
@@ -193,7 +202,7 @@ export class HttpApiServer {
   }
 
   private async handleGetUserProfile(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.userProfileCache) return this.sendJson(res, 503, { error: "Profile cache not available" });
 
@@ -203,7 +212,7 @@ export class HttpApiServer {
   }
 
   private async handleGetIntent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.intentUseCase) return this.sendJson(res, 503, { error: "Intent service not available" });
 
@@ -215,7 +224,7 @@ export class HttpApiServer {
   }
 
   private async handleGetPortfolio(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.portfolioUseCase) return this.sendJson(res, 503, { error: "Portfolio service not available" });
 
@@ -263,7 +272,7 @@ export class HttpApiServer {
   }
 
   private async handleDeleteTool(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.toolRegistrationUseCase) return this.sendJson(res, 503, { error: "Tool registration service not available" });
 
@@ -316,6 +325,41 @@ export class HttpApiServer {
 
     await this.sessionDelegationUseCase.save(parsed.data);
     console.log(`[Delegation] Stored record for address ${parsed.data.address}`);
+
+    // If the request includes a valid JWT, write the SCA + EOA into user_profiles
+    // so that confirmAndExecute can find the smart account address later.
+    const userId = await this.extractUserId(req);
+    if (userId && this.userProfileDB) {
+      const now = newCurrentUTCEpoch();
+      try {
+        const existing = await this.userProfileDB.findByUserId(userId);
+        if (!existing) {
+          await this.userProfileDB.upsert({
+            userId,
+            smartAccountAddress: parsed.data.smartAccountAddress,
+            eoaAddress: parsed.data.signerAddress,
+            createdAtEpoch: now,
+            updatedAtEpoch: now,
+          });
+        } else {
+          await this.userProfileDB.update({
+            userId,
+            telegramChatId: existing.telegramChatId,
+            smartAccountAddress: parsed.data.smartAccountAddress,
+            eoaAddress: existing.eoaAddress ?? parsed.data.signerAddress,
+            sessionKeyAddress: existing.sessionKeyAddress,
+            sessionKeyScope: existing.sessionKeyScope,
+            sessionKeyStatus: existing.sessionKeyStatus,
+            sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
+            updatedAtEpoch: now,
+          });
+        }
+        console.log(`[Delegation] Upserted user_profiles for userId=${userId} sca=${parsed.data.smartAccountAddress}`);
+      } catch (err) {
+        console.error(`[Delegation] Failed to upsert user_profiles for userId=${userId}:`, err);
+      }
+    }
+
     return this.sendJson(res, 201, { address: parsed.data.address, saved: true });
   }
 
@@ -353,7 +397,7 @@ export class HttpApiServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
     if (!this.pendingDelegationRepo) {
       return this.sendJson(res, 503, { error: 'Delegation service not available' });
@@ -375,7 +419,7 @@ export class HttpApiServer {
     res: http.ServerResponse,
     id: string,
   ): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
     if (!this.pendingDelegationRepo) {
       return this.sendJson(res, 503, { error: 'Delegation service not available' });
@@ -390,7 +434,7 @@ export class HttpApiServer {
     }
   }
 
-  private handleGetEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
+  private async handleGetEvents(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
     if (!this.sseRegistry) {
       this.sendJson(res, 503, { error: 'SSE service not available' });
       return;
@@ -399,19 +443,13 @@ export class HttpApiServer {
     // EventSource cannot set Authorization header — accept ?token= as fallback
     const authHeader = req.headers.authorization;
     let userId: string | null = null;
-    if (authHeader?.startsWith('Bearer ') && this.jwtSecret) {
-      try {
-        const payload = jwt.verify(authHeader.slice(7), this.jwtSecret) as { userId: string };
-        userId = payload.userId;
-      } catch { /* fall through to query param */ }
+    if (authHeader?.startsWith('Bearer ')) {
+      userId = await this.authUseCase.resolveUserId(authHeader.slice(7));
     }
     if (!userId) {
       const token = url.searchParams.get('token');
-      if (token && this.jwtSecret) {
-        try {
-          const payload = jwt.verify(token, this.jwtSecret) as { userId: string };
-          userId = payload.userId;
-        } catch { /* invalid */ }
+      if (token) {
+        userId = await this.authUseCase.resolveUserId(token);
       }
     }
 
@@ -455,7 +493,7 @@ export class HttpApiServer {
   }
 
   private async handlePostSignResponse(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
     if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
 
@@ -494,7 +532,7 @@ export class HttpApiServer {
   }
 
   private async handleGetSignRequest(req: http.IncomingMessage, res: http.ServerResponse, url: URL, requestId: string): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
     if (!this.signingRequestUseCase) return this.sendJson(res, 503, { error: 'Signing service not available' });
 
@@ -579,7 +617,7 @@ export class HttpApiServer {
   }
 
   private async handlePostHttpTool(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
 
@@ -614,7 +652,7 @@ export class HttpApiServer {
   }
 
   private async handleGetHttpTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
 
@@ -623,7 +661,7 @@ export class HttpApiServer {
   }
 
   private async handleDeleteHttpTool(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
     if (!id) return this.sendJson(res, 400, { error: "Tool ID required" });
@@ -640,7 +678,7 @@ export class HttpApiServer {
   }
 
   private async handleGetPreference(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Preferences service not available" });
 
@@ -649,7 +687,7 @@ export class HttpApiServer {
   }
 
   private async handlePostPreference(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Preferences service not available" });
 
@@ -663,54 +701,139 @@ export class HttpApiServer {
     return this.sendJson(res, 200, { ok: true });
   }
 
-  private async handlePostAegisGuardGrant(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = this.extractUserId(req);
+  // ── Delegation endpoints ────────────────────────────────────────────────────
+  //
+  // GET  /delegation/approval-params  → build default token list + optional override
+  // POST /delegation/grant            → upsertMany delegations
+  // GET  /delegation/grant            → find active delegations for user
+
+  private async handleGetDelegationApprovalParams(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.aegisGuardCache || !this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Aegis Guard service not available" });
+
+    const chainId = CHAIN_CONFIG.chainId;
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    const validUntil30Days = nowEpoch + 30 * 24 * 60 * 60;
+
+    // Default token list — USDC, USDT, AVAX (native)
+    const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+    const tokens: Array<{
+      tokenAddress: string;
+      tokenSymbol: string;
+      tokenDecimals: number;
+      suggestedLimitRaw: string;
+      validUntil: number;
+    }> = [
+      {
+        tokenAddress: "",      // resolved from DB below
+        tokenSymbol: "USDC",
+        tokenDecimals: 6,
+        suggestedLimitRaw: (500n * 10n ** 6n).toString(),
+        validUntil: validUntil30Days,
+      },
+      {
+        tokenAddress: "",
+        tokenSymbol: "USDT",
+        tokenDecimals: 6,
+        suggestedLimitRaw: (500n * 10n ** 6n).toString(),
+        validUntil: validUntil30Days,
+      },
+      {
+        tokenAddress: NATIVE_ADDRESS,
+        tokenSymbol: CHAIN_CONFIG.nativeSymbol,
+        tokenDecimals: 18,
+        suggestedLimitRaw: (50n * 10n ** 18n).toString(),
+        validUntil: validUntil30Days,
+      },
+    ];
+
+    // Try to resolve USDC / USDT addresses from portfolio use case (token registry)
+    if (this.portfolioUseCase) {
+      const registryTokens = await this.portfolioUseCase.listTokens(chainId).catch(() => []);
+      for (const t of tokens) {
+        if (t.tokenAddress) continue; // already set (native)
+        const found = registryTokens.find(
+          (rt) => rt.symbol.toUpperCase() === t.tokenSymbol.toUpperCase(),
+        );
+        if (found) t.tokenAddress = found.address;
+      }
+    }
+
+    // Remove tokens whose address could not be resolved
+    const resolved = tokens.filter((t) => !!t.tokenAddress);
+
+    // Optional re-approval override: replace or append the matching entry
+    const overrideAddress = url.searchParams.get("tokenAddress");
+    const overrideAmount  = url.searchParams.get("amountRaw");
+    if (overrideAddress && overrideAmount) {
+      const idx = resolved.findIndex(
+        (t) => t.tokenAddress.toLowerCase() === overrideAddress.toLowerCase(),
+      );
+      const override = {
+        tokenAddress: overrideAddress,
+        tokenSymbol: "",
+        tokenDecimals: 18,
+        suggestedLimitRaw: overrideAmount,
+        validUntil: validUntil30Days,
+      };
+      if (idx >= 0) {
+        resolved[idx]!.suggestedLimitRaw = overrideAmount;
+      } else {
+        resolved.push(override);
+      }
+    }
+
+    return this.sendJson(res, 200, { tokens: resolved });
+  }
+
+  private async handlePostDelegationGrant(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.tokenDelegationRepo) return this.sendJson(res, 503, { error: "Delegation service not available" });
 
     let body: unknown;
     try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
 
     const parsed = z.object({
-      sessionKeyAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-      smartAccountAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
       delegations: z.array(z.object({
-        tokenAddress: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        tokenAddress: z.string().min(1),
         tokenSymbol: z.string().min(1).max(10),
         tokenDecimals: z.number().int().min(0).max(18),
-        limitWei: z.string().regex(/^\d+$/),
+        limitRaw: z.string().regex(/^\d+$/),
         validUntil: z.number().int().positive(),
       })).min(1),
     }).safeParse(body);
 
     if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
 
-    const now = Math.floor(Date.now() / 1000);
-    const maxValidUntil = Math.max(...parsed.data.delegations.map(d => d.validUntil));
-    let ttl = maxValidUntil - now;
-    if (ttl < 60) ttl = 60; // minimum 60s
-
-    await this.aegisGuardCache.saveGrant(userId, {
-      sessionKeyAddress: parsed.data.sessionKeyAddress,
-      smartAccountAddress: parsed.data.smartAccountAddress,
-      delegations: parsed.data.delegations,
-      grantedAt: now,
-    }, ttl);
-
-    await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
+    const delegations: NewTokenDelegation[] = parsed.data.delegations;
+    await this.tokenDelegationRepo.upsertMany(userId, delegations);
     return this.sendJson(res, 200, { ok: true });
   }
 
-  private extractUserId(req: http.IncomingMessage): string | null {
+  private async handleGetDelegationGrant(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.tokenDelegationRepo) return this.sendJson(res, 503, { error: "Delegation service not available" });
+
+    const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
+    return this.sendJson(res, 200, { delegations });
+  }
+
+  private async extractUserId(req: http.IncomingMessage): Promise<string | null> {
     const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ") || !this.jwtSecret) return null;
-    try {
-      const token = authHeader.slice(7);
-      const payload = jwt.verify(token, this.jwtSecret) as { userId: string };
-      return payload.userId;
-    } catch {
-      return null;
-    }
+    if (!authHeader?.startsWith("Bearer ")) return null;
+    return this.authUseCase.resolveUserId(authHeader.slice(7));
   }
 
   private readJson(req: http.IncomingMessage): Promise<unknown> {

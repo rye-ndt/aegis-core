@@ -113,6 +113,13 @@
       "when": 1776819024050,
       "tag": "0015_shallow_big_bertha",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1776835633135,
+      "tag": "0016_foamy_frog_thor",
+      "breakpoints": true
     }
   ]
 }

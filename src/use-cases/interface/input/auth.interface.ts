@@ -19,4 +19,5 @@ export interface IAuthUseCase {
   login(input: ILoginInput): Promise<{ token: string; expiresAtEpoch: number; userId: string }>;
   validateToken(token: string): Promise<{ userId: string; expiresAtEpoch: number }>;
   loginWithPrivy(input: IPrivyLoginInput): Promise<{ token: string; expiresAtEpoch: number; userId: string }>;
+  resolveUserId(privyToken: string): Promise<string | null>;
 }

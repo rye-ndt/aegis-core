@@ -15,6 +15,7 @@ import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../interface/output/telegramNotifier.interface";
 import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
+import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
 
 const BCRYPT_ROUNDS = 10;
 
@@ -30,6 +31,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     private readonly telegramSessionDB?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
     private readonly userProfileCache?: IUserProfileCache,
+    private readonly tokenDelegationDB?: ITokenDelegationDB,
   ) {}
 
   async register(input: IRegisterInput): Promise<{ userId: string }> {
@@ -139,7 +141,37 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       });
     }
 
+    // Proactive onboarding: if the user has no active delegations, prompt them
+    // to open the mini app and set spending limits.
+    if (input.telegramChatId && this.telegramNotifier && this.tokenDelegationDB) {
+      const delegations = await this.tokenDelegationDB.findActiveByUserId(user.id).catch(() => []);
+      if (delegations.length === 0) {
+        const miniAppUrl = process.env.MINI_APP_URL;
+        if (miniAppUrl) {
+          await this.telegramNotifier.sendMessage(
+            input.telegramChatId,
+            "Hey! To let me act on your behalf, I need a one-time permission.\n" +
+            "Tap the button below — it takes about 10 seconds.",
+            { webAppButton: { label: "Confirm", url: miniAppUrl } },
+          ).catch((err) => {
+            console.error("[Auth] failed to send delegation onboarding nudge:", err);
+          });
+        }
+      }
+    }
+
     return result;
+  }
+
+  async resolveUserId(privyToken: string): Promise<string | null> {
+    if (!this.privyAuthService) return null;
+    try {
+      const { privyDid } = await this.privyAuthService.verifyTokenLite(privyToken);
+      const user = await this.userDB.findByPrivyDid(privyDid);
+      return user?.id ?? null;
+    } catch {
+      return null;
+    }
   }
 
   private issueJwt(userId: string, email: string): { token: string; expiresAtEpoch: number; userId: string } {

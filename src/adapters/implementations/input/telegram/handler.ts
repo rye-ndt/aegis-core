@@ -31,6 +31,8 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { IExecutionEstimator } from "../../../../use-cases/interface/output/executionEstimator.interface";
 
 // ── Session state types ────────────────────────────────────────────────────────
 
@@ -115,6 +117,8 @@ export class TelegramAssistantHandler {
     private readonly privyAuthService?: IPrivyAuthService,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
     private readonly resolverEngine?: IResolverEngine,
+    private readonly tokenDelegationDB?: ITokenDelegationDB,
+    private readonly executionEstimator?: IExecutionEstimator,
   ) {}
 
   // ── Bot registration ─────────────────────────────────────────────────────────
@@ -1047,19 +1051,50 @@ export class TelegramAssistantHandler {
 
     this.orchestratorSessions.delete(chatId);
 
-    let requestId: string | undefined;
-    if (this.signingRequestUseCase) {
-      const res = await this.signingRequestUseCase.createRequest({
-        userId,
-        chatId,
-        to: calldata.to,
-        value: calldata.value,
-        data: calldata.data,
-        description: session.manifest.name,
+    // ── Step A: Skip estimator for native token ────────────────────────────────────
+    const fromToken = resolved.fromToken;
+    const canCheckDelegation =
+      fromToken && !fromToken.isNative &&
+      this.tokenDelegationDB && this.executionEstimator;
+
+    if (canCheckDelegation) {
+      // ── Step B: Run estimator ───────────────────────────────────────────────
+      const delegations = await this.tokenDelegationDB!.findActiveByUserId(userId);
+      const estimationResult = await this.executionEstimator!.estimate({
+        delegations,
+        intentTokenAddress: fromToken.address,
+        intentTokenSymbol: fromToken.symbol,
+        intentAmountRaw: session.partialParams.amountRaw as string ?? "0",
+        intentAmountHuman: session.partialParams.amountHuman as string ?? "0",
       });
-      requestId = res.requestId;
+
+      if (!estimationResult.shouldApproveMore) {
+        // ── Step C: Sufficient delegation → autonomous execution ──────────────────
+        console.log(`[Handler] delegation sufficient — autonomous execution for userId=${userId}`);
+        const execResult = await this.intentUseCase!.confirmAndExecute({
+          intentId: `auto_${Date.now()}`,
+          userId,
+          calldata,
+          tokenAddress: fromToken.address,
+          amountRaw: session.partialParams.amountRaw as string | undefined,
+        });
+        await this.safeSend(ctx, execResult.humanSummary);
+        await this.tryCreateDelegationRequest(ctx, userId, session, fromToken);
+        return;
+      }
+
+      // ── Step D: Insufficient delegation → re-approval prompt ────────────────
+      const amountHumanNum = parseFloat(session.partialParams.amountHuman as string ?? "0");
+      const topUp = Math.max(amountHumanNum, 100);
+      const rawForReapproval = (BigInt(Math.round(topUp)) * 10n ** BigInt(fromToken.decimals)).toString();
+      const miniAppUrlBase = process.env.MINI_APP_URL ?? "";
+      const reapprovalUrl = `${miniAppUrlBase}?reapproval=1&tokenAddress=${encodeURIComponent(fromToken.address)}&amountRaw=${rawForReapproval}`;
+      const keyboard = new InlineKeyboard().webApp("Approve More", reapprovalUrl);
+      await ctx.reply(estimationResult.displayMessage, { reply_markup: keyboard });
+      return;
     }
 
+    // ── Fallback: show confirmation message (native or estimator not configured) ──
     // Phase 4: show finalSchema (if defined) or fall back to legacy format
     if (session.manifest.finalSchema) {
       const finalSchemaFilled = this.populateFinalSchema(
@@ -1083,7 +1118,7 @@ export class TelegramAssistantHandler {
       );
     }
 
-    await this.sendMiniAppButton(ctx, requestId);
+    await this.sendMiniAppButton(ctx, undefined);
     await this.tryCreateDelegationRequest(
       ctx,
       userId,
@@ -1285,19 +1320,49 @@ export class TelegramAssistantHandler {
 
     this.orchestratorSessions.delete(chatId);
 
-    let requestId: string | undefined;
-    if (this.signingRequestUseCase) {
-      const res = await this.signingRequestUseCase.createRequest({
-        userId,
-        chatId,
-        to: calldata.to,
-        value: calldata.value,
-        data: calldata.data,
-        description: session.manifest.name,
+    // ── Step A: Skip estimator for native token ────────────────────────────────────
+    const canCheckDelegation =
+      resolvedFrom && !resolvedFrom.isNative &&
+      this.tokenDelegationDB && this.executionEstimator;
+
+    if (canCheckDelegation) {
+      // ── Step B: Run estimator ───────────────────────────────────────────────
+      const delegations = await this.tokenDelegationDB!.findActiveByUserId(userId);
+      const estimationResult = await this.executionEstimator!.estimate({
+        delegations,
+        intentTokenAddress: resolvedFrom!.address,
+        intentTokenSymbol: resolvedFrom!.symbol,
+        intentAmountRaw: session.partialParams.amountRaw as string ?? "0",
+        intentAmountHuman: session.partialParams.amountHuman as string ?? "0",
       });
-      requestId = res.requestId;
+
+      if (!estimationResult.shouldApproveMore) {
+        // ── Step C: Sufficient delegation → autonomous execution ──────────────────
+        console.log(`[Handler] delegation sufficient — autonomous execution for userId=${userId}`);
+        const execResult = await this.intentUseCase!.confirmAndExecute({
+          intentId: `auto_${Date.now()}`,
+          userId,
+          calldata,
+          tokenAddress: resolvedFrom!.address,
+          amountRaw: session.partialParams.amountRaw as string | undefined,
+        });
+        await this.safeSend(ctx, execResult.humanSummary);
+        await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
+        return;
+      }
+
+      // ── Step D: Insufficient delegation → re-approval prompt ────────────────
+      const amountHumanNum = parseFloat(session.partialParams.amountHuman as string ?? "0");
+      const topUp = Math.max(amountHumanNum, 100);
+      const rawForReapproval = (BigInt(Math.round(topUp)) * 10n ** BigInt(resolvedFrom!.decimals)).toString();
+      const miniAppUrlBase = process.env.MINI_APP_URL ?? "";
+      const reapprovalUrl = `${miniAppUrlBase}?reapproval=1&tokenAddress=${encodeURIComponent(resolvedFrom!.address)}&amountRaw=${rawForReapproval}`;
+      const keyboard = new InlineKeyboard().webApp("Approve More", reapprovalUrl);
+      await ctx.reply(estimationResult.displayMessage, { reply_markup: keyboard });
+      return;
     }
 
+    // ── Fallback: show confirmation message (native or estimator not configured) ──
     await this.safeSend(
       ctx,
       this.buildConfirmationMessage(
@@ -1307,7 +1372,7 @@ export class TelegramAssistantHandler {
         resolvedTo,
       ),
     );
-    await this.sendMiniAppButton(ctx, requestId);
+    await this.sendMiniAppButton(ctx, undefined);
     await this.tryCreateDelegationRequest(ctx, userId, session, resolvedFrom);
   }
 

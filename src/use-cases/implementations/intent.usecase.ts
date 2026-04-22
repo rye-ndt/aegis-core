@@ -4,6 +4,7 @@ import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { extractAddressFields } from "../../helpers/schema/addressFields";
 import { newUuid } from "../../helpers/uuid";
 import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
+import { EXECUTION_STATUSES } from "../../helpers/enums/executionStatus.enum";
 import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
 import { USER_INTENT_TYPE } from "../../helpers/enums/userIntentType.enum";
 import { toRaw } from "../../helpers/bigint";
@@ -11,6 +12,7 @@ import type {
   IIntentUseCase,
   IntentExecutionResult,
   ParseFromHistoryResult,
+  ConfirmAndExecuteParams,
 } from "../interface/input/intent.interface";
 import type { IntentPackage } from "../interface/output/intentParser.interface";
 import type { IIntentParser } from "../interface/output/intentParser.interface";
@@ -29,6 +31,9 @@ import { deserializeManifest, type ToolManifest } from "../interface/output/tool
 import type { IIntentClassifier } from "../interface/output/intentClassifier.interface";
 import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
 import type { ICommandToolMappingDB } from "../interface/output/repository/commandToolMapping.repo";
+import type { IIntentExecutionDB } from "../interface/output/repository/intentExecution.repo";
+import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
+import type { IUserOpExecutor } from "../interface/output/blockchain/userOpExecutor.interface";
 
 const CONFIDENCE_THRESHOLD = 0.7;
 
@@ -46,6 +51,9 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     private readonly intentClassifier: IIntentClassifier,
     private readonly schemaCompiler: ISchemaCompiler,
     private readonly commandToolMappingDB?: ICommandToolMappingDB,
+    private readonly intentExecutionDB?: IIntentExecutionDB,
+    private readonly tokenDelegationDB?: ITokenDelegationDB,
+    private readonly userOpExecutor?: IUserOpExecutor,
   ) {}
 
   async parseAndExecute(params: {
@@ -223,15 +231,142 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     };
   }
 
-  async confirmAndExecute(params: {
-    intentId: string;
-    userId: string;
-  }): Promise<IntentExecutionResult> {
+  async confirmAndExecute(
+    params: ConfirmAndExecuteParams,
+  ): Promise<IntentExecutionResult & { txHash?: string }> {
+    const { intentId, userId, calldata, tokenAddress, amountRaw } = params;
+    const now = newCurrentUTCEpoch();
+
+    // 2. Fetch user profile — need smartAccountAddress for the UserOp.
+    const profile = await this.userProfileDB.findByUserId(userId);
+    const smartAccountAddress = profile?.smartAccountAddress ?? null;
+    const sessionKeyAddress = profile?.sessionKeyAddress ?? null;
+
+    if (!smartAccountAddress) {
+      return {
+        intentId,
+        status: INTENT_STATUSES.REJECTED,
+        humanSummary: "No smart account found for this user. Please complete onboarding first.",
+        requiresConfirmation: false,
+      };
+    }
+
+    if (!calldata) {
+      return {
+        intentId,
+        status: INTENT_STATUSES.REJECTED,
+        humanSummary: "No calldata provided for execution.",
+        requiresConfirmation: false,
+      };
+    }
+
+    // 3. Validate BOT_PRIVATE_KEY is configured.
+    const botPrivateKey = process.env.BOT_PRIVATE_KEY;
+    if (!botPrivateKey) {
+      console.error("[confirmAndExecute] BOT_PRIVATE_KEY not configured");
+      return {
+        intentId,
+        status: INTENT_STATUSES.REJECTED,
+        humanSummary: "Bot signing key not configured — transaction cannot proceed automatically.",
+        requiresConfirmation: false,
+      };
+    }
+
+    let userOpHash: string | undefined;
+    let txHash: string | undefined;
+    let executionError: string | undefined;
+
+    try {
+      if (!this.userOpExecutor) {
+        throw new Error('Autonomous execution not available — bot executor not configured');
+      }
+
+      console.log(
+        `[confirmAndExecute] submitting UserOp intent=${intentId} sa=${smartAccountAddress} ` +
+        `to=${calldata.to} value=${calldata.value} dataLen=${calldata.data.length}`,
+      );
+
+      const result = await this.userOpExecutor.execute({
+        smartAccountAddress: smartAccountAddress as `0x${string}`,
+        to: calldata.to as `0x${string}`,
+        data: calldata.data as `0x${string}`,
+        value: calldata.value,
+      });
+
+      userOpHash = result.userOpHash;
+      txHash = result.txHash;
+
+      console.log(`[confirmAndExecute] UserOp confirmed userOpHash=${userOpHash} txHash=${txHash}`);
+    } catch (err) {
+      executionError = err instanceof Error ? err.message : String(err);
+      console.error(`[confirmAndExecute] UserOp submission failed:`, err);
+    }
+
+    const finalStatus = executionError
+      ? INTENT_STATUSES.REJECTED
+      : INTENT_STATUSES.CONFIRMED;
+    const execStatus = executionError
+      ? EXECUTION_STATUSES.FAILED
+      : EXECUTION_STATUSES.SUBMITTED;
+
+    // 7. Save intent_executions row (create then update with hashes).
+    if (this.intentExecutionDB) {
+      const executionId = newUuid();
+      await this.intentExecutionDB.create({
+        id: executionId,
+        intentId,
+        userId,
+        smartAccountAddress,
+        solverUsed: "session_key_bot",
+        simulationPassed: !executionError,
+        simulationResult: executionError ?? null,
+        status: execStatus,
+        createdAtEpoch: now,
+        updatedAtEpoch: now,
+      }).catch((e) => console.error("[confirmAndExecute] save execution row failed:", e));
+
+      if (userOpHash || txHash || executionError) {
+        await this.intentExecutionDB.update(executionId, {
+          userOpHash: userOpHash ?? null,
+          txHash: txHash ?? null,
+          errorMessage: executionError ?? null,
+        }).catch((e) => console.error("[confirmAndExecute] update execution row failed:", e));
+      }
+    }
+
+    // 8. Update intent status.
+    await this.intentDB
+      .updateStatus(intentId, finalStatus)
+      .catch((e) => console.error("[confirmAndExecute] updateStatus failed:", e));
+
+    // 9. Record spent amount for the delegation capacity tracker.
+    if (!executionError && tokenAddress && amountRaw && this.tokenDelegationDB) {
+      await this.tokenDelegationDB
+        .addSpent(userId, tokenAddress, amountRaw)
+        .catch((e) => console.error("[confirmAndExecute] addSpent failed:", e));
+    }
+
+    if (executionError) {
+      return {
+        intentId,
+        status: INTENT_STATUSES.REJECTED,
+        humanSummary: `Transaction failed: ${executionError}`,
+        requiresConfirmation: false,
+        txHash,
+      };
+    }
+
+    // 10. Build human-readable result.
+    const humanSummary = txHash
+      ? `✅ Transaction submitted!\nTx: \`${txHash}\``
+      : `✅ Transaction queued (userOpHash: \`${userOpHash}\`). Confirmation pending.`;
+
     return {
-      intentId: params.intentId,
-      status: INTENT_STATUSES.REJECTED,
-      humanSummary: "Transaction execution is handled by the Aegis app. Please open the app to sign and submit.",
+      intentId,
+      status: INTENT_STATUSES.CONFIRMED,
+      humanSummary,
       requiresConfirmation: false,
+      txHash,
     };
   }
 

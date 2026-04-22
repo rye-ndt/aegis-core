@@ -8,6 +8,7 @@ import type { IIntentExecutionDB } from "./repository/intentExecution.repo";
 import type { IToolManifestDB } from "./repository/toolManifest.repo";
 import type { IFeeRecordDB } from "./repository/feeRecord.repo";
 import type { IUserPreferencesDB } from "./repository/userPreference.repo";
+import type { ITokenDelegationDB } from "./repository/tokenDelegation.repo";
 
 export interface IPostgresDB {
   close(): Promise<void>;
@@ -24,4 +25,5 @@ export interface ISqlDB extends IPostgresDB {
   toolManifests?: IToolManifestDB;
   feeRecords?: IFeeRecordDB;
   userPreferences?: IUserPreferencesDB;
+  tokenDelegations?: ITokenDelegationDB;
 }

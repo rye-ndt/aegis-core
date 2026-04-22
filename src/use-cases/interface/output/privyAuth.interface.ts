@@ -14,5 +14,6 @@ export type PrivyVerifiedUser = Pick<PrivyUserProfile, 'privyDid' | 'email'>;
 
 export interface IPrivyAuthService {
   verifyToken(accessToken: string): Promise<PrivyUserProfile>;
+  verifyTokenLite(accessToken: string): Promise<{ privyDid: string }>;
   getOrCreateWalletByTelegramId(telegramUserId: string): Promise<string>; // returns 0x address
 }
