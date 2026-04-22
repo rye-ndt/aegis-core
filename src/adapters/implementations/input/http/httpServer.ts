@@ -185,11 +185,11 @@ export class HttpApiServer {
     }
 
     try {
-      const result = await this.authUseCase.loginWithPrivy({
+      const { userId, expiresAtEpoch } = await this.authUseCase.loginWithPrivy({
         privyToken: parsed.data.privyToken,
         telegramChatId: parsed.data.telegramChatId,
       });
-      return this.sendJson(res, 200, result);
+      return this.sendJson(res, 200, { userId, expiresAtEpoch });
     } catch (err) {
       if (
         err instanceof Error &&
