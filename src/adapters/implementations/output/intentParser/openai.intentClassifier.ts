@@ -4,6 +4,8 @@ import { z } from "zod";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
 import type { IIntentClassifier } from "../../../../use-cases/interface/output/intentClassifier.interface";
 
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+
 const ClassifySchema = z.object({
   intentType: z.nativeEnum(USER_INTENT_TYPE),
 });
@@ -31,7 +33,7 @@ export class OpenAIIntentClassifier implements IIntentClassifier {
         : messages.map((m, i) => `[Message ${i + 1}]: ${m}`).join("\n");
 
     const response = await this.client.chat.completions.parse({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      model: OPENAI_MODEL,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: userContent },

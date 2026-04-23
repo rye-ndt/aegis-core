@@ -23,9 +23,6 @@ export const conversations = pgTable("conversations", {
   userId: uuid("user_id").notNull(),
   title: text("title").notNull(),
   status: text("status").notNull(),
-  summary: text("summary"),
-  intent: text("intent"),
-  flaggedForCompression: boolean("flagged_for_compression").notNull().default(false),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
@@ -38,7 +35,6 @@ export const messages = pgTable("messages", {
   toolName: text("tool_name"),
   toolCallId: text("tool_call_id"),
   toolCallsJson: text("tool_calls_json"),
-  compressedAtEpoch: integer("compressed_at_epoch"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
 });
 

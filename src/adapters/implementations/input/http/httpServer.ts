@@ -26,7 +26,8 @@ import type {
   SignResponse,
   ApproveResponse,
   ApproveRequest,
-} from "./miniAppRequest.types";
+  DelegationRecord as MiniAppDelegationRecord,
+} from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { DelegationRecord as SessionDelegationRecord } from "../../../../use-cases/interface/output/cache/sessionDelegation.cache";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
@@ -79,7 +80,6 @@ export class HttpApiServer {
   constructor(
     private readonly authUseCase: IAuthUseCase,
     private readonly port: number,
-    _jwtSecret?: string,
     private readonly intentUseCase?: IIntentUseCase,
     private readonly portfolioUseCase?: IPortfolioUseCase,
     private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
@@ -109,7 +109,7 @@ export class HttpApiServer {
     const url = new URL(req.url ?? "/", base);
     const method = req.method?.toUpperCase();
 
-    const reqId = Math.random().toString(36).slice(2, 8);
+    const reqId = newUuid().slice(0, 8);
     this.reqLogIds.set(req, reqId);
     this.resLogIds.set(res, reqId);
     console.log(`[API ${reqId}] → ${method} ${url.pathname}${url.search}`);
@@ -124,85 +124,64 @@ export class HttpApiServer {
       return;
     }
 
-    if (method === "POST" && url.pathname === "/auth/privy") {
-      return this.handlePrivyLogin(req, res);
-    }
-    if (method === 'GET' && url.pathname === '/user/profile') {
-      return this.handleGetUserProfile(req, res);
-    }
-    if (method === "GET" && url.pathname.startsWith("/intent/")) {
-      return this.handleGetIntent(req, res, url);
-    }
-    if (method === "GET" && url.pathname === "/portfolio") {
-      return this.handleGetPortfolio(req, res);
-    }
-    if (method === "GET" && url.pathname === "/tokens") {
-      return this.handleGetTokens(req, res, url);
-    }
-    if (method === "POST" && url.pathname === "/tools") {
-      return this.handlePostTools(req, res);
-    }
-    if (method === "GET" && url.pathname === "/tools") {
-      return this.handleGetTools(req, res, url);
-    }
-    if (method === "DELETE" && url.pathname.startsWith("/tools/")) {
-      return this.handleDeleteTool(req, res, url);
-    }
-    if (method === 'GET' && url.pathname === '/permissions') {
-      return this.handleGetPermissions(req, res, url);
-    }
-    if (method === 'GET' && url.pathname === '/delegation/pending') {
-      return this.handleGetPendingDelegation(req, res);
-    }
-    if (method === 'POST' && /^\/delegation\/[^/]+\/signed$/.test(url.pathname)) {
-      const id = url.pathname.split('/')[2] ?? '';
-      return this.handlePostDelegationSigned(req, res, id);
-    }
-    if (method === 'GET' && /^\/request\/([^/]+)$/.test(url.pathname)) {
-      const match = url.pathname.match(/^\/request\/([^/]+)$/);
-      if (match) return this.handleGetMiniAppRequest(req, res, match[1]!);
-    }
-    if (method === 'POST' && url.pathname === '/response') {
-      return this.handlePostResponse(req, res);
-    }
-    if (method === 'POST' && url.pathname === '/command-mappings') {
-      return this.handlePostCommandMapping(req, res);
-    }
-    if (method === 'GET' && url.pathname === '/command-mappings') {
-      return this.handleGetCommandMappings(req, res);
-    }
-    if (method === 'DELETE' && url.pathname.startsWith('/command-mappings/')) {
-      const command = decodeURIComponent(url.pathname.split('/command-mappings/')[1] ?? '');
-      return this.handleDeleteCommandMapping(req, res, command);
-    }
-    if (method === 'POST' && url.pathname === '/http-tools') {
-      return this.handlePostHttpTool(req, res);
-    }
-    if (method === 'GET' && url.pathname === '/http-tools') {
-      return this.handleGetHttpTools(req, res);
-    }
-    if (method === 'DELETE' && url.pathname.startsWith('/http-tools/')) {
-      const id = url.pathname.split('/http-tools/')[1]?.trim() ?? '';
-      return this.handleDeleteHttpTool(req, res, id);
-    }
-    if (method === "GET" && url.pathname === "/preference") {
-      return this.handleGetPreference(req, res);
-    }
-    if (method === "POST" && url.pathname === "/preference") {
-      return this.handlePostPreference(req, res);
-    }
-    if (method === "GET" && url.pathname === "/delegation/approval-params") {
-      return this.handleGetDelegationApprovalParams(req, res, url);
-    }
-    if (method === "POST" && url.pathname === "/delegation/grant") {
-      return this.handlePostDelegationGrant(req, res);
-    }
-    if (method === "GET" && url.pathname === "/delegation/grant") {
-      return this.handleGetDelegationGrant(req, res);
-    }
+    const route = this.matchRoute(method ?? "", url.pathname);
+    if (route) return route(req, res, url);
 
     res.writeHead(404);
     res.end("Not found");
+  }
+
+  private matchRoute(
+    method: string,
+    pathname: string,
+  ): ((req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>) | null {
+    const exactKey = `${method} ${pathname}`;
+    const exact = this.exactRoutes[exactKey];
+    if (exact) return exact;
+
+    for (const [pattern, handler] of this.paramRoutes) {
+      if (pattern.method !== method) continue;
+      const m = pathname.match(pattern.regex);
+      if (m) return (req, res, url) => handler(req, res, url, m[1]!);
+    }
+    return null;
+  }
+
+  private get exactRoutes(): Record<string, (req: http.IncomingMessage, res: http.ServerResponse, url: URL) => Promise<void>> {
+    return {
+      "POST /auth/privy":               (req, res) => this.handlePrivyLogin(req, res),
+      "GET /user/profile":              (req, res) => this.handleGetUserProfile(req, res),
+      "GET /portfolio":                 (req, res) => this.handleGetPortfolio(req, res),
+      "GET /tokens":                    (req, res, url) => this.handleGetTokens(req, res, url),
+      "POST /tools":                    (req, res) => this.handlePostTools(req, res),
+      "GET /tools":                     (req, res, url) => this.handleGetTools(req, res, url),
+      "GET /permissions":               (req, res, url) => this.handleGetPermissions(req, res, url),
+      "GET /delegation/pending":        (req, res) => this.handleGetPendingDelegation(req, res),
+      "POST /response":                 (req, res) => this.handlePostResponse(req, res),
+      "POST /command-mappings":         (req, res) => this.handlePostCommandMapping(req, res),
+      "GET /command-mappings":          (req, res) => this.handleGetCommandMappings(req, res),
+      "POST /http-tools":               (req, res) => this.handlePostHttpTool(req, res),
+      "GET /http-tools":                (req, res) => this.handleGetHttpTools(req, res),
+      "GET /preference":                (req, res) => this.handleGetPreference(req, res),
+      "POST /preference":               (req, res) => this.handlePostPreference(req, res),
+      "GET /delegation/approval-params": (req, res, url) => this.handleGetDelegationApprovalParams(req, res, url),
+      "POST /delegation/grant":         (req, res) => this.handlePostDelegationGrant(req, res),
+      "GET /delegation/grant":          (req, res) => this.handleGetDelegationGrant(req, res),
+    };
+  }
+
+  private get paramRoutes(): Array<[
+    { method: string; regex: RegExp },
+    (req: http.IncomingMessage, res: http.ServerResponse, url: URL, param: string) => Promise<void>
+  ]> {
+    return [
+      [{ method: "GET",    regex: /^\/intent\/([^/]+)$/ },            (req, res, url) => this.handleGetIntent(req, res, url)],
+      [{ method: "DELETE", regex: /^\/tools\/([^/]+)$/ },             (req, res, url) => this.handleDeleteTool(req, res, url)],
+      [{ method: "POST",   regex: /^\/delegation\/([^/]+)\/signed$/ }, (req, res, _u, id) => this.handlePostDelegationSigned(req, res, id)],
+      [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, _u, requestId) => this.handleGetMiniAppRequest(req, res, requestId)],
+      [{ method: "DELETE", regex: /^\/command-mappings\/(.+)$/ },     (req, res, _u, command) => this.handleDeleteCommandMapping(req, res, decodeURIComponent(command))],
+      [{ method: "DELETE", regex: /^\/http-tools\/([^/]+)$/ },        (req, res, _u, id) => this.handleDeleteHttpTool(req, res, id)],
+    ];
   }
 
   private async handlePrivyLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -555,54 +534,70 @@ export class HttpApiServer {
     }
 
     if (body.subtype === 'session_key' && body.delegationRecord) {
-      if (!this.sessionDelegationUseCase) {
-        return this.sendJson(res, 503, { error: 'Session delegation service not available' });
-      }
-
-      await this.sessionDelegationUseCase.save(body.delegationRecord as unknown as SessionDelegationRecord);
-
-      if (this.userProfileDB) {
-        const now = newCurrentUTCEpoch();
-        const existing = await this.userProfileDB.findByUserId(userId);
-        const { smartAccountAddress, signerAddress, address: sessionKeyAddress } = body.delegationRecord;
-        if (!existing) {
-          await this.userProfileDB.upsert({
-            userId,
-            smartAccountAddress,
-            eoaAddress: signerAddress,
-            sessionKeyAddress,
-            createdAtEpoch: now,
-            updatedAtEpoch: now,
-          });
-        } else {
-          await this.userProfileDB.update({
-            userId,
-            telegramChatId: existing.telegramChatId,
-            smartAccountAddress,
-            eoaAddress: existing.eoaAddress ?? signerAddress,
-            sessionKeyAddress,
-            sessionKeyScope: existing.sessionKeyScope,
-            sessionKeyStatus: existing.sessionKeyStatus,
-            sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
-            updatedAtEpoch: now,
-          });
-        }
-      }
-
-      if (chatIdStr) {
-        await this.telegramNotifier?.sendMessage(chatIdStr, 'Session key installed. You can now execute transactions.');
-      }
+      const err = await this.applySessionKeyApproval(userId, body.delegationRecord, chatIdStr);
+      if (err) return this.sendJson(res, err.status, { error: err.message });
     } else if (body.subtype === 'aegis_guard' && body.aegisGrant) {
-      if (this.userPreferencesRepo) {
-        await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
-      }
-      if (chatIdStr) {
-        await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
-      }
+      await this.applyAegisGuardApproval(userId, chatIdStr);
     }
 
     await this.miniAppRequestCache!.delete(body.requestId);
     return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
+  }
+
+  private async applySessionKeyApproval(
+    userId: string,
+    delegationRecord: MiniAppDelegationRecord,
+    chatIdStr: string | null,
+  ): Promise<{ status: number; message: string } | null> {
+    if (!this.sessionDelegationUseCase) {
+      return { status: 503, message: 'Session delegation service not available' };
+    }
+    await this.sessionDelegationUseCase.save(delegationRecord as unknown as SessionDelegationRecord);
+
+    if (this.userProfileDB) {
+      const now = newCurrentUTCEpoch();
+      const existing = await this.userProfileDB.findByUserId(userId);
+      const { smartAccountAddress, signerAddress, address: sessionKeyAddress } = delegationRecord;
+      if (!existing) {
+        await this.userProfileDB.upsert({
+          userId,
+          smartAccountAddress,
+          eoaAddress: signerAddress,
+          sessionKeyAddress,
+          createdAtEpoch: now,
+          updatedAtEpoch: now,
+        });
+      } else {
+        await this.userProfileDB.update({
+          userId,
+          telegramChatId: existing.telegramChatId,
+          smartAccountAddress,
+          eoaAddress: existing.eoaAddress ?? signerAddress,
+          sessionKeyAddress,
+          sessionKeyScope: existing.sessionKeyScope,
+          sessionKeyStatus: existing.sessionKeyStatus,
+          sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
+          updatedAtEpoch: now,
+        });
+      }
+    }
+
+    if (chatIdStr) {
+      await this.telegramNotifier?.sendMessage(chatIdStr, 'Session key installed. You can now execute transactions.');
+    }
+    return null;
+  }
+
+  private async applyAegisGuardApproval(
+    userId: string,
+    chatIdStr: string | null,
+  ): Promise<void> {
+    if (this.userPreferencesRepo) {
+      await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
+    }
+    if (chatIdStr) {
+      await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
+    }
   }
 
   private async resolveChatId(userId: string): Promise<string | null> {
@@ -770,7 +765,7 @@ export class HttpApiServer {
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
 
     const chainId = CHAIN_CONFIG.chainId;
-    const nowEpoch = Math.floor(Date.now() / 1000);
+    const nowEpoch = newCurrentUTCEpoch();
     const validUntil30Days = nowEpoch + 30 * 24 * 60 * 60;
 
     const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";

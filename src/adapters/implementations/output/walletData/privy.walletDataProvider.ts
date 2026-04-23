@@ -4,16 +4,7 @@ import type {
   WalletTransactionStatus,
   GasSpendResult,
 } from "../../../../use-cases/interface/output/walletDataProvider.interface";
-
-const NETWORK_TO_CAIP2: Record<string, string> = {
-  avalanche:         "eip155:43114",
-  "avalanche-fuji":  "eip155:43113",
-  ethereum:          "eip155:1",
-  base:              "eip155:8453",
-  polygon:           "eip155:137",
-  arbitrum:          "eip155:42161",
-  optimism:          "eip155:10",
-};
+import { CAIP2_BY_PRIVY_NETWORK } from "../../../../helpers/chainConfig";
 
 export class PrivyWalletDataProvider implements IWalletDataProvider {
   private readonly baseUrl = "https://api.privy.io";
@@ -124,7 +115,7 @@ export class PrivyWalletDataProvider implements IWalletDataProvider {
     params: unknown[],
   ): Promise<unknown> {
     const walletId = await this.resolveWalletId(privyDid);
-    const caip2 = NETWORK_TO_CAIP2[network.toLowerCase()] ?? network; // pass-through if already caip2
+    const caip2 = CAIP2_BY_PRIVY_NETWORK[network.toLowerCase()] ?? network;
 
     const data = await this.privyFetch<{ result: unknown }>(
       `/v1/wallets/${encodeURIComponent(walletId)}/rpc`,

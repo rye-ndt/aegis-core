@@ -1,10 +1,11 @@
 import type { CrawledToken, ITokenCrawlerJob } from "../../../../use-cases/interface/output/tokenCrawler.interface";
 
 const DEFAULT_PANGOLIN_LIST_URL = "https://raw.githubusercontent.com/pangolindex/tokenlists/main/pangolin.tokenlist.json";
+const PANGOLIN_TOKEN_LIST_URL = process.env.PANGOLIN_TOKEN_LIST_URL ?? DEFAULT_PANGOLIN_LIST_URL;
 
 export class PangolinTokenCrawler implements ITokenCrawlerJob {
   async fetchTokens(chainId: number): Promise<CrawledToken[]> {
-    const url = process.env.PANGOLIN_TOKEN_LIST_URL ?? DEFAULT_PANGOLIN_LIST_URL;
+    const url = PANGOLIN_TOKEN_LIST_URL;
     try {
       const res = await fetch(url);
       if (!res.ok) {

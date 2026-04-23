@@ -31,5 +31,4 @@ export interface IIntentDB {
   updateStatus(id: string, status: INTENT_STATUSES, rejectionReason?: string): Promise<void>;
   findById(id: string): Promise<IIntent | undefined>;
   findPendingByUserId(userId: string): Promise<IIntent | undefined>;
-  listByUserId(userId: string, limit?: number): Promise<IIntent[]>;
 }

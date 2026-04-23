@@ -14,6 +14,7 @@ interface ChainEntry {
   nativeSymbol: string;
   name: string;
   defaultRpcUrl: string;
+  privyNetwork: string;
 }
 
 const CHAIN_REGISTRY: Record<number, ChainEntry> = {
@@ -22,44 +23,55 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     nativeSymbol: "AVAX",
     name: "Avalanche Fuji",
     defaultRpcUrl: "https://api.avax-test.network/ext/bc/C/rpc",
+    privyNetwork: "avalanche-fuji",
   },
   43114: {
     chain: avalanche,
     nativeSymbol: "AVAX",
     name: "Avalanche",
     defaultRpcUrl: "https://api.avax.network/ext/bc/C/rpc",
+    privyNetwork: "avalanche",
   },
   1: {
     chain: mainnet,
     nativeSymbol: "ETH",
     name: "Ethereum",
     defaultRpcUrl: "https://cloudflare-eth.com",
+    privyNetwork: "ethereum",
   },
   8453: {
     chain: base,
     nativeSymbol: "ETH",
     name: "Base",
     defaultRpcUrl: "https://mainnet.base.org",
+    privyNetwork: "base",
   },
   137: {
     chain: polygon,
     nativeSymbol: "POL",
     name: "Polygon",
     defaultRpcUrl: "https://polygon-rpc.com",
+    privyNetwork: "polygon",
   },
   42161: {
     chain: arbitrum,
     nativeSymbol: "ETH",
     name: "Arbitrum One",
     defaultRpcUrl: "https://arb1.arbitrum.io/rpc",
+    privyNetwork: "arbitrum",
   },
   10: {
     chain: optimism,
     nativeSymbol: "ETH",
     name: "Optimism",
     defaultRpcUrl: "https://mainnet.optimism.io",
+    privyNetwork: "optimism",
   },
 };
+
+export const CAIP2_BY_PRIVY_NETWORK: Record<string, string> = Object.fromEntries(
+  Object.entries(CHAIN_REGISTRY).map(([id, entry]) => [entry.privyNetwork, `eip155:${id}`]),
+);
 
 const DEFAULT_CHAIN_ID = 43113;
 

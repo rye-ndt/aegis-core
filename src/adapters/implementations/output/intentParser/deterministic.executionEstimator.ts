@@ -3,10 +3,11 @@ import type {
   EstimationResult,
   IExecutionEstimator,
 } from '../../../../use-cases/interface/output/executionEstimator.interface';
+import { newCurrentUTCEpoch } from '../../../../helpers/time/dateTime';
 
 export class DeterministicExecutionEstimator implements IExecutionEstimator {
   async estimate(input: EstimationInput): Promise<EstimationResult> {
-    const now = Math.floor(Date.now() / 1000);
+    const now = newCurrentUTCEpoch();
     const normalizedIntentAddress = input.intentTokenAddress.toLowerCase();
 
     const delegation = input.delegations.find((d) => {

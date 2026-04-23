@@ -1,22 +1,18 @@
 import { isAddress } from "viem";
-import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
-import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
+import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
+import { TOOL_CATEGORY } from "../../helpers/enums/toolCategory.enum";
 import type {
   IntentPackage,
   Address,
-} from "../../../../use-cases/interface/output/intentParser.interface";
-import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
+} from "../interface/output/intentParser.interface";
+import type { ToolManifest } from "../interface/output/toolManifest.types";
 import {
   MissingFieldsError,
   InvalidFieldError,
   ConversationLimitError,
-} from "../../../../use-cases/interface/input/intent.errors";
+  WINDOW_SIZE,
+} from "../interface/input/intent.errors";
 
-export { MissingFieldsError, InvalidFieldError, ConversationLimitError };
-
-export const WINDOW_SIZE = 10;
-
-// Keyed by INTENT_ACTION string values AND TOOL_CATEGORY string values.
 // TOOL_CATEGORY.SWAP === INTENT_ACTION.SWAP ("swap") so they share one entry.
 // TOOL_CATEGORY.ERC20_TRANSFER ("erc20_transfer") differs from INTENT_ACTION.TRANSFER ("transfer"),
 // so it gets its own entry to ensure recipient is required for erc20_transfer manifests.
@@ -37,8 +33,6 @@ const FIELD_PROMPTS: Partial<Record<keyof IntentPackage, string>> = {
   recipient: "the recipient address (0x...)",
 };
 
-// Fields on IntentPackage that can only come from the user, not from system enrichment.
-// Manifest step templates that reference these fields trigger conversational collection.
 const USER_PROVIDABLE_FIELDS = new Set<keyof IntentPackage>([
   "fromTokenSymbol",
   "toTokenSymbol",
@@ -47,13 +41,8 @@ const USER_PROVIDABLE_FIELDS = new Set<keyof IntentPackage>([
   "recipient",
 ]);
 
-// Matches {{intent.FIELD}} where FIELD has no dot (single-level, not intent.params.*)
 const INTENT_TEMPLATE_RE = /\{\{intent\.([^}.]+)\}\}/g;
 
-/**
- * Scans all string values inside manifest steps for {{intent.X}} templates.
- * Returns the subset of X values that are user-providable (not system-populated).
- */
 function extractManifestRequiredFields(
   manifest: ToolManifest,
 ): Array<keyof IntentPackage> {
@@ -82,12 +71,6 @@ function extractManifestRequiredFields(
   return [...found];
 }
 
-/**
- * Validates a parsed IntentPackage against domain rules.
- * Throws MissingFieldsError, InvalidFieldError, or ConversationLimitError.
- * Mutates `intent.recipient` to the Address branded type on success.
- * When `manifest` is provided, required fields come from its inputSchema.required.
- */
 export function validateIntent(
   intent: IntentPackage,
   messageCount: number,
@@ -97,11 +80,7 @@ export function validateIntent(
 
   let required: string[];
   if (manifest) {
-    // Category-mapped conversational fields (fromTokenSymbol, toTokenSymbol, etc.)
-    // — NOT inputSchema.required which lists solver-internal params resolved by the system.
     const categoryRequired = (REQUIRED_FIELDS[manifest.category] ?? []) as string[];
-    // Any {{intent.X}} template references in manifest steps become required too,
-    // so missing user-providable fields are collected conversationally before buildCalldata runs.
     const templateRequired = extractManifestRequiredFields(manifest) as string[];
     required = [...new Set([...categoryRequired, ...templateRequired])];
     console.log(
@@ -128,7 +107,6 @@ export function validateIntent(
     );
   }
 
-  // Recipient must be a valid Ethereum address
   if (intent.recipient != null) {
     if (!isAddress(intent.recipient)) {
       throw new InvalidFieldError(
@@ -139,7 +117,6 @@ export function validateIntent(
     (intent as { recipient: Address }).recipient = intent.recipient as Address;
   }
 
-  // Amount must be a finite positive number
   if (intent.amountHuman != null) {
     const amount = parseFloat(intent.amountHuman);
     if (isNaN(amount) || amount <= 0) {

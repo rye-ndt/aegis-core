@@ -20,11 +20,6 @@ export interface IntentExecutionResult {
   requiresConfirmation: boolean;
 }
 
-export interface ParseFromHistoryResult {
-  intent: IntentPackage | null;
-  manifest: ToolManifest | undefined;
-}
-
 export interface ConfirmAndExecuteParams {
   intentId: string;
   userId: string;
@@ -46,17 +41,7 @@ export interface IIntentUseCase {
 
   confirmAndExecute(params: ConfirmAndExecuteParams): Promise<IntentExecutionResult & { txHash?: string }>;
 
-
-  getHistory(userId: string): Promise<IntentPackage[]>;
-
-  parseFromHistory(messages: string[], userId: string): Promise<ParseFromHistoryResult>;
-
   searchTokens(symbol: string, chainId: number): Promise<ITokenRecord[]>;
-
-  previewCalldata(
-    intent: IntentPackage,
-    manifest: ToolManifest,
-  ): Promise<{ to: string; data: string; value: string } | null>;
 
   classifyIntent(messages: string[]): Promise<USER_INTENT_TYPE>;
 

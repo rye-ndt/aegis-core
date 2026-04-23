@@ -4,6 +4,13 @@ import {
   type ZerodevMessage,
 } from '../../../../use-cases/interface/output/delegation/zerodevMessage.types';
 import type { IDelegationRequestBuilder } from '../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
+import { newCurrentUTCEpoch } from '../../../../helpers/time/dateTime';
+
+const DEFAULT_DELEGATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+const DELEGATION_TTL_SECONDS = parseInt(
+  process.env.DELEGATION_TTL_SECONDS ?? String(DEFAULT_DELEGATION_TTL_SECONDS),
+  10,
+);
 
 export class DelegationRequestBuilder implements IDelegationRequestBuilder {
   buildErc20Spend(opts: {
@@ -17,9 +24,7 @@ export class DelegationRequestBuilder implements IDelegationRequestBuilder {
       sessionKeyAddress: opts.sessionKeyAddress,
       target: opts.target,
       valueLimit: opts.valueLimit,
-      validUntil:
-        Math.floor(Date.now() / 1000) +
-        parseInt(process.env.DELEGATION_TTL_SECONDS ?? '604800', 10),
+      validUntil: newCurrentUTCEpoch() + DELEGATION_TTL_SECONDS,
       chainId: opts.chainId,
     });
   }

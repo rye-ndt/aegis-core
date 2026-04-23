@@ -1,4 +1,4 @@
-import type { MiniAppRequest } from '../../../../adapters/implementations/input/http/miniAppRequest.types';
+import type { MiniAppRequest } from './miniAppRequest.types';
 
 export interface IMiniAppRequestCache {
   store(request: MiniAppRequest): Promise<void>;

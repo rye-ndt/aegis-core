@@ -1,5 +1,3 @@
-// BE 3: Drizzle implementation of ITokenDelegationDB
-
 import { and, eq, gt, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { newUuid } from '../../../../../helpers/uuid';
@@ -15,10 +13,6 @@ type Row = typeof tokenDelegations.$inferSelect;
 
 export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
   constructor(private readonly db: NodePgDatabase) {}
-
-  // ── upsertMany ─────────────────────────────────────────────────────────────
-  // On conflict (userId, tokenAddress): update limitRaw, reset spentRaw → '0',
-  // refresh validUntil and updatedAtEpoch.
 
   async upsertMany(userId: string, delegations: NewTokenDelegation[]): Promise<void> {
     if (delegations.length === 0) return;
@@ -50,9 +44,6 @@ export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
       });
   }
 
-  // ── findActiveByUserId ──────────────────────────────────────────────────────
-  // Returns rows where validUntil > current unix epoch seconds.
-
   async findActiveByUserId(userId: string): Promise<TokenDelegation[]> {
     const now = newCurrentUTCEpoch();
     const rows = await this.db
@@ -61,11 +52,6 @@ export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
       .where(and(eq(tokenDelegations.userId, userId), gt(tokenDelegations.validUntil, now)));
     return rows.map(this.toModel);
   }
-
-  // ── addSpent ───────────────────────────────────────────────────────────────
-  // Fetch current row, BigInt-add amountRaw, write back.
-  // Single-row updates are serialised by Postgres at the row level — safe enough
-  // for the sequential bot traffic pattern.
 
   async addSpent(userId: string, tokenAddress: string, amountRaw: string): Promise<void> {
     const normalised = tokenAddress.toLowerCase();
@@ -91,26 +77,6 @@ export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
       .set({ spentRaw: next, updatedAtEpoch: now })
       .where(eq(tokenDelegations.id, rows[0].id));
   }
-
-  // ── findByUserIdAndToken ────────────────────────────────────────────────────
-
-  async findByUserIdAndToken(userId: string, tokenAddress: string): Promise<TokenDelegation | null> {
-    const normalised = tokenAddress.toLowerCase();
-    const rows = await this.db
-      .select()
-      .from(tokenDelegations)
-      .where(
-        and(
-          eq(tokenDelegations.userId, userId),
-          eq(tokenDelegations.tokenAddress, normalised),
-        ),
-      )
-      .limit(1);
-
-    return rows[0] ? this.toModel(rows[0]) : null;
-  }
-
-  // ── Private helpers ────────────────────────────────────────────────────────
 
   private toModel(row: Row): TokenDelegation {
     return {

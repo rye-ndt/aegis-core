@@ -7,10 +7,11 @@ import type {
   IntentPackage,
 } from "../../../../use-cases/interface/output/intentParser.interface";
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
-import { WINDOW_SIZE } from "./intent.validator";
+import { WINDOW_SIZE } from "../../../../use-cases/interface/input/intent.errors";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 
 const BUILTIN_ACTIONS = Object.values(INTENT_ACTION).join(" | ");
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 const IntentSchema = z.object({
   action: z.string(),
@@ -74,7 +75,7 @@ export class OpenAIIntentParser implements IIntentParser {
 
   constructor(apiKey: string) {
     this.client = new OpenAI({ apiKey });
-    this.model = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+    this.model = OPENAI_MODEL;
   }
 
   async parse(

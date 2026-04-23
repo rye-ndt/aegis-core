@@ -11,7 +11,6 @@ import { toRaw } from "../../helpers/bigint";
 import type {
   IIntentUseCase,
   IntentExecutionResult,
-  ParseFromHistoryResult,
   ConfirmAndExecuteParams,
 } from "../interface/input/intent.interface";
 import type { IntentPackage } from "../interface/output/intentParser.interface";
@@ -24,7 +23,7 @@ import type { IUserProfileDB } from "../interface/output/repository/userProfile.
 import type { IMessageDB } from "../interface/output/repository/message.repo";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
 import { MissingFieldsError, ConversationLimitError, InvalidFieldError } from "../interface/input/intent.errors";
-import { validateIntent } from "../../adapters/implementations/output/intentParser/intent.validator";
+import { validateIntent } from "./validateIntent";
 import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
 import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
@@ -370,40 +369,8 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     };
   }
 
-  async getHistory(userId: string): Promise<IntentPackage[]> {
-    const intents = await this.intentDB.listByUserId(userId, 20);
-    return intents.map((i) => {
-      try {
-        return JSON.parse(i.parsedJson) as IntentPackage;
-      } catch {
-        return {
-          action: INTENT_ACTION.UNKNOWN,
-          confidence: 0,
-          rawInput: i.rawInput,
-        };
-      }
-    });
-  }
-
-  async parseFromHistory(messages: string[], userId: string): Promise<ParseFromHistoryResult> {
-    const query = messages[0] ?? '';
-    const relevantManifests = await this.discoverRelevantTools(query);
-    const intent = await this.intentParser.parse(messages, userId, relevantManifests);
-    if (intent === null) return { intent: null, manifest: undefined };
-    const manifest = relevantManifests.find((m) => m.toolId === intent.action);
-    validateIntent(intent, messages.length, manifest);
-    return { intent, manifest };
-  }
-
   async searchTokens(symbol: string, chainId: number): Promise<ITokenRecord[]> {
     return this.tokenRegistryService.searchBySymbol(symbol, chainId);
-  }
-
-  async previewCalldata(
-    intent: IntentPackage,
-    manifest: ToolManifest,
-  ): Promise<{ to: string; data: string; value: string } | null> {
-    return this.solverRegistry.buildFromManifest(manifest, intent, '');
   }
 
   async classifyIntent(messages: string[]): Promise<USER_INTENT_TYPE> {
