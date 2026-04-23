@@ -55,7 +55,6 @@ import type { ITelegramNotifier } from "../../use-cases/interface/output/telegra
 import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
 import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
 import type { Bot } from "grammy";
-import { DrizzleHttpQueryToolRepo } from "../implementations/output/sqlDB/repositories/httpQueryTool.repo";
 import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
 import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
 import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
@@ -64,7 +63,6 @@ import { SystemToolProviderConcrete } from "../implementations/output/systemTool
 import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
 import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
 import { CHAIN_CONFIG } from "../../helpers/chainConfig";
-import { DrizzleTokenDelegationRepo } from "../implementations/output/sqlDB/repositories/tokenDelegation.repo";
 import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
 import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
 import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
@@ -103,7 +101,6 @@ export class AssistantInject {
   private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
   private _walletDataProvider: IWalletDataProvider | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
-  private _tokenDelegationRepo: ITokenDelegationDB | null = null;
   private _executionEstimator: IExecutionEstimator | null = null;
   private _userOpExecutor: IUserOpExecutor | null = null;
 
@@ -362,7 +359,6 @@ export class AssistantInject {
         db.telegramSessions,
         notifier,
         this.getUserProfileCache(),
-        db.tokenDelegations,
       );
     }
     return this._authUseCase;

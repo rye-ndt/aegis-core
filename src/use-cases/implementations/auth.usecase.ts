@@ -11,8 +11,6 @@ import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../interface/output/telegramNotifier.interface";
 import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
-import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
-
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 export class AuthUseCaseImpl implements IAuthUseCase {
@@ -25,7 +23,6 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     private readonly telegramSessionDB?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
     private readonly userProfileCache?: IUserProfileCache,
-    private readonly tokenDelegationDB?: ITokenDelegationDB,
   ) {}
 
   async loginWithPrivy(input: IPrivyLoginInput): Promise<{ expiresAtEpoch: number; userId: string }> {
@@ -102,23 +99,6 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       ).catch((err) => {
         console.error("[Auth] failed to send Telegram welcome message:", err);
       });
-    }
-
-    if (input.telegramChatId && this.telegramNotifier && this.tokenDelegationDB) {
-      const delegations = await this.tokenDelegationDB.findActiveByUserId(user.id).catch(() => []);
-      if (delegations.length === 0) {
-        const miniAppUrl = process.env.MINI_APP_URL;
-        if (miniAppUrl) {
-          await this.telegramNotifier.sendMessage(
-            input.telegramChatId,
-            "Hey! To let me act on your behalf, I need a one-time permission.\n" +
-            "Tap the button below — it takes about 10 seconds.",
-            { webAppButton: { label: "Confirm", url: miniAppUrl } },
-          ).catch((err) => {
-            console.error("[Auth] failed to send delegation onboarding nudge:", err);
-          });
-        }
-      }
     }
 
     return { userId: user.id, expiresAtEpoch };
