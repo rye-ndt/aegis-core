@@ -146,6 +146,7 @@ export class TelegramAssistantHandler {
     subtype: ApproveSubtype,
     promptText: string,
     buttonText: string,
+    extra?: { reapproval?: boolean; tokenAddress?: string; amountRaw?: string },
   ): Promise<void> {
     const miniAppUrlBase = process.env.MINI_APP_URL;
     if (!miniAppUrlBase) return;
@@ -157,6 +158,9 @@ export class TelegramAssistantHandler {
       subtype,
       createdAt: now,
       expiresAt: now + 600,
+      ...(extra?.reapproval !== undefined ? { reapproval: extra.reapproval } : {}),
+      ...(extra?.tokenAddress !== undefined ? { tokenAddress: extra.tokenAddress } : {}),
+      ...(extra?.amountRaw !== undefined ? { amountRaw: extra.amountRaw } : {}),
     };
     if (this.miniAppRequestCache) {
       await this.miniAppRequestCache.store(request);
@@ -822,10 +826,18 @@ export class TelegramAssistantHandler {
     const amountHumanNum = parseFloat((session.partialParams.amountHuman as string) ?? "0");
     const topUp = Math.max(amountHumanNum, 100);
     const rawForReapproval = (BigInt(Math.round(topUp)) * 10n ** BigInt(fromToken.decimals)).toString();
-    const miniAppUrlBase = process.env.MINI_APP_URL ?? "";
-    const reapprovalUrl = `${miniAppUrlBase}?reapproval=1&tokenAddress=${encodeURIComponent(fromToken.address)}&amountRaw=${rawForReapproval}`;
-    const keyboard = new InlineKeyboard().webApp("Approve More", reapprovalUrl);
-    await ctx.reply(estimationResult.displayMessage, { reply_markup: keyboard });
+    await this.sendApproveButton(
+      chatId,
+      userId,
+      "aegis_guard",
+      estimationResult.displayMessage,
+      "Approve More",
+      {
+        reapproval: true,
+        tokenAddress: fromToken.address,
+        amountRaw: rawForReapproval,
+      },
+    );
     return true;
   }
 
