@@ -18,19 +18,21 @@ export class PortfolioUseCaseImpl implements IPortfolioUseCase {
 
     const scaAddress = profile.smartAccountAddress as `0x${string}`;
     const tokens = await this.tokenRegistryService.listByChain(this.chainId);
-    const balances: PortfolioResult['balances'] = [];
 
-    for (const token of tokens) {
-      const rawBalance = token.isNative
-        ? await this.chainReader.getNativeBalance(scaAddress)
-        : await this.chainReader.getErc20Balance(token.address as `0x${string}`, scaAddress);
-      balances.push({
-        symbol: token.symbol,
-        address: token.address,
-        decimals: token.decimals,
-        balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
-      });
-    }
+    const balances = await Promise.all(
+      tokens.map(async (token) => {
+        const rawBalance = await (token.isNative
+          ? this.chainReader.getNativeBalance(scaAddress)
+          : this.chainReader.getErc20Balance(token.address as `0x${string}`, scaAddress)
+        ).catch(() => 0n);
+        return {
+          symbol: token.symbol,
+          address: token.address,
+          decimals: token.decimals,
+          balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
+        };
+      }),
+    );
 
     return { smartAccountAddress: profile.smartAccountAddress, balances };
   }

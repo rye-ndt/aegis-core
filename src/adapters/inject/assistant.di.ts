@@ -68,6 +68,12 @@ import { DeterministicExecutionEstimator } from "../implementations/output/inten
 import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
 import { ZerodevUserOpExecutor } from "../implementations/output/blockchain/zerodevExecutor";
 import type { IUserOpExecutor } from "../../use-cases/interface/output/blockchain/userOpExecutor.interface";
+import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRegistry";
+import { CapabilityDispatcher } from "../../use-cases/implementations/capabilityDispatcher.usecase";
+import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capabilityDispatcher.interface";
+import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
+import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
+import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -104,6 +110,7 @@ export class AssistantInject {
   private _systemToolProvider: ISystemToolProvider | null = null;
   private _executionEstimator: IExecutionEstimator | null = null;
   private _userOpExecutor: IUserOpExecutor | null = null;
+  private _capabilityDispatcher: ICapabilityDispatcher | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -424,6 +431,7 @@ export class AssistantInject {
         bundlerUrl,
         CHAIN_CONFIG.rpcUrl,
         CHAIN_CONFIG.chain,
+        CHAIN_CONFIG.paymasterUrl,
       );
     }
     return this._userOpExecutor;
@@ -539,6 +547,28 @@ export class AssistantInject {
       );
     }
     return this._commandMappingUseCase;
+  }
+
+  /**
+   * Builds the capability dispatcher used by input adapters (Telegram first).
+   * Returns undefined if no bot has been attached yet — capabilities that
+   * need to render to Telegram require a live Bot reference.
+   */
+  getCapabilityDispatcher(): ICapabilityDispatcher | undefined {
+    if (this._capabilityDispatcher) return this._capabilityDispatcher;
+    const bot = this.getBot();
+    if (!bot) return undefined;
+
+    const registry = new CapabilityRegistry();
+    const pending = new InMemoryPendingCollectionStore();
+    const renderer = new TelegramArtifactRenderer(bot, this.getMiniAppRequestCache());
+    const sqlDB = this.getSqlDB();
+
+    // Register capabilities here. Order does not matter.
+    registry.register(new BuyCapability(sqlDB.userProfiles, this.getChainId()));
+
+    this._capabilityDispatcher = new CapabilityDispatcher(registry, renderer, pending);
+    return this._capabilityDispatcher;
   }
 
   getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {

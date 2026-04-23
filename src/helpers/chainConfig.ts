@@ -84,4 +84,6 @@ export const CHAIN_CONFIG = {
   nativeSymbol: entry.nativeSymbol,
   name: entry.name,
   rpcUrl: process.env.RPC_URL ?? entry.defaultRpcUrl,
+  bundlerUrl: process.env.AVAX_BUNDLER_URL,
+  paymasterUrl: process.env.AVAX_PAYMASTER_URL,
 } as const;

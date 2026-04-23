@@ -1,4 +1,4 @@
-export type RequestType = 'auth' | 'sign' | 'approve';
+export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 
 interface BaseRequest {
@@ -33,7 +33,20 @@ export interface ApproveRequest extends BaseRequest {
   amountRaw?: string;
 }
 
-export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest;
+export interface OnrampRequest extends BaseRequest {
+  requestType: 'onramp';
+  userId: string;
+  /** Human-readable USDC amount the user asked to buy. */
+  amount: number;
+  /** Asset symbol — currently always "USDC". */
+  asset: string;
+  /** Target chain for the onramp, from CHAIN_CONFIG. */
+  chainId: number;
+  /** Smart-account address that will receive the funds. */
+  walletAddress: string;
+}
+
+export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest | OnrampRequest;
 
 interface BaseResponse {
   requestId: string;

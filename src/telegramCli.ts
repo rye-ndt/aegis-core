@@ -53,6 +53,7 @@ import { CHAIN_CONFIG } from "./helpers/chainConfig";
     inject.getTokenDelegationRepo(),
     inject.getExecutionEstimator(),
     inject.getMiniAppRequestCache(),
+    inject.getCapabilityDispatcher(),
   );
 
   const bot = new TelegramBot(rawBot, handler);

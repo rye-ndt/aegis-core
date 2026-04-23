@@ -1,5 +1,105 @@
 # Onchain Agent — Status
 
+## Capability refactor (phase 1) — 2026-04-23
+
+Started the refactor documented in `constructions/capability-convergence-plan.md`.
+**Phase 1 shipped**: ports, dispatcher, registry, pending store, Telegram
+artifact renderer, and the first migrated capability (`/buy`). `/send` and
+the LLM fallback **remain on the legacy handler path** — see below.
+
+**What's in place:**
+
+- `use-cases/interface/input/capability.interface.ts` — `Capability`,
+  `Artifact` (discriminated union), `CollectResult`, `TriggerSpec`,
+  `CapabilityCtx` (with `emit` for intermediate artifacts).
+- `use-cases/interface/input/capabilityDispatcher.interface.ts`
+- `use-cases/interface/output/{capabilityRegistry,paramCollector,artifactRenderer,pendingCollectionStore}.interface.ts`
+- `use-cases/implementations/capabilityRegistry.ts` — in-memory index by
+  id / command / callback-prefix.
+- `use-cases/implementations/capabilityDispatcher.usecase.ts` — single
+  entry point. Fresh command match always beats a stale pending flow
+  (typing `/send` cancels an unfinished `/buy`).
+- `adapters/implementations/output/pendingCollectionStore/inMemory.ts` —
+  TTL-backed per-channel pending state.
+- `adapters/implementations/output/artifactRenderer/telegram.ts` — one
+  exhaustive switch that subsumes `sendMiniAppPrompt` /
+  `sendMiniAppButton` patterns for any capability output.
+- `adapters/implementations/output/capabilities/buyCapability.ts` —
+  `/buy` fully migrated. All state (amount pending, yes/no, copy-address
+  callback) lives in this one file.
+- `adapters/implementations/output/capabilities/assistantChatCapability.ts`
+  — scaffold only, **not registered**. Kept for Phase 2.
+
+**Telegram handler changes:**
+
+- Constructor now optionally takes `ICapabilityDispatcher`.
+- Text messages: dispatcher gets first look; if it returns `handled: false`,
+  fall through to the existing legacy flow (`/send`, disambiguation,
+  LLM fallback).
+- Callbacks: a single `bot.on("callback_query:data")` forwards everything
+  except `auth:login` to the dispatcher, which routes by registered
+  `callbackPrefix`.
+- Removed: inline `/buy` branches, `startBuyFlow`, `askBuyChoice`,
+  `handleBuyOnchainDeposit`, `handleBuyOnrampMoonpay`, `pendingBuyAmount`
+  set, module-level `parseBuyAmount`/`formatBuyAmount`. Handler went from
+  1146 → 1014 lines.
+
+**What's NOT migrated yet (Phase 2):**
+
+- `/send` command flow — the full compile → resolve → disambig →
+  delegation → sign pipeline. Stays on legacy handler methods verbatim.
+- Free-text classify-and-route (`startLegacySession` /
+  `handleFallbackChat`). Stays on legacy.
+- `AssistantChatCapability` exists but is un-wired.
+
+**Why the split:** `/buy` was the safest pilot (small, new code, minimal
+deps). `/send` migration needs a live bot to validate 13 interdependent
+methods and a multi-turn state machine. Shipped what's verifiable;
+deferred what needs eyes-on testing. Reversing the order would have risked
+the working `/send` flow.
+
+**Conventions introduced (enforce in new code):**
+
+- Every new user-facing feature is a `Capability` registered via
+  `AssistantInject.getCapabilityDispatcher`. Do not add branches to
+  `handler.ts`.
+- Capabilities return `Artifact`s; rendering is the renderer's job. Do not
+  call `bot.api.sendMessage` from a capability.
+- Intermediate progress updates go through `ctx.emit(artifact)`. Terminal
+  output is the value returned from `run()`.
+- Callback routing is by `triggers.callbackPrefix`. Reserve short, unique
+  prefixes (`buy`, `send`, …) — the registry throws on collision.
+- `pendingCollectionStore` carries `expiresAt` (600s default). Capability
+  state must be JSON-serialisable so a future Redis impl is drop-in.
+- When adding a default-match fallback (e.g. wiring
+  `AssistantChatCapability`), extend `ICapabilityRegistry` explicitly —
+  do not special-case it in the dispatcher.
+
+## Onramp /buy — 2026-04-23
+
+Added a `/buy <amount>` Telegram command for USDC onramp. **Unlike /send, /buy does NOT go through `intentUseCase.selectTool` / `compileSchema` / tool manifests** — it produces no on-chain calldata, so forcing it through the manifest/solver pipeline would be wrong (`ToolManifestSchema` requires `steps.min(1)`).
+
+**Flow** (all in `adapters/implementations/input/telegram/handler.ts`):
+
+1. `bot.on("message:text")` intercepts `INTENT_COMMAND.BUY` before `startCommandSession`.
+2. `startBuyFlow` parses `/buy <amount>` via regex (`parseBuyAmount`). If bare `/buy`, adds chatId to `pendingBuyAmount` set and asks for a number; next plain-number message is captured.
+3. `askBuyChoice` sends inline keyboard with two callbacks: `buy:y:<amount>` and `buy:n:<amount>`. No session state needed — the amount rides on the callback payload (Telegram 64-byte limit is ample).
+4. `buy:y` → `handleBuyOnchainDeposit` fetches `userProfileRepo.smartAccountAddress` and replies with address + "Copy address" button (callback `buy:copy:<addr>` re-sends the bare address in a mono-formatted message for long-press copy).
+5. `buy:n` → `handleBuyOnrampMoonpay` creates an `OnrampRequest` and sends a mini-app web button, identical pattern to `sendMiniAppPrompt`.
+
+**New MiniAppRequest variant** in `use-cases/interface/output/cache/miniAppRequest.types.ts`:
+```
+OnrampRequest { requestType: 'onramp'; userId; amount; asset; chainId; walletAddress; ... }
+```
+`RequestType` union extended with `'onramp'`. Cache layer is polymorphic — no consumer switch to update.
+
+**Conventions introduced:**
+- A slash command may bypass `selectTool` when it has no on-chain side effect. Do not "fix" this by adding a manifest.
+- Callback-query-driven continuations (e.g. `buy:y:<amount>`) are preferred over in-memory follow-up sessions when the state fits in the callback payload.
+- Smart-account address is the deposit target (matches `getPortfolio.tool.ts` and the mini-app's "receives funds" label).
+
+**Out of scope:** deposit-watcher notifications, MoonPay webhooks, non-USDC assets.
+
 ## Backlog
 
 - Proactive agent: daily market sentiment → investment verdict
@@ -362,3 +462,44 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 **Swap wallet provider**: new file under `output/walletData/` implementing `IWalletDataProvider` → one line change in `assistant.di.ts`.
 
 **Swap account-abstraction stack**: new file under `output/blockchain/` implementing `IUserOpExecutor` → swap `ZerodevUserOpExecutor` for it in `AssistantInject.getUserOpExecutor()`.
+
+## 2026-04-23 — portfolio resilience fix
+`PortfolioUseCaseImpl.getPortfolio` previously awaited `getNativeBalance` /
+`getErc20Balance` serially inside a `for` loop; a single RPC failure on Fuji
+rejected the whole promise, the HTTP handler 500'd, and the FE Portfolio tab
+rendered "Could not load balance". Mirrored the resilience pattern already used
+by `GetPortfolioTool` (`adapters/output/tools/getPortfolio.tool.ts`): per-token
+`.catch(() => 0n)` + `Promise.all` so one bad token surfaces as zero instead of
+killing the whole response. Also gets parallelism as a side benefit. Shape of
+`PortfolioResult` is unchanged — no FE migration needed.
+
+## 2026-04-23 — gas sponsorship (paymaster) for bot-triggered user ops
+`ZerodevUserOpExecutor` now accepts an optional `paymasterUrl` constructor
+arg. When present, it builds a `createZeroDevPaymasterClient` and wires
+`{ getPaymasterData, getPaymasterStubData }` into `createKernelAccountClient`
+— matching the FE pattern in `fe/privy-auth/src/utils/crypto.ts:170-205`.
+When absent, the executor behaves exactly as before (SCA pays its own gas),
+so the change is fully backwards-compatible.
+
+**Config plumbing**: per the chain-agnostic rule in CLAUDE.md, the URL lives
+in `CHAIN_CONFIG` (`be/src/helpers/chainConfig.ts`) as `paymasterUrl`, read
+from `process.env.AVAX_PAYMASTER_URL`. `AssistantInject.getUserOpExecutor()`
+passes it through. New env var documented in `.env.example`.
+
+**Why ZeroDev paymaster over Pimlico/Biconomy**: same dashboard / project ID
+as the bundler already in use — no extra integration, gas policies
+(per-user caps, contract allowlists) configured in ZeroDev UI, ERC-7677
+compatible so viem's `paymaster: {...}` shape works without custom glue.
+
+**Security note**: `installSessionKey` still uses `toSudoPolicy({})`
+(full-access). Before enabling sponsorship in prod, tighten to `toCallPolicy`
+with target/selector allowlist and set per-user gas caps in the ZeroDev
+dashboard — otherwise a compromised session blob drains the paymaster
+budget, not just the user's SCA.
+
+**Convention**: new optional chain-scoped RPC-ish URLs (bundler, paymaster)
+belong on `CHAIN_CONFIG` next to `rpcUrl`, not read directly from env in DI
+factories. `bundlerUrl` was also hoisted onto `CHAIN_CONFIG` for symmetry,
+though `getUserOpExecutor` still reads `AVAX_BUNDLER_URL` directly for its
+required-field check — that's fine; the `CHAIN_CONFIG` entry is there for
+future consumers.

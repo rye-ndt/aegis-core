@@ -1,6 +1,6 @@
 import { createPublicClient, http, type Chain, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
-import { createKernelAccountClient, createKernelAccount } from '@zerodev/sdk';
+import { createKernelAccountClient, createKernelAccount, createZeroDevPaymasterClient } from '@zerodev/sdk';
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
 import { toPermissionValidator } from '@zerodev/permissions';
 import { toECDSASigner } from '@zerodev/permissions/signers';
@@ -21,6 +21,7 @@ export class ZerodevUserOpExecutor implements IUserOpExecutor {
     private readonly bundlerUrl: string,
     rpcUrl: string,
     private readonly chain: Chain,
+    private readonly paymasterUrl?: string,
   ) {
     this.publicClient = createPublicClient({ transport: http(rpcUrl), chain });
   }
@@ -43,10 +44,23 @@ export class ZerodevUserOpExecutor implements IUserOpExecutor {
       address: params.smartAccountAddress,
     });
 
+    const paymasterClient = this.paymasterUrl
+      ? createZeroDevPaymasterClient({
+          chain: this.chain,
+          transport: http(this.paymasterUrl),
+        })
+      : null;
+
     const kernelClient = createKernelAccountClient({
       account,
       chain: this.chain,
       bundlerTransport: http(this.bundlerUrl),
+      ...(paymasterClient && {
+        paymaster: {
+          getPaymasterData: paymasterClient.getPaymasterData,
+          getPaymasterStubData: paymasterClient.getPaymasterStubData,
+        },
+      }),
     });
 
     const callData = await account.encodeCalls([{
