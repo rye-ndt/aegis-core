@@ -37,6 +37,7 @@ import type {
   ApproveRequest,
   ApproveSubtype,
 } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
+import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
 import type { CtxLike, OrchestratorSession } from "./handler.types";
 import {
   buildConfirmationMessage,
@@ -83,6 +84,7 @@ export class TelegramAssistantHandler {
     private readonly tokenDelegationDB?: ITokenDelegationDB,
     private readonly executionEstimator?: IExecutionEstimator,
     private readonly miniAppRequestCache?: IMiniAppRequestCache,
+    private readonly capabilityDispatcher?: ICapabilityDispatcher,
   ) {}
 
   // ── Bot registration ─────────────────────────────────────────────────────────
@@ -212,6 +214,32 @@ export class TelegramAssistantHandler {
       );
     });
 
+    // Capability-driven callback routing. The dispatcher's registry knows
+    // which callback prefixes map to which capability; we just forward.
+    bot.on("callback_query:data", async (ctx) => {
+      const data = ctx.callbackQuery.data;
+      if (!data || data === "auth:login") return; // auth:login handled above
+      await ctx.answerCallbackQuery();
+      const chatId = ctx.chat?.id;
+      if (chatId === undefined) return;
+      const session = await this.ensureAuthenticated(chatId);
+      if (!session) {
+        await ctx.reply("Please authenticate first. Use /auth <token>.");
+        return;
+      }
+      if (!this.capabilityDispatcher) return;
+      try {
+        await this.capabilityDispatcher.handle({
+          userId: session.userId,
+          channelId: String(chatId),
+          input: { kind: "callback", data },
+        });
+      } catch (err) {
+        console.error("[Handler] callback dispatch error:", err);
+        await ctx.reply("Sorry, something went wrong. Please try again.");
+      }
+    });
+
     bot.command("logout", async (ctx) => {
       const chatId = ctx.chat.id;
       await this.telegramSessions.deleteByChatId(String(chatId));
@@ -243,6 +271,18 @@ export class TelegramAssistantHandler {
       console.log(`[Handler] message chatId=${chatId} userId=${userId} text="${text}"`);
 
       try {
+        // Capability dispatcher gets first look. If it handles the message
+        // (either by running a capability or asking a follow-up), we're
+        // done. Otherwise fall through to the legacy pipeline below.
+        if (this.capabilityDispatcher) {
+          const r = await this.capabilityDispatcher.handle({
+            userId,
+            channelId: String(chatId),
+            input: { kind: "text", text },
+          });
+          if (r.handled) return;
+        }
+
         const existing = this.orchestratorSessions.get(chatId);
 
         if (existing?.stage === "token_disambig") {
