@@ -1,8 +1,12 @@
 import { toRaw } from "../../../../helpers/bigint";
 import { ZERODEV_MESSAGE_TYPE } from "../../../../helpers/enums/zerodevMessageType.enum";
-import type { ITokenRecord, ResolvedPayload } from "../../../../use-cases/interface/input/intent.interface";
+import type { ITokenRecord, ResolvedPayload, ToolManifest } from "../../../../use-cases/interface/input/intent.interface";
 import type { ZerodevMessage } from "../../../../use-cases/interface/output/delegation/zerodevMessage.types";
-import type { OrchestratorSession } from "./handler.types";
+
+interface ConfirmationTarget {
+  manifest: ToolManifest;
+  partialParams: Record<string, unknown>;
+}
 
 export function buildDelegationPrompt(msg: ZerodevMessage): string {
   if (msg.type === ZERODEV_MESSAGE_TYPE.ERC20_SPEND) {
@@ -22,7 +26,7 @@ export function buildDelegationPrompt(msg: ZerodevMessage): string {
 }
 
 export function buildConfirmationMessage(
-  session: OrchestratorSession,
+  session: ConfirmationTarget,
   calldata: { to: string; data: string; value: string },
   fromToken: ITokenRecord | null,
   toToken: ITokenRecord | null,
@@ -95,7 +99,7 @@ export function populateFinalSchema(
 }
 
 export function buildFinalSchemaConfirmation(
-  session: OrchestratorSession,
+  session: ConfirmationTarget,
   finalSchema: Record<string, unknown>,
   calldata: { to: string; data: string; value: string },
 ): string {

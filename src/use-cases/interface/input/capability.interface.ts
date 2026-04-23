@@ -66,7 +66,13 @@ export type CollectResult<P> =
       parseMode?: "Markdown";
       /** Carried on the PendingCollection; passed back as `resuming` on the next call. */
       state: Record<string, unknown>;
-    };
+    }
+  /**
+   * Collect is complete and the capability already knows the final output —
+   * typically an abort/error path. The dispatcher renders the artifact and
+   * clears pending; run() is NOT called.
+   */
+  | { kind: "terminal"; artifact: Artifact };
 
 /** Discriminated union of all output shapes a capability may produce. */
 export type Artifact =

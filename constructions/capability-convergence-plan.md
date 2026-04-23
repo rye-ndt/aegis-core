@@ -8,10 +8,10 @@
 | 2a   | Dispatcher + registry + pending store          | ✅ Shipped       |
 | 2b   | Telegram artifact renderer                     | ✅ Shipped       |
 | 3    | Migrate `/buy` into `BuyCapability`            | ✅ Shipped       |
-| 4    | Migrate LLM fallback into `AssistantChatCapability` | 🟡 Scaffold only — class exists, not registered |
-| 5    | Migrate `/send` + manifest-driven capabilities | 🔴 Deferred     |
-| 6    | Delete legacy handler branches                 | 🔴 Deferred — partial: `/buy` branches removed |
-| 7    | Remove feature flag                            | N/A — flag not needed; progressive fall-through used instead |
+| 4    | Migrate LLM fallback into `AssistantChatCapability` | ✅ Shipped — registered as registry default |
+| 5    | Migrate `/send` + other intent commands into `SendCapability` | ✅ Shipped — one instance per `INTENT_COMMAND` |
+| 6    | Delete legacy handler branches                 | ✅ Shipped — handler ~200 lines |
+| 7    | Remove feature flag                            | N/A — flag never needed; progressive fall-through used instead |
 
 **Why paused at Step 4/5 boundary:** `/send` has 13 interdependent methods
 and a multi-turn state machine (compile, disambiguation, delegation check,

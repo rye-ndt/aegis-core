@@ -74,6 +74,9 @@ import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capa
 import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
+import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
+import { SendCapability } from "../implementations/output/capabilities/sendCapability";
+import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -566,6 +569,31 @@ export class AssistantInject {
 
     // Register capabilities here. Order does not matter.
     registry.register(new BuyCapability(sqlDB.userProfiles, this.getChainId()));
+
+    const sendDeps = {
+      intentUseCase: this.getIntentUseCase(),
+      resolverEngine: this.getResolverEngine(),
+      tokenDelegationDB: this.getTokenDelegationRepo(),
+      executionEstimator: this.getExecutionEstimator(),
+      telegramHandleResolver: this.getTelegramHandleResolver(),
+      privyAuthService: this.getPrivyAuthService(),
+      userProfileRepo: sqlDB.userProfiles,
+      pendingDelegationRepo: sqlDB.pendingDelegations,
+      delegationBuilder: this.getDelegationRequestBuilder(),
+      chainId: this.getChainId(),
+    };
+
+    // One SendCapability instance per INTENT_COMMAND (except BUY, owned by
+    // BuyCapability). All share the same deps + same compile→resolve→sign
+    // pipeline; the command is just a trigger.
+    for (const command of Object.values(INTENT_COMMAND)) {
+      if (command === INTENT_COMMAND.BUY) continue;
+      registry.register(new SendCapability(command, sendDeps));
+    }
+
+    // Free-text fallback: the LLM loop. Handles anything that isn't a slash
+    // command and isn't continuing a pending capability flow.
+    registry.registerDefault(new AssistantChatCapability(this.getUseCase()));
 
     this._capabilityDispatcher = new CapabilityDispatcher(registry, renderer, pending);
     return this._capabilityDispatcher;
