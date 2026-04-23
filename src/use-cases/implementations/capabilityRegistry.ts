@@ -7,6 +7,7 @@ export class CapabilityRegistry implements ICapabilityRegistry {
   private readonly byIdMap = new Map<string, Capability>();
   private readonly byCommand = new Map<string, Capability>();
   private readonly byCallbackPrefix: Array<{ prefix: string; capability: Capability }> = [];
+  private defaultCapability: Capability | null = null;
 
   register(capability: Capability): void {
     if (this.byIdMap.has(capability.id)) {
@@ -28,6 +29,18 @@ export class CapabilityRegistry implements ICapabilityRegistry {
     }
   }
 
+  registerDefault(capability: Capability): void {
+    if (this.defaultCapability) {
+      throw new Error(
+        `Default capability already set: ${this.defaultCapability.id} — cannot register ${capability.id}`,
+      );
+    }
+    if (!this.byIdMap.has(capability.id)) {
+      this.byIdMap.set(capability.id, capability);
+    }
+    this.defaultCapability = capability;
+  }
+
   byId(id: string): Capability | undefined {
     return this.byIdMap.get(id);
   }
@@ -39,7 +52,7 @@ export class CapabilityRegistry implements ICapabilityRegistry {
         const cap = this.byCommand.get(command);
         if (cap) return cap;
       }
-      return null;
+      return this.defaultCapability;
     }
     // callback
     for (const { prefix, capability } of this.byCallbackPrefix) {

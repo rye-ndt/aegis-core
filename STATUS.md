@@ -1,5 +1,55 @@
 # Onchain Agent — Status
 
+## Capability refactor (phase 2, complete) — 2026-04-23
+
+All steps from `constructions/capability-convergence-plan.md` are now
+implemented. Every Telegram flow goes through `ICapabilityDispatcher`. The
+legacy branching in `handler.ts` is gone.
+
+**What's in place (phase 2 additions):**
+
+- `CapabilityRegistry.registerDefault(capability)` — catch-all for free text
+  with no slash-command match. Callback inputs never route to the default.
+- `AssistantChatCapability` — registered as the default. Wraps the existing
+  `AssistantUseCase.chat → OpenAIOrchestrator → ITool registry` loop.
+  Per-channel conversation id map preserves multi-turn LLM context.
+- `SendCapability` — one class, N instances (one per `INTENT_COMMAND` except
+  `/buy`). Encapsulates the full `selectTool → compileSchema → resolve →
+  disambiguate → buildRequestBody → delegation-check → sign` pipeline,
+  including @handle recipient resolution (MTProto + Privy) and Aegis Guard
+  re-approval. Session state serialises through `PendingCollectionStore`.
+- `send.messages.ts` / `send.utils.ts` — ex-`handler.messages.ts` /
+  `handler.utils.ts`, relocated to the output side so adapters don't cross
+  the input↔output boundary.
+
+**Telegram handler after phase 2:**
+
+- Now ~200 lines (from 1146). Just an auth gate + dispatcher forwarder.
+- Removed: `orchestratorSessions`, `conversations`,
+  `pendingRecipientNotifications` maps; every `startCommandSession`,
+  `startLegacySession`, `continueCompileLoop`, `runResolutionPhase`,
+  `handleDisambiguationReply`, `buildAndShowConfirmation*`,
+  `runDelegationCheck`, `tryCreateDelegationRequest`,
+  `resolveRecipientHandle`, `handleFallbackChat`, `sendMiniAppButton`,
+  `sendApproveButton`, `sendMiniAppPrompt` methods. Constructor now takes
+  four args (was 17).
+- `handler.types.ts` deleted (`OrchestratorSession` replaced by the
+  in-capability `SessionState`, which is plain JSON).
+
+**Tests (`be/tests/`):** 22 black-box tests covering the dispatcher
+contract, registry matching rules, pending-store TTL, BuyCapability (all
+three paths), and SendCapability's happy / abort / missing-question /
+disambiguation paths. Run with `npx tsx --test tests/*.test.ts`.
+
+**Conventions (unchanged but re-affirmed):**
+
+- Adding a new user-facing feature = one Capability + one registry line.
+- Do not reach into `handler.ts` to add flow logic — it is intentionally
+  thin.
+- Capability helpers (message builders, regexes) live next to the
+  capability under `adapters/implementations/output/capabilities/`, not
+  under input adapters.
+
 ## Capability refactor (phase 1) — 2026-04-23
 
 Started the refactor documented in `constructions/capability-convergence-plan.md`.

@@ -50,6 +50,12 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
 
     const result = await capability.collect(ctx, resuming);
 
+    if (result.kind === "terminal") {
+      await this.pending.clear(ctx.channelId);
+      await this.renderer.render(result.artifact, ctx);
+      return { handled: true };
+    }
+
     if (result.kind === "ask") {
       await this.pending.save(ctx.channelId, {
         capabilityId: capability.id,
