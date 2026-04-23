@@ -73,6 +73,8 @@ const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
 
 export class HttpApiServer {
   private server: http.Server;
+  private readonly reqLogIds = new WeakMap<http.IncomingMessage, string>();
+  private readonly resLogIds = new WeakMap<http.ServerResponse, string>();
 
   constructor(
     private readonly authUseCase: IAuthUseCase,
@@ -106,6 +108,11 @@ export class HttpApiServer {
     const base = `http://localhost`;
     const url = new URL(req.url ?? "/", base);
     const method = req.method?.toUpperCase();
+
+    const reqId = Math.random().toString(36).slice(2, 8);
+    this.reqLogIds.set(req, reqId);
+    this.resLogIds.set(res, reqId);
+    console.log(`[API ${reqId}] → ${method} ${url.pathname}${url.search}`);
 
     // CORS — allow the mini app dev server and any deployed origin
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -483,6 +490,7 @@ export class HttpApiServer {
 
     await this.miniAppRequestCache!.delete(body.requestId);
 
+    let approveRequestId: string | undefined;
     if (this.userProfileDB && this.miniAppRequestCache) {
       const profile = await this.userProfileDB.findByUserId(userId);
       if (!profile?.sessionKeyAddress) {
@@ -496,19 +504,11 @@ export class HttpApiServer {
           expiresAt: now + 600,
         };
         await this.miniAppRequestCache.store(approveRequest);
-        const miniAppUrl = process.env.MINI_APP_URL;
-        if (miniAppUrl) {
-          const url = `${miniAppUrl}?requestId=${approveRequest.requestId}`;
-          await this.telegramNotifier?.sendMessage(
-            String(chatId),
-            'Set up your session key to start transacting.',
-            { webAppButton: { label: 'Set up session key', url } },
-          );
-        }
+        approveRequestId = approveRequest.requestId;
       }
     }
 
-    return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
+    return this.sendJson(res, 200, { requestId: body.requestId, ok: true, approveRequestId });
   }
 
   private async handleSignMiniAppResponse(
@@ -564,12 +564,13 @@ export class HttpApiServer {
       if (this.userProfileDB) {
         const now = newCurrentUTCEpoch();
         const existing = await this.userProfileDB.findByUserId(userId);
-        const { smartAccountAddress, signerAddress } = body.delegationRecord;
+        const { smartAccountAddress, signerAddress, address: sessionKeyAddress } = body.delegationRecord;
         if (!existing) {
           await this.userProfileDB.upsert({
             userId,
             smartAccountAddress,
             eoaAddress: signerAddress,
+            sessionKeyAddress,
             createdAtEpoch: now,
             updatedAtEpoch: now,
           });
@@ -579,7 +580,7 @@ export class HttpApiServer {
             telegramChatId: existing.telegramChatId,
             smartAccountAddress,
             eoaAddress: existing.eoaAddress ?? signerAddress,
-            sessionKeyAddress: existing.sessionKeyAddress,
+            sessionKeyAddress,
             sessionKeyScope: existing.sessionKeyScope,
             sessionKeyStatus: existing.sessionKeyStatus,
             sessionKeyExpiresAtEpoch: existing.sessionKeyExpiresAtEpoch,
@@ -886,17 +887,24 @@ export class HttpApiServer {
   }
 
   private readJson(req: http.IncomingMessage): Promise<unknown> {
+    const reqId = this.reqLogIds.get(req) ?? '?';
     return new Promise((resolve, reject) => {
       let body = "";
       req.on("data", (chunk) => { body += chunk; });
       req.on("end", () => {
-        try { resolve(JSON.parse(body)); } catch { reject(new Error("Invalid JSON")); }
+        try {
+          const parsed = JSON.parse(body);
+          console.log(`[API ${reqId}] body: ${JSON.stringify(parsed)}`);
+          resolve(parsed);
+        } catch { reject(new Error("Invalid JSON")); }
       });
       req.on("error", reject);
     });
   }
 
   private sendJson(res: http.ServerResponse, status: number, data: unknown): void {
+    const reqId = this.resLogIds.get(res) ?? '?';
+    console.log(`[API ${reqId}] ← ${status} ${JSON.stringify(data)}`);
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data));
   }
