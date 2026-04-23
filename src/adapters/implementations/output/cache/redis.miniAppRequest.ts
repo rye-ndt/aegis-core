@@ -1,6 +1,6 @@
 import type Redis from 'ioredis';
 import type { IMiniAppRequestCache } from '../../../../use-cases/interface/output/cache/miniAppRequest.cache';
-import type { MiniAppRequest } from '../../input/http/miniAppRequest.types';
+import type { MiniAppRequest } from '../../../../use-cases/interface/output/cache/miniAppRequest.types';
 
 export class RedisMiniAppRequestCache implements IMiniAppRequestCache {
   constructor(private readonly redis: Redis) {}

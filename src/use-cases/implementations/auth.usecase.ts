@@ -76,7 +76,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
       user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
     }
 
-    const expiresAtEpoch = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+    const expiresAtEpoch = newCurrentUTCEpoch() + SESSION_TTL_SECONDS;
 
     if (input.telegramChatId && this.telegramSessionDB) {
       await this.telegramSessionDB.upsert({

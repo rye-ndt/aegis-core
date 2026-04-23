@@ -36,7 +36,7 @@ import type {
   AuthRequest,
   ApproveRequest,
   ApproveSubtype,
-} from "../../input/http/miniAppRequest.types";
+} from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { CtxLike, OrchestratorSession } from "./handler.types";
 import {
   buildConfirmationMessage,
@@ -50,6 +50,13 @@ import {
   getMissingRequiredFields,
   pickCandidateByInput,
 } from "./handler.utils";
+
+const MINI_APP_URL = process.env.MINI_APP_URL;
+const DEFAULT_MAX_COMPILE_TURNS = 10;
+const MAX_COMPILE_TURNS = parseInt(
+  process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_COMPILE_TURNS),
+  10,
+);
 
 export class TelegramAssistantHandler {
   private conversations = new Map<number, string>();
@@ -80,12 +87,32 @@ export class TelegramAssistantHandler {
 
   // ── Bot registration ─────────────────────────────────────────────────────────
 
-  private async sendWelcomeWithLoginButton(chatId: number): Promise<void> {
-    const miniAppUrlBase = process.env.MINI_APP_URL;
-    if (!miniAppUrlBase) {
-      await this.botRef!.api.sendMessage(chatId, 'Welcome to Aegis.');
+  private async sendMiniAppPrompt(
+    target: { chatId: number } | { ctx: CtxLike },
+    request: AuthRequest | SignRequest | ApproveRequest,
+    promptText: string,
+    buttonText: string,
+    fallbackText?: string,
+  ): Promise<void> {
+    if (!MINI_APP_URL) {
+      if (fallbackText && 'chatId' in target) {
+        await this.botRef!.api.sendMessage(target.chatId, fallbackText);
+      }
       return;
     }
+    if (this.miniAppRequestCache) {
+      await this.miniAppRequestCache.store(request);
+    }
+    const url = `${MINI_APP_URL}?requestId=${request.requestId}`;
+    const reply_markup = new InlineKeyboard().webApp(buttonText, url);
+    if ('chatId' in target) {
+      await this.botRef!.api.sendMessage(target.chatId, promptText, { reply_markup });
+    } else {
+      await target.ctx.reply(promptText, { reply_markup });
+    }
+  }
+
+  private async sendWelcomeWithLoginButton(chatId: number): Promise<void> {
     const now = newCurrentUTCEpoch();
     const request: AuthRequest = {
       requestId: newUuid(),
@@ -94,14 +121,12 @@ export class TelegramAssistantHandler {
       createdAt: now,
       expiresAt: now + 600,
     };
-    if (this.miniAppRequestCache) {
-      await this.miniAppRequestCache.store(request);
-    }
-    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
-    await this.botRef!.api.sendMessage(
-      chatId,
+    await this.sendMiniAppPrompt(
+      { chatId },
+      request,
       'Welcome to Aegis. Sign in to get started.',
-      { reply_markup: new InlineKeyboard().webApp('Open Aegis', url) },
+      'Open Aegis',
+      'Welcome to Aegis.',
     );
   }
 
@@ -116,9 +141,6 @@ export class TelegramAssistantHandler {
       autoSign: boolean;
     },
   ): Promise<void> {
-    const miniAppUrlBase = process.env.MINI_APP_URL;
-    if (!miniAppUrlBase) return;
-
     const now = newCurrentUTCEpoch();
     const request: SignRequest = {
       requestId: newUuid(),
@@ -128,16 +150,11 @@ export class TelegramAssistantHandler {
       createdAt: now,
       expiresAt: now + 600,
     };
-    if (this.miniAppRequestCache) {
-      await this.miniAppRequestCache.store(request);
-    }
-
-    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
     const buttonText = params.autoSign ? 'Execute Automatically' : 'Open Aegis to Sign';
     const promptText = params.autoSign
       ? 'Tap below to execute silently.'
       : 'Tap below to review and sign.';
-    await ctx.reply(promptText, { reply_markup: new InlineKeyboard().webApp(buttonText, url) });
+    await this.sendMiniAppPrompt({ ctx }, request, promptText, buttonText);
   }
 
   private async sendApproveButton(
@@ -148,8 +165,6 @@ export class TelegramAssistantHandler {
     buttonText: string,
     extra?: { reapproval?: boolean; tokenAddress?: string; amountRaw?: string },
   ): Promise<void> {
-    const miniAppUrlBase = process.env.MINI_APP_URL;
-    if (!miniAppUrlBase) return;
     const now = newCurrentUTCEpoch();
     const request: ApproveRequest = {
       requestId: newUuid(),
@@ -162,13 +177,7 @@ export class TelegramAssistantHandler {
       ...(extra?.tokenAddress !== undefined ? { tokenAddress: extra.tokenAddress } : {}),
       ...(extra?.amountRaw !== undefined ? { amountRaw: extra.amountRaw } : {}),
     };
-    if (this.miniAppRequestCache) {
-      await this.miniAppRequestCache.store(request);
-    }
-    const url = `${miniAppUrlBase}?requestId=${request.requestId}`;
-    await this.botRef!.api.sendMessage(chatId, promptText, {
-      reply_markup: new InlineKeyboard().webApp(buttonText, url),
-    });
+    await this.sendMiniAppPrompt({ chatId }, request, promptText, buttonText);
   }
 
   register(bot: Bot): void {
@@ -421,8 +430,6 @@ export class TelegramAssistantHandler {
     userId: string,
     session: OrchestratorSession,
   ): Promise<void> {
-    const MAX_COMPILE_TURNS = parseInt(process.env.MAX_TOOL_ROUNDS ?? "10", 10);
-
     if (session.compileTurns >= MAX_COMPILE_TURNS) {
       this.orchestratorSessions.delete(chatId);
       await ctx.reply(

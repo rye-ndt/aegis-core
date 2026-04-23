@@ -1,5 +1,7 @@
 import { CHAIN_CONFIG } from "../../../helpers/chainConfig";
 
+export const WINDOW_SIZE = 10;
+
 export class MissingFieldsError extends Error {
   constructor(
     public readonly missingFields: string[],

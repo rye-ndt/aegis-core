@@ -100,6 +100,7 @@ export class AssistantInject {
   private _commandMappingUseCase: ICommandMappingUseCase | null = null;
   private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
   private _walletDataProvider: IWalletDataProvider | null = null;
+  private _telegramNotifier: ITelegramNotifier | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
   private _executionEstimator: IExecutionEstimator | null = null;
   private _userOpExecutor: IUserOpExecutor | null = null;
@@ -351,13 +352,11 @@ export class AssistantInject {
   getAuthUseCase(): IAuthUseCase {
     if (!this._authUseCase) {
       const db = this.getSqlDB();
-      const bot = this.getBot();
-      const notifier = bot ? new BotTelegramNotifier(bot) : undefined;
       this._authUseCase = new AuthUseCaseImpl(
         db.users,
         this.getPrivyAuthService(),
         db.telegramSessions,
-        notifier,
+        this.getTelegramNotifier(),
         this.getUserProfileCache(),
       );
     }
@@ -392,9 +391,11 @@ export class AssistantInject {
   }
 
   getTelegramNotifier(): ITelegramNotifier | undefined {
+    if (this._telegramNotifier) return this._telegramNotifier;
     const bot = this.getBot();
     if (!bot) return undefined;
-    return new BotTelegramNotifier(bot);
+    this._telegramNotifier = new BotTelegramNotifier(bot);
+    return this._telegramNotifier;
   }
 
   getTokenDelegationRepo(): ITokenDelegationDB {
@@ -545,7 +546,6 @@ export class AssistantInject {
     return new HttpApiServer(
       this.getAuthUseCase(),
       port,
-      process.env.JWT_SECRET,
       this.getIntentUseCase(),
       this.getPortfolioUseCase(),
       this.getToolRegistrationUseCase(),

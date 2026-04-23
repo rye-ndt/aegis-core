@@ -59,16 +59,6 @@ export class DrizzleIntentRepo implements IIntentDB {
     return this.toRecord(rows[0]);
   }
 
-  async listByUserId(userId: string, limit = 20): Promise<IIntent[]> {
-    const rows = await this.db
-      .select()
-      .from(intents)
-      .where(eq(intents.userId, userId))
-      .orderBy(desc(intents.createdAtEpoch))
-      .limit(limit);
-    return rows.map((r) => this.toRecord(r));
-  }
-
   private toRecord(row: typeof intents.$inferSelect): IIntent {
     return {
       id: row.id,

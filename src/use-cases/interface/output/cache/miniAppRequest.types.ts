@@ -1,8 +1,6 @@
 export type RequestType = 'auth' | 'sign' | 'approve';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 
-// ── Request bodies (BE → Redis → FE) ─────────────────────────────────────────
-
 interface BaseRequest {
   requestId: string;
   requestType: RequestType;
@@ -36,8 +34,6 @@ export interface ApproveRequest extends BaseRequest {
 }
 
 export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest;
-
-// ── Response bodies (FE → BE) ─────────────────────────────────────────────────
 
 interface BaseResponse {
   requestId: string;

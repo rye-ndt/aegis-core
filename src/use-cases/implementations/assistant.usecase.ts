@@ -7,8 +7,6 @@ import type {
   IAssistantUseCase,
   IChatInput,
   IChatResponse,
-  IGetConversationInput,
-  IListConversationsInput,
 } from "../interface/input/assistant.interface";
 import type {
   ILLMOrchestrator,
@@ -16,10 +14,7 @@ import type {
   IToolCall,
 } from "../interface/output/orchestrator.interface";
 import type { IToolRegistry } from "../interface/output/tool.interface";
-import type {
-  Conversation,
-  IConversationDB,
-} from "../interface/output/repository/conversation.repo";
+import type { IConversationDB } from "../interface/output/repository/conversation.repo";
 import type {
   IMessageDB,
   Message,
@@ -28,6 +23,10 @@ import type {
 const DEFAULT_SYSTEM_PROMPT =
   `You are an AI trading assistant on ${CHAIN_CONFIG.name}. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.`;
 const DEFAULT_MAX_TOOL_ROUNDS = 10;
+const MAX_TOOL_ROUNDS = parseInt(
+  process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS),
+  10,
+);
 
 interface IToolResult {
   toolCallId: string;
@@ -59,11 +58,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       }),
     ] as const);
 
-    const maxRounds = parseInt(
-      process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS),
-    );
-
-    const recentMessages = allMessages.filter((m) => !m.compressedAtEpoch).slice(-20);
+    const recentMessages = allMessages.slice(-20);
     const slidingWindow: IOrchestratorMessage[] = [
       ...this.buildOrchestratorHistory(recentMessages),
       {
@@ -83,8 +78,8 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
     console.log(`[AssistantUseCase] chat start userId=${input.userId} conversationId=${conversationId} historyLength=${slidingWindow.length - 1} availableTools=[${availableTools.map((t) => t.name).join(", ")}]`);
 
-    for (let round = 0; round < maxRounds; round++) {
-      console.log(`[AssistantUseCase] LLM round ${round + 1}/${maxRounds} — sending ${slidingWindow.length} messages`);
+    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      console.log(`[AssistantUseCase] LLM round ${round + 1}/${MAX_TOOL_ROUNDS} — sending ${slidingWindow.length} messages`);
       const llmResponse = await this.orchestrator.chat({
         systemPrompt,
         conversationHistory: slidingWindow,
@@ -163,14 +158,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     };
   }
 
-  async listConversations(input: IListConversationsInput): Promise<Conversation[]> {
-    return this.conversationRepo.findByUserId(input.userId);
-  }
-
-  async getConversation(input: IGetConversationInput): Promise<Message[]> {
-    return this.messageRepo.findByConversationId(input.conversationId);
-  }
-
   private async initConversation(input: IChatInput): Promise<string> {
     if (input.conversationId) return input.conversationId;
 
@@ -181,7 +168,6 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       userId: input.userId,
       title: input.message.slice(0, 60),
       status: CONVERSATION_STATUSES.ACTIVE,
-      flaggedForCompression: false,
       createdAtEpoch: now,
       updatedAtEpoch: now,
     });

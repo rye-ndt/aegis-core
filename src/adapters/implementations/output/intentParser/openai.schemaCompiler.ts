@@ -6,6 +6,8 @@ import type { ToolManifest } from "../../../../use-cases/interface/output/toolMa
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+
 const CompileSchema = z.object({
   paramsJson:           z.string(),
   missingQuestion:      z.string().nullable(),
@@ -110,7 +112,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
     const systemPrompt = buildSystemPrompt(manifest, autoFilled, partialParams);
 
     const response = await this.client.chat.completions.parse({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      model: OPENAI_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -166,7 +168,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       .join(", ");
 
     const response = await this.client.chat.completions.create({
-      model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+      model: OPENAI_MODEL,
       messages: [
         {
           role: "user",

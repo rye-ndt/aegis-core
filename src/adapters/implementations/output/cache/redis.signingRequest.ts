@@ -3,6 +3,7 @@ import type {
   ISigningRequestCache,
   SigningRequestRecord,
 } from '../../../../use-cases/interface/output/cache/signingRequest.cache';
+import { newCurrentUTCEpoch } from '../../../../helpers/time/dateTime';
 
 export class RedisSigningRequestCache implements ISigningRequestCache {
   constructor(private readonly redis: Redis) {}
@@ -12,7 +13,7 @@ export class RedisSigningRequestCache implements ISigningRequestCache {
   }
 
   async save(record: SigningRequestRecord): Promise<void> {
-    const ttl = Math.max(10, record.expiresAt - Math.floor(Date.now() / 1000));
+    const ttl = Math.max(10, record.expiresAt - newCurrentUTCEpoch());
     await this.redis.set(this.key(record.id), JSON.stringify(record), 'EX', ttl);
   }
 

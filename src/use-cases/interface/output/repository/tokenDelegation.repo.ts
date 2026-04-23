@@ -30,7 +30,4 @@ export interface ITokenDelegationDB {
 
   /** BigInt-adds amountRaw to spentRaw for the given (userId, tokenAddress) row. */
   addSpent(userId: string, tokenAddress: string, amountRaw: string): Promise<void>;
-
-  /** Single-row lookup; returns null if not found. */
-  findByUserIdAndToken(userId: string, tokenAddress: string): Promise<TokenDelegation | null>;
 }
