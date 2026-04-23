@@ -30,6 +30,9 @@ export interface ApproveRequest extends BaseRequest {
   userId: string;
   subtype: ApproveSubtype;
   suggestedTokens?: Array<{ address: string; symbol: string; decimals: number }>;
+  reapproval?: boolean;
+  tokenAddress?: string;
+  amountRaw?: string;
 }
 
 export type MiniAppRequest = AuthRequest | SignRequest | ApproveRequest;
