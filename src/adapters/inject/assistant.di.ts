@@ -67,8 +67,6 @@ import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
 import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
 import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
-import { ZerodevUserOpExecutor } from "../implementations/output/blockchain/zerodevExecutor";
-import type { IUserOpExecutor } from "../../use-cases/interface/output/blockchain/userOpExecutor.interface";
 import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRegistry";
 import { CapabilityDispatcher } from "../../use-cases/implementations/capabilityDispatcher.usecase";
 import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capabilityDispatcher.interface";
@@ -133,7 +131,6 @@ export class AssistantInject {
   private _telegramNotifier: ITelegramNotifier | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
   private _executionEstimator: IExecutionEstimator | null = null;
-  private _userOpExecutor: IUserOpExecutor | null = null;
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
   private _relayClient: IRelayClient | null = null;
   private _relaySwapTool: RelaySwapTool | null = null;
@@ -162,7 +159,6 @@ export class AssistantInject {
       this._viemClient = new ViemClientAdapter({
         rpcUrl: CHAIN_CONFIG.rpcUrl,
         rpcUrls: CHAIN_CONFIG.rpcUrls as string[],
-        botPrivateKey: "",
         chainId: CHAIN_CONFIG.chainId,
         chain: CHAIN_CONFIG.chain,
       });
@@ -300,9 +296,6 @@ export class AssistantInject {
         this.getIntentClassifier(),
         this.getSchemaCompiler(),
         db.commandToolMappings,
-        db.intentExecutions,
-        db.tokenDelegations,
-        this.getUserOpExecutor(),
       );
     }
     return this._intentUseCase;
@@ -457,28 +450,6 @@ export class AssistantInject {
       this._executionEstimator = new DeterministicExecutionEstimator();
     }
     return this._executionEstimator;
-  }
-
-  getUserOpExecutor(): IUserOpExecutor | undefined {
-    const botKey = process.env.BOT_PRIVATE_KEY;
-    const bundlerUrl = process.env.AVAX_BUNDLER_URL;
-    if (!botKey || !bundlerUrl) return undefined;
-    if (!/^(0x)?[0-9a-fA-F]{64}$/.test(botKey.trim())) {
-      console.error("[getUserOpExecutor] BOT_PRIVATE_KEY is not a valid 32-byte hex private key — autonomous execution disabled");
-      return undefined;
-    }
-    if (!this._userOpExecutor) {
-      const key = (botKey.startsWith('0x') ? botKey : `0x${botKey}`) as `0x${string}`;
-      this._userOpExecutor = new ZerodevUserOpExecutor(
-        key,
-        bundlerUrl,
-        CHAIN_CONFIG.rpcUrl,
-        CHAIN_CONFIG.chain,
-        CHAIN_CONFIG.paymasterUrl,
-        CHAIN_CONFIG.rpcUrls as string[],
-      );
-    }
-    return this._userOpExecutor;
   }
 
   getSigningRequestUseCase(

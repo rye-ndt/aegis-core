@@ -1,12 +1,9 @@
 import {
   createPublicClient,
-  createWalletClient,
   fallback,
   http,
   type PublicClient,
-  type WalletClient,
 } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 import type { Chain } from "viem/chains";
 import type { IChainReader } from "../../../../use-cases/interface/output/blockchain/chainReader.interface";
 
@@ -22,13 +19,11 @@ const ERC20_BALANCE_ABI = [
 
 export class ViemClientAdapter implements IChainReader {
   readonly publicClient: PublicClient;
-  readonly walletClient: WalletClient | null;
   readonly chainId: number;
 
   constructor(params: {
     rpcUrl: string;
     rpcUrls?: string[];
-    botPrivateKey: string;
     chainId: number;
     chain: Chain;
   }) {
@@ -40,15 +35,6 @@ export class ViemClientAdapter implements IChainReader {
     );
 
     this.publicClient = createPublicClient({ chain: params.chain, transport });
-
-    const isValidKey = /^(0x)?[0-9a-fA-F]{64}$/.test(params.botPrivateKey.trim());
-    if (isValidKey) {
-      const key = params.botPrivateKey.trim();
-      const account = privateKeyToAccount((key.startsWith("0x") ? key : `0x${key}`) as `0x${string}`);
-      this.walletClient = createWalletClient({ account, chain: params.chain, transport });
-    } else {
-      this.walletClient = null;
-    }
   }
 
   getNativeBalance(address: `0x${string}`): Promise<bigint> {

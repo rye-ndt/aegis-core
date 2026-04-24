@@ -14,6 +14,7 @@
 - 2026-04-24 — Tavily (5 min) and Relay quote (15 s) responses cached in Redis via `helpers/cache/redisResponseCache.ts`. Keys: `tavily:{sha1(q+limit)}`, `relay_quote:{sha1(user+route+amount+type)}`. Caches are opt-in: adapters skip them when `REDIS_URL` is unset. TTLs env-tunable via `TAVILY_CACHE_TTL_SECONDS` / `RELAY_QUOTE_CACHE_TTL_SECONDS`; tighten Tavily if freshness issues surface, tighten Relay if quote-staleness errors appear.
 - 2026-04-24 — `ChainEntry.defaultRpcUrls` is now `string[]` (ordered primary → fallbacks). All viem PublicClients use `fallback([http(u1), http(u2), ...])` with `retryCount: 1`. Env: `RPC_URL_FALLBACKS` (comma-separated) supplements `RPC_URL` at runtime. `getChainRpcUrl` deprecated; prefer `getChainRpcUrls`.
 - 2026-04-24 — Production topology: `aegis-worker` (Cloud Run min=max=1, Telegram + jobs) + `aegis-api` (Cloud Run min=2 max=8, HTTP only). Shared Upstash Redis + managed Postgres. Single image, role chosen via PROCESS_ROLE. Local parity: `docker compose --profile scale up` (1 worker + 3 api + nginx). Do not raise aegis-worker beyond 1 replica without first solving job-singleton via Redis locks and grammy webhook-mode migration.
+- 2026-04-24 — Removed legacy bot-signed autonomous execution path. Deleted `ZerodevUserOpExecutor`, `IUserOpExecutor` port, `IIntentUseCase.confirmAndExecute`, `GET /intent/:intentId` endpoint, `ViemClientAdapter.walletClient`, and the `BOT_PRIVATE_KEY` env var. The backend **never signs transactions** — all signing is done by each user's delegated session-key pair stored in their Telegram cloud (mini-app), driven through `ISigningRequestUseCase.create` + `waitFor`. If you find a new flow that needs autonomous backend signing, re-approach via the mini-app signing pattern; do not reintroduce a server-side key.
 
 ## GET /yield/positions — 2026-04-24
 
@@ -541,7 +542,6 @@ Runs on `HTTP_API_PORT` (default 4000). Native Node.js HTTP — no Express. CORS
 | -------- | ----------------------------- | ------ | ---------------------------------------------------------------------------------------- |
 | `POST`   | `/auth/privy`                 | None   | Verify Privy token; upsert user + link Telegram session; returns `{ userId, expiresAtEpoch }` |
 | `GET`    | `/user/profile`               | Privy  | Fetch cached user profile (SCA, session key, etc.)                                       |
-| `GET`    | `/intent/:intentId`           | Privy  | Confirm & execute an intent                                                              |
 | `GET`    | `/portfolio`                  | Privy  | On-chain balances for user's SCA                                                         |
 | `GET`    | `/tokens?chainId=`            | None   | List verified tokens for a chain                                                         |
 | `POST`   | `/tools`                      | None   | Register a dynamic tool manifest                                                         |
@@ -598,14 +598,14 @@ message:text
                           ↓
                     DeterministicExecutionEstimator (preview)
                           ↓
-               buildAndShowConfirmation
-               user: /confirm → confirmAndExecute()
-                  1. Solver rebuilds calldata
-                  2. ZerodevUserOpExecutor.execute() → userOpHash
-                  3. waitForReceipt() → txHash
-                  4. Save intent_executions + fee_records
-                  5. TxResultParser → human string
-                  6. notifyRecipient() if P2P transfer
+                    buildAndShowConfirmation
+                          ↓
+                    Capability creates SigningRequestRecord (via
+                    ISigningRequestUseCase.create) + emits mini_app
+                    artifact. Mini-app polls GET /request/:id, signs
+                    with the user's own delegated session key (stored
+                    in Telegram cloud), POSTs /response. Capability's
+                    waitFor(requestId) resumes on resolve.
 ```
 
 Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTokenSymbol` extracted; `@handle` recipients resolved via MTProto before confirmation. Slash commands take priority over free-text classification when `parseIntentCommand(text)` matches.
@@ -771,3 +771,29 @@ factories. `bundlerUrl` was also hoisted onto `CHAIN_CONFIG` for symmetry,
 though `getUserOpExecutor` still reads `AVAX_BUNDLER_URL` directly for its
 required-field check — that's fine; the `CHAIN_CONFIG` entry is there for
 future consumers.
+
+
+## 2026-04-24 — Fix first-time mobile login 401
+
+**What**: `POST /response` with `requestType=auth` was gated by a
+`resolveUserId` check that returns null when no user row exists for the
+Privy DID yet — blocking the very flow that creates the user
+(`loginWithPrivy`). Desktop worked only because a user row already existed
+from a prior login; first-time mobile logins hit 401. Re-ordered
+`handlePostResponse` so auth requests call `loginWithPrivy` directly and
+take the returned `userId`, while sign/approve keep the existing
+resolveUserId+ownership gate. Also unswallowed the Privy verify error in
+`AuthUseCaseImpl.resolveUserId` so future failures log a reason.
+
+**Why**: the old flow conflated "authenticate this request" with "look up
+the local user row" — but for the auth endpoint, the local row is an
+*output*, not a precondition. Fixing it at the handler (not in
+`resolveUserId`) keeps the semantics tight: `resolveUserId` still means
+"does this token map to an existing user", which is what every other
+endpoint wants.
+
+**Convention**: endpoints that can create a user (currently only
+`POST /response` with `requestType=auth`) must NOT call `resolveUserId` as
+a gate. They verify the token via `loginWithPrivy` / `verifyToken` and use
+the returned `userId`. Every other endpoint keeps calling `resolveUserId`
+and 401s on null.

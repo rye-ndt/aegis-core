@@ -20,17 +20,6 @@ export interface IntentExecutionResult {
   requiresConfirmation: boolean;
 }
 
-export interface ConfirmAndExecuteParams {
-  intentId: string;
-  userId: string;
-  /** Pre-built calldata passed by the handler (avoids a redundant DB re-fetch). */
-  calldata?: { to: string; data: string; value: string };
-  /** ERC20 token address — used to record addSpent after execution. */
-  tokenAddress?: string;
-  /** Raw amount in token decimals — used to record addSpent after execution. */
-  amountRaw?: string;
-}
-
 export interface IIntentUseCase {
   parseAndExecute(params: {
     userId: string;
@@ -38,8 +27,6 @@ export interface IIntentUseCase {
     messageId: string;
     rawInput: string;
   }): Promise<IntentExecutionResult>;
-
-  confirmAndExecute(params: ConfirmAndExecuteParams): Promise<IntentExecutionResult & { txHash?: string }>;
 
   searchTokens(symbol: string, chainId: number): Promise<ITokenRecord[]>;
 

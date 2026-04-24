@@ -105,12 +105,19 @@ export class AuthUseCaseImpl implements IAuthUseCase {
   }
 
   async resolveUserId(privyToken: string): Promise<string | null> {
-    if (!this.privyAuthService) return null;
+    if (!this.privyAuthService) {
+      console.warn("[Auth] resolveUserId: privyAuthService not configured");
+      return null;
+    }
     try {
       const { privyDid } = await this.privyAuthService.verifyTokenLite(privyToken);
       const user = await this.userDB.findByPrivyDid(privyDid);
+      if (!user) console.warn(`[Auth] resolveUserId: no user for privyDid=${privyDid}`);
       return user?.id ?? null;
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const tokenPreview = `${privyToken.slice(0, 12)}...${privyToken.slice(-8)} (len=${privyToken.length})`;
+      console.warn(`[Auth] resolveUserId: verifyTokenLite failed — ${msg} — token=${tokenPreview}`);
       return null;
     }
   }

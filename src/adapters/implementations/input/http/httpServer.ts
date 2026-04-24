@@ -182,7 +182,6 @@ export class HttpApiServer {
     (req: http.IncomingMessage, res: http.ServerResponse, url: URL, param: string) => Promise<void>
   ]> {
     return [
-      [{ method: "GET",    regex: /^\/intent\/([^/]+)$/ },            (req, res, url) => this.handleGetIntent(req, res, url)],
       [{ method: "DELETE", regex: /^\/tools\/([^/]+)$/ },             (req, res, url) => this.handleDeleteTool(req, res, url)],
       [{ method: "POST",   regex: /^\/delegation\/([^/]+)\/signed$/ }, (req, res, _u, id) => this.handlePostDelegationSigned(req, res, id)],
       [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, url, requestId) => this.handleGetMiniAppRequest(req, res, url, requestId)],
@@ -232,18 +231,6 @@ export class HttpApiServer {
     const profile = await this.userProfileCache.get(userId);
     if (!profile) return this.sendJson(res, 404, { error: "Profile not found or expired" });
     return this.sendJson(res, 200, profile);
-  }
-
-  private async handleGetIntent(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.intentUseCase) return this.sendJson(res, 503, { error: "Intent service not available" });
-
-    const intentId = url.pathname.split("/").pop() ?? "";
-    if (!intentId) return this.sendJson(res, 400, { error: "Intent ID required" });
-
-    const result = await this.intentUseCase.confirmAndExecute({ intentId, userId });
-    return this.sendJson(res, 200, result);
   }
 
   private async handleGetPortfolio(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -453,22 +440,25 @@ export class HttpApiServer {
 
     const response = parsed.data as MiniAppResponse;
 
-    const userId = await this.authUseCase.resolveUserId(response.privyToken);
-    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
-
     const request = await this.miniAppRequestCache.retrieve(response.requestId);
     if (!request) return this.sendJson(res, 404, { error: 'Not found' });
 
-    if (response.requestType !== 'auth') {
-      const requestWithUser = request as { userId?: string };
-      if (requestWithUser.userId !== userId) {
-        return this.sendJson(res, 403, { error: 'Forbidden' });
-      }
+    // Auth is the account-creating path: it must accept a valid Privy token
+    // even when no user row exists yet. loginWithPrivy will create or link one.
+    if (response.requestType === 'auth') {
+      return this.handleAuthMiniAppResponse(response as AuthResponse, res);
     }
 
-    if (response.requestType === 'auth') {
-      await this.handleAuthMiniAppResponse(response as AuthResponse, userId, res);
-    } else if (response.requestType === 'sign') {
+    // Non-auth requests require an existing user tied to the Privy DID.
+    const userId = await this.authUseCase.resolveUserId(response.privyToken);
+    if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+
+    const requestWithUser = request as { userId?: string };
+    if (requestWithUser.userId !== userId) {
+      return this.sendJson(res, 403, { error: 'Forbidden' });
+    }
+
+    if (response.requestType === 'sign') {
       await this.handleSignMiniAppResponse(response as SignResponse, userId, res);
     } else if (response.requestType === 'approve') {
       await this.handleApproveMiniAppResponse(response as ApproveResponse, userId, res);
@@ -479,13 +469,20 @@ export class HttpApiServer {
 
   private async handleAuthMiniAppResponse(
     body: AuthResponse,
-    userId: string,
     res: http.ServerResponse,
   ): Promise<void> {
-    await this.authUseCase.loginWithPrivy({
-      privyToken: body.privyToken,
-      telegramChatId: body.telegramChatId,
-    });
+    let userId: string;
+    try {
+      const result = await this.authUseCase.loginWithPrivy({
+        privyToken: body.privyToken,
+        telegramChatId: body.telegramChatId,
+      });
+      userId = result.userId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[API] auth loginWithPrivy failed: ${msg}`);
+      return this.sendJson(res, 401, { error: 'Unauthorized' });
+    }
 
     const chatId = parseInt(body.telegramChatId, 10);
 
