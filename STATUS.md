@@ -1,5 +1,103 @@
 # Onchain Agent — Status
 
+## GET /yield/positions — 2026-04-24
+
+HTTP endpoint (Privy-auth) backing the mini-app's `YieldPositions` component on the Home tab. Returns the user's live on-chain yield positions — protocol, token, current $ value, lifetime PnL, 24h delta, APY — plus aggregate totals.
+
+**Shape** (matches `fe/privy-auth/src/hooks/useAppData.tsx:YieldPositionsData`):
+```
+{ positions: PositionView[], totals: { principalHuman, currentValueHuman, pnlHuman } }
+```
+`pnlHuman` / `pnl24hHuman` are signed (`+1.28` / `-0.04`); `principalHuman` / `currentValueHuman` unsigned; all 2-decimals. `apy` is a fraction (FE multiplies by 100).
+
+**Data sources** — read-only, no DB writes:
+1. `yieldRepo.listActiveProtocols(userId)` — the index of `(chainId, protocolId, tokenAddress)` tuples to check.
+2. `adapter.getUserPosition(user, token)` — **live on-chain balance** (`aToken.balanceOf` for Aave v3). Every $ figure the user sees is live, not cached.
+3. `yieldRepo.getPrincipalRaw(...)` — cost basis (deposits − withdrawals) for lifetime PnL.
+4. `snapshots` row with `snapshotDateUtc === yesterday` for the 24h delta baseline. If no snapshot exists yet (user deposited <24h ago) the delta is 0.
+5. `adapter.getPoolStatus(token)` — live APY. Called per position; small RPC overhead acceptable because the component only renders a handful of rows.
+
+**Why not store a materialised `yield_positions` table?** Balances drift every block (interest accrual on aTokens). A snapshot table would always be stale; the live read is a single `balanceOf` per position.
+
+**New method**: `IYieldOptimizerUseCase.getPositions(userId): Promise<PositionsView>` — endpoint handler is a thin wrapper so business logic stays in the use-case layer (hexagonal).
+
+**Protocol display names** live in a `PROTOCOL_DISPLAY_NAMES: Record<YIELD_PROTOCOL_ID, string>` map inside `yieldOptimizerUseCase.ts`. Add a line there when registering a new protocol adapter — do not inline display strings at call sites.
+
+**Totals decimals assumption**: current implementation sums all positions into a single total using the last-seen stablecoin's decimals. This is correct for the single-stablecoin (USDC) configuration today; when multi-stablecoin ships, totals need per-symbol grouping or USD-normalisation (flagged in code comment).
+
+## /yield + /withdraw — proactive USDC yield optimizer — 2026-04-24
+
+New feature: proactive yield optimizer for idle USDC on Avalanche mainnet using Aave v3.
+
+**What was built (per `constructions/yield-optimization-plan.md`):**
+
+- **3 new DB tables** (`yield_deposits`, `yield_withdrawals`, `yield_position_snapshots`) — drizzle migration `0018_ordinary_toxin.sql` applied.
+- **4 new ports** under `use-cases/interface/yield/`: `IYieldProtocolAdapter`, `IYieldProtocolRegistry`, `IYieldPoolRanker`, `IYieldRepository`, `IYieldOptimizerUseCase`.
+- **Aave v3 adapter** (`adapters/implementations/output/yield/aaveV3Adapter.ts`): `getPoolStatus` (ray→APY from `PoolDataProvider.getReserveData`), `buildDepositTx` (approve if needed + supply), `buildWithdrawAllTx` (withdraw maxUint256), `getUserPosition` (aToken balanceOf).
+- **Ranking** (`use-cases/implementations/yieldPoolRanker.ts`): `score = 0.7 * EMA_7d(supplyApy) + 0.3 * currentSupplyApy`; disqualify if liquidityUSD < $100k; 0.5× penalty if utilization > 95%.
+- **3 background jobs**:
+  - `YieldPoolScanJob` — scans Aave pool every 2h (env: `YIELD_POOL_SCAN_INTERVAL_MS`), writes winner to `yield:best:{chainId}:{token}` (3h TTL), maintains 84-sample APY series per protocol.
+  - `UserIdleScanJob` — scans active users every 24h (env: `YIELD_USER_SCAN_INTERVAL_MS`), checks idle USDC balance vs threshold, sends Telegram nudge with inline keyboard.
+  - `YieldReportJob` — ticks every 5 min, fires once per day at configured UTC hour (`YIELD_REPORT_UTC_HOUR`, default 9), sends daily PnL report per user.
+- **`YieldCapability`** — handles `/yield` (nudge keyboard), `/withdraw` (full exit), and `yield:opt:*`, `yield:custom`, `yield:skip` callbacks. Deposit/withdraw flow reuses the `ISigningRequestUseCase.create` + `waitFor` pattern from SwapCapability.
+- **`YieldOptimizerUseCase`** — `runPoolScan`, `scanIdleForUser`, `buildDepositPlan`, `finalizeDeposit`, `buildWithdrawAllPlan`, `buildDailyReport`.
+- **`listActiveUserIds()`** added to `ITelegramSessionDB` and its Drizzle impl.
+- `INTENT_COMMAND.YIELD` and `INTENT_COMMAND.WITHDRAW` added to enum; excluded from SendCapability routing.
+- `YIELD_ENV` helper (`helpers/env/yieldEnv.ts`) — all yield env vars parsed once at startup.
+- Avalanche mainnet yield config in `chainConfig.ts`: native USDC `0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E`, Aave pool `0x794a61358D6845594F94dc1DB02A252b5b4814aD`, data provider `0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654`.
+
+**New env vars:**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `YIELD_IDLE_USDC_THRESHOLD_USD` | `10` | Min idle balance to nudge user |
+| `YIELD_POOL_SCAN_INTERVAL_MS` | `7200000` | Pool scan frequency |
+| `YIELD_USER_SCAN_INTERVAL_MS` | `86400000` | Idle scan frequency |
+| `YIELD_REPORT_UTC_HOUR` | `9` | Hour (UTC) to send daily reports |
+| `YIELD_NUDGE_COOLDOWN_SEC` | `86400` | Cooldown between nudges per user |
+| `YIELD_ENABLED_CHAIN_IDS` | `43114` | Comma-separated chain IDs |
+
+**New Redis keys:**
+
+| Key | Value | TTL |
+|---|---|---|
+| `yield:best:{chainId}:{token}` | JSON `{protocolId, score, apy, ts}` | 3h |
+| `yield:apy_series:{chainId}:{protocolId}:{token}` | List of `{apy, ts}` JSON (84 samples max) | none |
+| `yield:nudge_cooldown:{userId}` | `"1"` | `YIELD_NUDGE_COOLDOWN_SEC` |
+| `yield:nudge_pending:{userId}` | `"1"` | 48h |
+| `yield:report_done:{YYYY-MM-DD}` | `"1"` | 25h |
+
+**Conventions introduced:**
+
+- Yield-specific adapters live under `adapters/implementations/output/yield/`.
+- New background jobs follow the `start()`/`stop()` + immediate-run + setInterval pattern from `TokenCrawlerJob`.
+- Chunk-based concurrency (`Promise.allSettled` with chunks of N) is the pattern when `p-limit` is unavailable.
+- All yield chain/address config belongs in `chainConfig.ts` under `YieldChainConfig`; `getYieldConfig(chainId)` and `getEnabledYieldChains()` are the only access points.
+- `YIELD_ENV` in `helpers/env/yieldEnv.ts` is parsed once at module load — never read `process.env` directly in yield code.
+
+**Deferred (must implement before v2 — `/yield` "optimization" degrades without these):**
+
+- **Auto-rebalance** when a better pool appears (and auto-exit on APY drop > threshold). Without this, funds can sit in a stale winner after a better pool emerges.
+- **Partial withdrawal** (`/withdraw <pct>` or `/withdraw <amount>`).
+- **Multi-stablecoin support** (schema already keyed by token; only USDC is configured).
+- **Multi-chain idle scan** (currently scans only first enabled chain).
+- **Additional protocol adapters** (Benqi, Yearn). Interface is narrow enough to drop them in.
+- **LLM-based adapter dispatch** — current design calls typed methods directly (one protocol → no benefit yet). Reconsider when protocol count grows.
+- **Per-user timezone for reports** (one fixed UTC hour today).
+- ~~`GET /yield/positions` HTTP endpoint~~ — **shipped 2026-04-24** (see below).
+- **Tests** (§12 of plan).
+
+**Review fixes (2026-04-24, same day):**
+
+- Unified `YIELD_PROTOCOL_ID` enum as the single source of truth; removed duplicate `type YieldProtocolId` from `chainConfig.ts`.
+- `YieldPoolRanker.rank()` now takes `tokenDecimals` instead of hardcoding `6` — chain-agnostic.
+- `YieldReportJob` no longer imports the concrete `YieldOptimizerUseCase` class; `reportDoneRedisKey` is a method on `IYieldOptimizerUseCase`.
+- `WithdrawPlan.withdrawals[].balanceRaw` is now piped through; `finalizeWithdrawal` records the actual withdrawn amount so `principalRaw = deposits − withdrawals` is correct and lifetime PnL stays consistent.
+- `SignRequest` extended with `kind`, `chainId`, `protocolId`, `tokenAddress`, `displayMeta` (only on step 1). Capability now sets them, so the FE `YieldDepositHandler` actually renders for yield flows instead of falling through to the generic `SignHandler`.
+- Nudge keyboard deduplicated — exported `buildNudgeKeyboard()` from the capability, reused in the DI-level auto-nudge.
+- Daily-report formatting reads decimals and symbol from `getYieldConfig()` instead of hardcoding `6`/`USDC`.
+- Dropped unused `yieldRepo` dep from `YieldCapability` and `UserIdleScanJob`.
+
 ## /swap — 2026-04-24
 
 New Telegram command: `/swap`. Relay-backed intent swap with autonomous

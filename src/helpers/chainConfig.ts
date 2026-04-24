@@ -8,6 +8,15 @@ import {
   optimism,
   type Chain,
 } from "viem/chains";
+import type { Address } from "viem";
+import { YIELD_ENV } from "./env/yieldEnv";
+import { YIELD_PROTOCOL_ID } from "./enums/yieldProtocolId.enum";
+
+interface YieldChainConfig {
+  stablecoins: Array<{ symbol: string; address: Address; decimals: number }>;
+  protocols: YIELD_PROTOCOL_ID[];
+  aave?: { poolAddress: Address; dataProviderAddress: Address };
+}
 
 interface ChainEntry {
   chain: Chain;
@@ -19,6 +28,7 @@ interface ChainEntry {
   aliases: string[];
   /** Relay.link supports this chain for quotes/executions. */
   relayEnabled: boolean;
+  yield?: YieldChainConfig;
 }
 
 const CHAIN_REGISTRY: Record<number, ChainEntry> = {
@@ -39,6 +49,20 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "avalanche",
     aliases: ["avalanche", "avax"],
     relayEnabled: true,
+    yield: {
+      stablecoins: [
+        {
+          symbol: "USDC",
+          address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E" as Address,
+          decimals: 6,
+        },
+      ],
+      protocols: [YIELD_PROTOCOL_ID.AAVE_V3],
+      aave: {
+        poolAddress: "0x794a61358D6845594F94dc1DB02A252b5b4814aD" as Address,
+        dataProviderAddress: "0x69FA688f1Dc47d4B5d8029D5a35FB7a548310654" as Address,
+      },
+    },
   },
   1: {
     chain: mainnet,
@@ -86,6 +110,22 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     relayEnabled: true,
   },
 };
+
+export function getYieldConfig(chainId: number): YieldChainConfig | null {
+  return CHAIN_REGISTRY[chainId]?.yield ?? null;
+}
+
+export function getEnabledYieldChains(): number[] {
+  return YIELD_ENV.enabledChainIds.filter((id) => CHAIN_REGISTRY[id]?.yield != null);
+}
+
+export function getChainRpcUrl(chainId: number): string {
+  return CHAIN_REGISTRY[chainId]?.defaultRpcUrl ?? "";
+}
+
+export function getChainObject(chainId: number): Chain | null {
+  return CHAIN_REGISTRY[chainId]?.chain ?? null;
+}
 
 export const CAIP2_BY_PRIVY_NETWORK: Record<string, string> = Object.fromEntries(
   Object.entries(CHAIN_REGISTRY).map(([id, entry]) => [entry.privyNetwork, `eip155:${id}`]),

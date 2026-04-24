@@ -1,5 +1,13 @@
 export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
+export type SignKind = 'yield_deposit' | 'yield_withdraw';
+
+export interface YieldDisplayMeta {
+  protocolName: string;
+  tokenSymbol: string;
+  amountHuman: string;
+  expectedApy?: number;
+}
 
 interface BaseRequest {
   requestId: string;
@@ -21,6 +29,11 @@ export interface SignRequest extends BaseRequest {
   data: string;
   description: string;
   autoSign: boolean;
+  kind?: SignKind;
+  chainId?: number;
+  protocolId?: string;
+  tokenAddress?: string;
+  displayMeta?: YieldDisplayMeta;
 }
 
 export interface ApproveRequest extends BaseRequest {

@@ -20,6 +20,7 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../../../../use-cases/interface/output/telegramNotifier.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type {
   MiniAppResponse,
   AuthResponse,
@@ -95,6 +96,7 @@ export class HttpApiServer {
     private readonly userProfileDB?: IUserProfileDB,
     private readonly telegramSessionRepo?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
+    private readonly yieldOptimizerUseCase?: IYieldOptimizerUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -167,6 +169,7 @@ export class HttpApiServer {
       "GET /delegation/approval-params": (req, res, url) => this.handleGetDelegationApprovalParams(req, res, url),
       "POST /delegation/grant":         (req, res) => this.handlePostDelegationGrant(req, res),
       "GET /delegation/grant":          (req, res) => this.handleGetDelegationGrant(req, res),
+      "GET /yield/positions":           (req, res) => this.handleGetYieldPositions(req, res),
     };
   }
 
@@ -890,6 +893,15 @@ export class HttpApiServer {
 
     const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
     return this.sendJson(res, 200, { delegations });
+  }
+
+  private async handleGetYieldPositions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.yieldOptimizerUseCase) return this.sendJson(res, 503, { error: "Yield service not available" });
+
+    const result = await this.yieldOptimizerUseCase.getPositions(userId);
+    return this.sendJson(res, 200, result);
   }
 
   private async extractUserId(req: http.IncomingMessage): Promise<string | null> {

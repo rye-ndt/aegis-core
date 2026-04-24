@@ -81,6 +81,20 @@ import { RelayClient } from "../implementations/output/relay/relayClient";
 import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
 import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
 import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
+import { AaveV3Adapter } from "../implementations/output/yield/aaveV3Adapter";
+import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
+import { YieldPoolRanker } from "../../use-cases/implementations/yieldPoolRanker";
+import { YieldOptimizerUseCase } from "../../use-cases/implementations/yieldOptimizerUseCase";
+import type { IYieldOptimizerUseCase } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
+import type { IYieldRepository } from "../../use-cases/interface/yield/IYieldRepository";
+import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
+import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
+import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
+import { YieldCapability, buildNudgeKeyboard } from "../implementations/output/capabilities/yieldCapability";
+import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainObject } from "../../helpers/chainConfig";
+import { YIELD_ENV } from "../../helpers/env/yieldEnv";
+import type { DailyReport } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
+import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -120,6 +134,11 @@ export class AssistantInject {
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
   private _relayClient: IRelayClient | null = null;
   private _relaySwapTool: RelaySwapTool | null = null;
+  private _yieldProtocolRegistry: YieldProtocolRegistry | null = null;
+  private _yieldOptimizerUseCase: IYieldOptimizerUseCase | null = null;
+  private _yieldPoolScanJob: YieldPoolScanJob | null = null;
+  private _userIdleScanJob: UserIdleScanJob | null = null;
+  private _yieldReportJob: YieldReportJob | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -609,6 +628,8 @@ export class AssistantInject {
     for (const command of Object.values(INTENT_COMMAND)) {
       if (command === INTENT_COMMAND.BUY) continue;
       if (command === INTENT_COMMAND.SWAP) continue;
+      if (command === INTENT_COMMAND.YIELD) continue;
+      if (command === INTENT_COMMAND.WITHDRAW) continue;
       registry.register(new SendCapability(command, sendDeps));
     }
 
@@ -634,12 +655,163 @@ export class AssistantInject {
       console.warn("[AssistantInject] /swap capability skipped — signing-request use case not ready (Redis unavailable?)");
     }
 
+    const yieldOptimizer = this.getYieldOptimizerUseCase();
+    if (yieldOptimizer) {
+      registry.register(
+        new YieldCapability({
+          optimizer: yieldOptimizer,
+          miniAppRequestCache: this.getMiniAppRequestCache(),
+          signingRequestUseCase: this._signingRequestUseCase ?? undefined,
+        }),
+      );
+    } else {
+      console.warn("[AssistantInject] /yield capability skipped — Redis unavailable");
+    }
+
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
     // command and isn't continuing a pending capability flow.
     registry.registerDefault(new AssistantChatCapability(this.getUseCase()));
 
     this._capabilityDispatcher = new CapabilityDispatcher(registry, renderer, pending);
     return this._capabilityDispatcher;
+  }
+
+  getYieldRepo(): IYieldRepository {
+    return this.getSqlDB().yieldRepo;
+  }
+
+  getYieldProtocolRegistry(): YieldProtocolRegistry {
+    if (!this._yieldProtocolRegistry) {
+      const adapters: AaveV3Adapter[] = [];
+      for (const chainId of getEnabledYieldChains()) {
+        const yieldConfig = getYieldConfig(chainId);
+        if (!yieldConfig?.aave) continue;
+        const chain = getChainObject(chainId);
+        if (!chain) continue;
+        // Prefer env override for the configured chain; otherwise use default RPC from registry.
+        const rpcUrl =
+          chainId === CHAIN_CONFIG.chainId
+            ? CHAIN_CONFIG.rpcUrl
+            : getChainRpcUrl(chainId);
+        adapters.push(
+          new AaveV3Adapter(
+            chainId,
+            yieldConfig.aave.poolAddress,
+            yieldConfig.aave.dataProviderAddress,
+            rpcUrl,
+            chain,
+          ),
+        );
+      }
+      this._yieldProtocolRegistry = new YieldProtocolRegistry(adapters);
+    }
+    return this._yieldProtocolRegistry;
+  }
+
+  getYieldOptimizerUseCase(): IYieldOptimizerUseCase | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._yieldOptimizerUseCase) {
+      const bot = this.getBot();
+      const sqlDB = this.getSqlDB();
+
+      const sendNudge = async (
+        userId: string,
+        chatId: string,
+        apy: number,
+        bestProtocolId: YIELD_PROTOCOL_ID,
+      ): Promise<void> => {
+        if (!bot) return;
+        const apyPct = (apy * 100).toFixed(2);
+        await bot.api.sendMessage(
+          Number(chatId),
+          `💰 Your idle USDC is earning nothing. ${bestProtocolId} is currently offering ${apyPct}% APY.\n\nHow much would you like to optimize?`,
+          { reply_markup: buildNudgeKeyboard() },
+        );
+      };
+
+      this._yieldOptimizerUseCase = new YieldOptimizerUseCase({
+        protocolRegistry: this.getYieldProtocolRegistry(),
+        ranker: new YieldPoolRanker(),
+        yieldRepo: this.getYieldRepo(),
+        userProfileRepo: sqlDB.userProfiles,
+        chainReader: this.getViemClient(),
+        redis,
+        nudgeCooldownSec: YIELD_ENV.nudgeCooldownSec,
+        idleThresholdUsd: YIELD_ENV.idleUsdcThresholdUsd,
+        sendNudge,
+      });
+    }
+    return this._yieldOptimizerUseCase;
+  }
+
+  getYieldPoolScanJob(): YieldPoolScanJob | undefined {
+    const optimizer = this.getYieldOptimizerUseCase();
+    if (!optimizer) return undefined;
+    if (!this._yieldPoolScanJob) {
+      this._yieldPoolScanJob = new YieldPoolScanJob(optimizer, YIELD_ENV.poolScanIntervalMs);
+    }
+    return this._yieldPoolScanJob;
+  }
+
+  getUserIdleScanJob(): UserIdleScanJob | undefined {
+    const optimizer = this.getYieldOptimizerUseCase();
+    if (!optimizer) return undefined;
+    if (!this._userIdleScanJob) {
+      this._userIdleScanJob = new UserIdleScanJob(
+        optimizer,
+        this.getSqlDB().telegramSessions,
+        YIELD_ENV.userScanIntervalMs,
+      );
+    }
+    return this._userIdleScanJob;
+  }
+
+  getYieldReportJob(): YieldReportJob | undefined {
+    const optimizer = this.getYieldOptimizerUseCase();
+    const redis = this.getRedis();
+    if (!optimizer || !redis) return undefined;
+    if (!this._yieldReportJob) {
+      const sqlDB = this.getSqlDB();
+      const bot = this.getBot();
+
+      const sendReport = async (_userId: string, chatId: string, report: DailyReport): Promise<void> => {
+        if (!bot) return;
+        const lines = ["📊 *Daily Yield Report*", ""];
+        for (const pos of report.positions) {
+          const yieldCfg = getYieldConfig(pos.chainId);
+          const stable = yieldCfg?.stablecoins.find(
+            (s) => s.address.toLowerCase() === pos.tokenAddress.toLowerCase(),
+          );
+          if (!stable) continue;
+          const { decimals, symbol } = stable;
+          const balance = (Number(pos.balanceRaw) / Math.pow(10, decimals)).toFixed(4);
+          const delta = (Number(pos.delta24hRaw) / Math.pow(10, decimals)).toFixed(4);
+          const pnl = (Number(pos.lifetimePnlRaw) / Math.pow(10, decimals)).toFixed(4);
+          const deltaPrefix = Number(pos.delta24hRaw) >= 0 ? "+" : "";
+          lines.push(
+            `*${pos.protocolId}* — ${balance} ${symbol}`,
+            `  24h: ${deltaPrefix}${delta} ${symbol}`,
+            `  Lifetime PnL: ${pnl} ${symbol}`,
+            "",
+          );
+        }
+        await bot.api.sendMessage(Number(chatId), lines.join("\n"), { parse_mode: "Markdown" });
+      };
+
+      this._yieldReportJob = new YieldReportJob(
+        optimizer,
+        this.getYieldRepo(),
+        redis,
+        YIELD_ENV.reportUtcHour,
+        sendReport,
+        async (userId) => {
+          const session = await sqlDB.telegramSessions.findByUserId(userId);
+          return session?.telegramChatId ?? null;
+        },
+      );
+    }
+    return this._yieldReportJob;
   }
 
   getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {
@@ -662,6 +834,7 @@ export class AssistantInject {
       this.getSqlDB().userProfiles,
       this.getSqlDB().telegramSessions,
       this.getTelegramNotifier(),
+      this.getYieldOptimizerUseCase(),
     );
   }
 }

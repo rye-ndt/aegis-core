@@ -16,4 +16,5 @@ export interface ITelegramSessionDB {
   findByUserId(userId: string): Promise<ITelegramSession | null>;
   upsert(session: TelegramSessionUpsert): Promise<void>;
   deleteByChatId(telegramChatId: string): Promise<void>;
+  listActiveUserIds(): Promise<string[]>;
 }

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, gt } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newCurrentUTCEpoch } from "../../../../../helpers/time/dateTime";
 import type {
@@ -63,5 +63,14 @@ export class DrizzleTelegramSessionRepo implements ITelegramSessionDB {
     await this.db
       .delete(telegramSessions)
       .where(eq(telegramSessions.telegramChatId, telegramChatId));
+  }
+
+  async listActiveUserIds(): Promise<string[]> {
+    const now = newCurrentUTCEpoch();
+    const rows = await this.db
+      .select({ userId: telegramSessions.userId })
+      .from(telegramSessions)
+      .where(gt(telegramSessions.expiresAtEpoch, now));
+    return rows.map((r) => r.userId);
   }
 }

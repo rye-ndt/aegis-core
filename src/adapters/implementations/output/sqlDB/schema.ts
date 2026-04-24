@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, text, uuid, unique } from "drizzle-orm/pg-core";
+import { boolean, integer, jsonb, pgTable, text, uuid, unique, index } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -186,6 +186,54 @@ export const userPreferences = pgTable('user_preferences', {
   aegisGuardEnabled: boolean('aegis_guard_enabled').notNull().default(false),
   updatedAtEpoch: integer('updated_at_epoch').notNull(),
 });
+
+export const yieldDeposits = pgTable("yield_deposits", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  chainId: integer("chain_id").notNull(),
+  protocolId: text("protocol_id").notNull(),
+  tokenAddress: text("token_address").notNull(),
+  amountRaw: text("amount_raw").notNull(),
+  requestedPct: integer("requested_pct").notNull(),
+  idleAtRequestRaw: text("idle_at_request_raw").notNull(),
+  txHash: text("tx_hash"),
+  userOpHash: text("user_op_hash"),
+  status: text("status").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+}, (t) => ({
+  userChainProtocolIdx: index().on(t.userId, t.chainId, t.protocolId),
+}));
+
+export const yieldWithdrawals = pgTable("yield_withdrawals", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  chainId: integer("chain_id").notNull(),
+  protocolId: text("protocol_id").notNull(),
+  tokenAddress: text("token_address").notNull(),
+  amountRaw: text("amount_raw").notNull(),
+  txHash: text("tx_hash"),
+  userOpHash: text("user_op_hash"),
+  status: text("status").notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+}, (t) => ({
+  userChainProtocolIdx: index().on(t.userId, t.chainId, t.protocolId),
+}));
+
+export const yieldPositionSnapshots = pgTable("yield_position_snapshots", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id),
+  chainId: integer("chain_id").notNull(),
+  protocolId: text("protocol_id").notNull(),
+  tokenAddress: text("token_address").notNull(),
+  snapshotDateUtc: text("snapshot_date_utc").notNull(),
+  balanceRaw: text("balance_raw").notNull(),
+  principalRaw: text("principal_raw").notNull(),
+  snapshotAtEpoch: integer("snapshot_at_epoch").notNull(),
+}, (t) => ({
+  uniqueSnapshot: unique().on(t.userId, t.chainId, t.protocolId, t.tokenAddress, t.snapshotDateUtc),
+}));
 
 export const tokenDelegations = pgTable('token_delegations', {
   id:             uuid('id').primaryKey(),

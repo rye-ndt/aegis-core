@@ -33,6 +33,15 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   const tokenCrawlerJob = inject.getTokenCrawlerJob();
   tokenCrawlerJob.start();
 
+  const yieldPoolScanJob = inject.getYieldPoolScanJob();
+  yieldPoolScanJob?.start();
+
+  const userIdleScanJob = inject.getUserIdleScanJob();
+  userIdleScanJob?.start();
+
+  const yieldReportJob = inject.getYieldReportJob();
+  yieldReportJob?.start();
+
   const dispatcher = inject.getCapabilityDispatcher();
   if (!dispatcher) {
     console.error("Capability dispatcher unavailable — bot cannot start.");
@@ -53,6 +62,9 @@ import { TelegramAssistantHandler } from "./adapters/implementations/input/teleg
   process.on("SIGINT", async () => {
     console.log("\nShutting down…");
     tokenCrawlerJob.stop();
+    yieldPoolScanJob?.stop();
+    userIdleScanJob?.stop();
+    yieldReportJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();
