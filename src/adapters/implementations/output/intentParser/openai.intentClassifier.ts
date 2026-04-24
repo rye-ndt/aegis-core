@@ -4,7 +4,9 @@ import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
 import type { IIntentClassifier } from "../../../../use-cases/interface/output/intentClassifier.interface";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("intentClassifier");
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 const ClassifySchema = z.object({
@@ -48,7 +50,7 @@ export class OpenAIIntentClassifier implements IIntentClassifier {
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI intent classifier");
 
-    console.log(`[OpenAIIntentClassifier] classified: ${parsed.intentType}`);
+    log.info({ step: "classified", intent: parsed.intentType }, "intent classified");
     return parsed.intentType;
   }
 }

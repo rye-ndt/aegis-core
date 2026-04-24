@@ -6,7 +6,9 @@ import type { IToolRegistrationUseCase, RegisterToolResult } from "../interface/
 import type { IToolManifestDB } from "../interface/output/repository/toolManifest.repo";
 import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { ToolManifestSchema, deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
+import { createLogger } from "../../helpers/observability/logger";
 
+const log = createLogger("toolRegistration");
 const RESERVED_ACTIONS = new Set<string>(Object.values(INTENT_ACTION));
 
 function buildEmbeddingText(manifest: ToolManifest): string {
@@ -85,7 +87,7 @@ export class ToolRegistrationUseCase implements IToolRegistrationUseCase {
         });
         indexed = true;
       } catch (err) {
-        console.error(`[ToolRegistrationUseCase] Failed to index tool "${manifest.toolId}":`, err);
+        log.error({ err, toolId: manifest.toolId }, "vector index failed (non-blocking)");
       }
     }
 
@@ -104,7 +106,7 @@ export class ToolRegistrationUseCase implements IToolRegistrationUseCase {
       try {
         await this.toolIndexService.delete(record.id);
       } catch (err) {
-        console.error(`[ToolRegistrationUseCase] Failed to remove tool "${toolId}" from vector store:`, err);
+        log.error({ err, toolId }, "vector delete failed (tool already deactivated in DB)");
       }
     }
   }

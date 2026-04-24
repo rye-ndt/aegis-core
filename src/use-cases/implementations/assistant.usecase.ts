@@ -3,6 +3,7 @@ import { newUuid } from "../../helpers/uuid";
 import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { CONVERSATION_STATUSES } from "../../helpers/enums/statuses.enum";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
+import { createLogger } from "../../helpers/observability/logger";
 import type {
   IAssistantUseCase,
   IChatInput,
@@ -20,6 +21,7 @@ import type {
   Message,
 } from "../interface/output/repository/message.repo";
 
+const log = createLogger("assistantUseCase");
 const DEFAULT_SYSTEM_PROMPT =
   `You are an AI trading assistant on ${CHAIN_CONFIG.name}. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.`;
 const DEFAULT_MAX_TOOL_ROUNDS = 10;
@@ -78,29 +80,38 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";
 
-    console.log(`[AssistantUseCase] chat start userId=${input.userId} conversationId=${conversationId} historyLength=${slidingWindow.length - 1} availableTools=[${availableTools.map((t) => t.name).join(", ")}]`);
+    log.info(
+      { step: "history-loaded", count: slidingWindow.length - 1, conversationId, userId: input.userId },
+      "chat started",
+    );
+    log.debug({ choice: "tools-loaded", tools: availableTools.map((t) => t.name) }, "tool registry built");
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      console.log(`[AssistantUseCase] LLM round ${round + 1}/${MAX_TOOL_ROUNDS} — sending ${slidingWindow.length} messages`);
+      const llmStart = Date.now();
       const llmResponse = await this.orchestrator.chat({
         systemPrompt,
         conversationHistory: slidingWindow,
         availableTools,
       });
-      console.log(`[AssistantUseCase] LLM round ${round + 1} response — toolCalls=${llmResponse.toolCalls?.length ?? 0} promptTokens=${llmResponse.usage?.promptTokens ?? "?"} completionTokens=${llmResponse.usage?.completionTokens ?? "?"}`);
+      const latencyMs = Date.now() - llmStart;
+      const toolCallCount = llmResponse.toolCalls?.length ?? 0;
+      log.info(
+        { step: "llm-response", toolCallCount, latencyMs, promptTokens: llmResponse.usage?.promptTokens ?? "?", completionTokens: llmResponse.usage?.completionTokens ?? "?" },
+        `LLM round ${round + 1} complete`,
+      );
 
       if (!llmResponse.toolCalls?.length) {
         finalReply = llmResponse.text ?? "";
-        console.log(`[AssistantUseCase] LLM final reply (no tool calls) length=${finalReply.length}`);
+        log.debug({ choice: "final-reply", replyLength: finalReply.length }, "no tool calls — final reply");
         break;
       }
 
-      console.log(`[AssistantUseCase] executing tools: [${llmResponse.toolCalls.map((tc) => tc.toolName).join(", ")}]`);
+      log.debug({ choice: "tool-calls", tools: llmResponse.toolCalls.map((tc) => tc.toolName) }, "executing tools");
       const roundResults = await Promise.all(
         llmResponse.toolCalls.map((tc) => this.executeTool(tc, toolRegistry)),
       );
       for (const r of roundResults) {
-        console.log(`[AssistantUseCase] tool "${r.toolName}" done success=${r.result.success} latencyMs=${r.latencyMs}`);
+        log.info({ step: "tool-result", toolName: r.toolName, success: r.result.success, latencyMs: r.latencyMs }, "tool complete");
       }
 
       const toolCallsJson = JSON.stringify(llmResponse.toolCalls);

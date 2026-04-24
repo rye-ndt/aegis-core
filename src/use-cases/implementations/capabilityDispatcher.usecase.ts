@@ -6,7 +6,9 @@ import type { ICapabilityRegistry } from "../interface/output/capabilityRegistry
 import type { IPendingCollectionStore } from "../interface/output/pendingCollectionStore.interface";
 import type { IArtifactRenderer } from "../interface/output/artifactRenderer.interface";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
+import { createLogger } from "../../helpers/observability/logger";
 
+const log = createLogger("capabilityDispatcher");
 const PENDING_TTL_SECONDS = 600;
 
 export class CapabilityDispatcher implements ICapabilityDispatcher {
@@ -34,13 +36,22 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
 
     let capability = matchFirst;
     let resuming: Record<string, unknown> | undefined;
-    if (!capability && prior && prior.expiresAt > now) {
+    let resolution: "matched" | "resumed" | "default" | "none";
+    if (matchFirst) {
+      resolution = "matched";
+    } else if (prior && prior.expiresAt > now) {
       capability = this.registry.byId(prior.capabilityId) ?? null;
       resuming = prior.state;
-    }
-    if (!capability) {
+      resolution = "resumed";
+    } else {
       capability = this.registry.getDefault();
+      resolution = capability ? "default" : "none";
     }
+
+    log.debug(
+      { choice: resolution, capabilityId: capability?.id ?? null, channelId: ctx.channelId, hasPrior: !!prior },
+      "capability resolved",
+    );
 
     if (!capability) {
       // No capability matched and nothing pending — caller may fall through
@@ -51,15 +62,24 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
     // If we matched a fresh command, any prior pending state for this
     // channel is abandoned.
     if (matchFirst && prior) {
+      log.debug({ choice: "pending-abandoned", channelId: ctx.channelId, priorCapabilityId: prior.capabilityId }, "abandoning stale pending");
       await this.pending.clear(ctx.channelId);
       resuming = undefined;
     }
 
-    const result = await capability.collect(ctx, resuming);
+    log.info({ step: "capability-invoke", capabilityId: capability.id, channelId: ctx.channelId, resuming: !!resuming }, "invoking capability");
+    let result;
+    try {
+      result = await capability.collect(ctx, resuming);
+    } catch (err) {
+      log.error({ err, capabilityId: capability.id, channelId: ctx.channelId }, "capability.collect threw");
+      throw err;
+    }
 
     if (result.kind === "terminal") {
       await this.pending.clear(ctx.channelId);
       await this.renderer.render(result.artifact, ctx);
+      log.info({ step: "capability-done", capabilityId: capability.id, kind: "terminal" }, "capability complete");
       return { handled: true };
     }
 
@@ -78,13 +98,21 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
         },
         ctx,
       );
+      log.info({ step: "capability-done", capabilityId: capability.id, kind: "ask" }, "capability asking follow-up");
       return { handled: true };
     }
 
     // ok
     await this.pending.clear(ctx.channelId);
-    const artifact = await capability.run(result.params, ctx);
+    let artifact;
+    try {
+      artifact = await capability.run(result.params, ctx);
+    } catch (err) {
+      log.error({ err, capabilityId: capability.id, channelId: ctx.channelId }, "capability.run threw");
+      throw err;
+    }
     await this.renderer.render(artifact, ctx);
+    log.info({ step: "capability-done", capabilityId: capability.id, kind: "ok" }, "capability complete");
     return { handled: true };
   }
 }

@@ -6,7 +6,9 @@ import type { ISchemaCompiler, CompileResult } from "../../../../use-cases/inter
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("schemaCompiler");
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 const CompileSchema = z.object({
@@ -45,7 +47,7 @@ function buildSystemPrompt(
   const addressFields = extractAddressFields(rawSchema);
   const visibleSchema = stripAddressFields(rawSchema);
 
-  console.log(`[OpenAISchemaCompiler] addressFields=${JSON.stringify(addressFields)} visibleSchema=${JSON.stringify(visibleSchema)}`);
+  log.debug({ addressFields, visibleSchema }, "building schema compiler prompt");
 
   const hasDualSchema =
     manifest.requiredFields &&
@@ -128,8 +130,16 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
 
     const params = JSON.parse(parsed.paramsJson) as Record<string, unknown>;
 
-    console.log(
-      `[OpenAISchemaCompiler] params=${JSON.stringify(params)} missingQuestion=${parsed.missingQuestion} from=${parsed.fromTokenSymbol} to=${parsed.toTokenSymbol} resolverFieldsJson=${parsed.resolverFieldsJson}`,
+    log.info(
+      {
+        step: "schema-compiled",
+        paramKeys: Object.keys(params),
+        missingQuestion: parsed.missingQuestion,
+        fromToken: parsed.fromTokenSymbol,
+        toToken: parsed.toTokenSymbol,
+        hasResolverFields: !!parsed.resolverFieldsJson,
+      },
+      "schema compiled",
     );
 
     const tokenSymbols: CompileResult["tokenSymbols"] = {};
@@ -143,10 +153,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
           Record<string, string>
         >;
       } catch {
-        // Malformed JSON from LLM — fall through to undefined (legacy path continues)
-        console.warn(
-          "[OpenAISchemaCompiler] could not parse resolverFieldsJson, ignoring",
-        );
+        log.warn({ reason: "malformed_resolver_fields_json" }, "could not parse resolverFieldsJson, ignoring");
       }
     }
 

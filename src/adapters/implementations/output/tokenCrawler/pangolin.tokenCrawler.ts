@@ -1,5 +1,7 @@
 import type { CrawledToken, ITokenCrawlerJob } from "../../../../use-cases/interface/output/tokenCrawler.interface";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("pangolinTokenCrawler");
 const DEFAULT_PANGOLIN_LIST_URL = "https://raw.githubusercontent.com/pangolindex/tokenlists/main/pangolin.tokenlist.json";
 const PANGOLIN_TOKEN_LIST_URL = process.env.PANGOLIN_TOKEN_LIST_URL ?? DEFAULT_PANGOLIN_LIST_URL;
 
@@ -9,7 +11,7 @@ export class PangolinTokenCrawler implements ITokenCrawlerJob {
     try {
       const res = await fetch(url);
       if (!res.ok) {
-        console.error(`[PangolinTokenCrawler] HTTP ${res.status} from ${url}`);
+        log.error({ err: `HTTP ${res.status}`, url }, "token list fetch failed");
         return [];
       }
       const json = await res.json() as { tokens?: unknown[] };
@@ -39,7 +41,7 @@ export class PangolinTokenCrawler implements ITokenCrawlerJob {
       }
       return result;
     } catch (err) {
-      console.error("[PangolinTokenCrawler] fetch failed:", err);
+      log.error({ err }, "token list fetch failed");
       return [];
     }
   }

@@ -1,6 +1,9 @@
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import type { PoolStatus } from "../interface/yield/IYieldProtocolAdapter";
 import type { IYieldPoolRanker, RankedPool } from "../interface/yield/IYieldPoolRanker";
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("yieldPoolRanker");
 
 const MIN_LIQUIDITY_USD = 100_000;
 const HIGH_UTILIZATION_THRESHOLD = 0.95;
@@ -28,14 +31,25 @@ export class YieldPoolRanker implements IYieldPoolRanker {
     for (const { protocolId, status } of statuses) {
       const liquidityUsd =
         Number(status.liquidityRaw) / Math.pow(10, tokenDecimals);
-      if (liquidityUsd < MIN_LIQUIDITY_USD) continue;
+      if (liquidityUsd < MIN_LIQUIDITY_USD) {
+        log.debug({ choice: "skip", reason: "low-liquidity", protocolId, liquidityUsd }, "pool disqualified");
+        continue;
+      }
 
       let score = computeScore(status.supplyApy, history[protocolId] ?? []);
 
       if (status.utilization > HIGH_UTILIZATION_THRESHOLD) {
+        log.debug(
+          { choice: "penalty", reason: "high-utilization", protocolId, utilization: status.utilization },
+          "pool penalized",
+        );
         score *= HIGH_UTILIZATION_PENALTY;
       }
 
+      log.info(
+        { step: "pool-ranked", protocolId, score, apy: status.supplyApy, liquidityUsd, utilization: status.utilization },
+        "pool ranked",
+      );
       ranked.push({ protocolId, score, apy: status.supplyApy });
     }
 

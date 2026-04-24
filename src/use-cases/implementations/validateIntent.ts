@@ -12,6 +12,9 @@ import {
   ConversationLimitError,
   WINDOW_SIZE,
 } from "../interface/input/intent.errors";
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("validateIntent");
 
 // TOOL_CATEGORY.SWAP === INTENT_ACTION.SWAP ("swap") so they share one entry.
 // TOOL_CATEGORY.ERC20_TRANSFER ("erc20_transfer") differs from INTENT_ACTION.TRANSFER ("transfer"),
@@ -83,10 +86,7 @@ export function validateIntent(
     const categoryRequired = (REQUIRED_FIELDS[manifest.category] ?? []) as string[];
     const templateRequired = extractManifestRequiredFields(manifest) as string[];
     required = [...new Set([...categoryRequired, ...templateRequired])];
-    console.log(
-      `[validateIntent] manifest category="${manifest.category}" required=[${required.join(", ")}]` +
-      (templateRequired.length ? ` (${templateRequired.join(", ")} from step templates)` : ""),
-    );
+    log.debug({ choice: "manifest-required", category: manifest.category, required, templateRequired }, "required fields resolved");
   } else {
     required = (REQUIRED_FIELDS[intent.action] ?? []) as string[];
   }

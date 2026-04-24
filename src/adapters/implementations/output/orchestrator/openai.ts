@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
+import { createLogger } from "../../../../helpers/observability/logger";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
@@ -13,6 +14,8 @@ import type {
   IToolCall,
   IOrchestratorMessage,
 } from "../../../../use-cases/interface/output/orchestrator.interface";
+
+const log = createLogger("openaiOrchestrator");
 
 export class OpenAIOrchestrator implements ILLMOrchestrator {
   private readonly client: OpenAI;
@@ -66,7 +69,7 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
       },
     }));
 
-    console.log(`[OpenAIOrchestrator] calling model=${this.model} messages=${messages.length} tools=${tools.length}`);
+    log.debug({ model: this.model, messageCount: messages.length, toolCount: tools.length }, "calling model");
     const startedAt = Date.now();
     const response = await openaiLimiter(() =>
       this.client.chat.completions.create({
@@ -81,10 +84,17 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     const completionTokens = response.usage?.completion_tokens ?? 0;
     metricsRegistry.recordLlmCall(elapsed, prompt, cached, completionTokens);
     const cacheHitRatio = prompt > 0 ? (cached / prompt).toFixed(2) : "0.00";
-    console.log(
-      `[OpenAIOrchestrator] ms=${elapsed} finish_reason=${response.choices[0]?.finish_reason} ` +
-      `promptTokens=${prompt} cachedTokens=${cached} cacheHitRatio=${cacheHitRatio} ` +
-      `completionTokens=${completionTokens}`,
+    log.info(
+      {
+        step: "llm-response",
+        latencyMs: elapsed,
+        finishReason: response.choices[0]?.finish_reason,
+        promptTokens: prompt,
+        cachedTokens: cached,
+        cacheHitRatio,
+        completionTokens,
+      },
+      "model response received",
     );
 
     const choice = response.choices[0];
@@ -109,6 +119,11 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
             unknown
           >,
         }));
+
+      for (const tc of toolCalls) {
+        log.debug({ choice: "tool", name: tc.toolName, callId: tc.id }, "tool call dispatched");
+      }
+
       return { toolCalls, usage };
     }
 

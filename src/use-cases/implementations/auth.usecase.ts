@@ -11,6 +11,9 @@ import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../interface/output/telegramNotifier.interface";
 import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("authUseCase");
 const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
 export class AuthUseCaseImpl implements IAuthUseCase {
@@ -88,7 +91,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
 
     if (this.userProfileCache) {
       await this.userProfileCache.store(user.id, profile, SESSION_TTL_SECONDS).catch((err) => {
-        console.error("[Auth] failed to store user profile:", err);
+        log.error({ err }, "failed to store user profile in cache");
       });
     }
 
@@ -97,7 +100,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         input.telegramChatId,
         AuthUseCaseImpl.WELCOME_BACK_TEXT,
       ).catch((err) => {
-        console.error("[Auth] failed to send Telegram welcome message:", err);
+        log.error({ err }, "failed to send Telegram welcome message");
       });
     }
 
@@ -106,18 +109,16 @@ export class AuthUseCaseImpl implements IAuthUseCase {
 
   async resolveUserId(privyToken: string): Promise<string | null> {
     if (!this.privyAuthService) {
-      console.warn("[Auth] resolveUserId: privyAuthService not configured");
+      log.warn({ reason: "privy_not_configured" }, "resolveUserId: privyAuthService not configured");
       return null;
     }
     try {
       const { privyDid } = await this.privyAuthService.verifyTokenLite(privyToken);
       const user = await this.userDB.findByPrivyDid(privyDid);
-      if (!user) console.warn(`[Auth] resolveUserId: no user for privyDid=${privyDid}`);
+      if (!user) log.warn({ privyDid }, "resolveUserId: no user found for privyDid");
       return user?.id ?? null;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const tokenPreview = `${privyToken.slice(0, 12)}...${privyToken.slice(-8)} (len=${privyToken.length})`;
-      console.warn(`[Auth] resolveUserId: verifyTokenLite failed — ${msg} — token=${tokenPreview}`);
+      log.warn({ err, tokenLen: privyToken.length }, "resolveUserId: verifyTokenLite failed");
       return null;
     }
   }

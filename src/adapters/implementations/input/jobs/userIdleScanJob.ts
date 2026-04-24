@@ -1,7 +1,9 @@
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import { isWorker } from "../../../../helpers/env/role";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("userIdleScanJob");
 const CONCURRENCY = 5;
 
 async function runWithConcurrency<T>(
@@ -29,7 +31,7 @@ export class UserIdleScanJob {
 
   start(): void {
     if (!isWorker()) {
-      console.log("[UserIdleScanJob] not a worker role — not starting.");
+      log.info("not a worker role — not starting.");
       return;
     }
     this.run();
@@ -44,9 +46,12 @@ export class UserIdleScanJob {
   }
 
   private run(): void {
-    console.log("[UserIdleScanJob] scanning idle balances...");
-    this.scanAll().catch((err) => {
-      console.error("[UserIdleScanJob] error:", err);
+    const start = Date.now();
+    log.info({ step: "tick-start" }, "scanning idle balances");
+    this.scanAll().then(() => {
+      log.info({ step: "tick-end", durationMs: Date.now() - start }, "idle scan complete");
+    }).catch((err) => {
+      log.error({ err }, "idle scan error");
     });
   }
 
@@ -62,7 +67,7 @@ export class UserIdleScanJob {
         try {
           await this.optimizer.scanIdleForUser(userId);
         } catch (err) {
-          console.error(`[UserIdleScanJob] userId=${userId}:`, err);
+          log.error({ err, userId }, "per-user idle scan error");
         }
       },
       CONCURRENCY,

@@ -17,6 +17,9 @@ import type {
 } from "../interface/yield/IYieldOptimizerUseCase";
 import { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import type { IChainReader } from "../interface/output/blockchain/chainReader.interface";
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("yieldOptimizer");
 
 const APY_SERIES_CAP = 84;
 
@@ -120,7 +123,7 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
 
             statuses.push({ protocolId: adapter.id, status });
           } catch (err) {
-            console.error(`[YieldPoolScan] adapter ${adapter.id} chain ${chainId}:`, err);
+            log.error({ err, adapterId: adapter.id, chainId }, "adapter getPoolStatus failed");
           }
         }
 
@@ -128,7 +131,10 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
 
         const ranked = this.deps.ranker.rank(statuses, historyMap, stablecoin.decimals);
         const winner = ranked[0];
-        if (!winner) continue;
+        if (!winner) {
+          log.debug({ choice: "no-winner", chainId, token: stablecoin.address, candidates: statuses.length }, "no ranked winner");
+          continue;
+        }
 
         const bestKey = redisKeyBest(chainId, stablecoin.address);
         const bestPayload: BestPool = {
@@ -138,6 +144,10 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
           ts: newCurrentUTCEpoch(),
         };
         await this.deps.redis.set(bestKey, JSON.stringify(bestPayload), "EX", 3 * 60 * 60);
+        log.info(
+          { step: "winner-stored", chainId, token: stablecoin.address, protocolId: winner.protocolId, score: winner.score, apy: winner.apy },
+          "best pool stored",
+        );
       }
     }
   }
@@ -145,16 +155,19 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
   async scanIdleForUser(userId: string): Promise<ScanResult> {
     const cooldownKey = redisKeyNudgeCooldown(userId);
     if (await this.deps.redis.exists(cooldownKey)) {
+      log.debug({ choice: "skip", reason: "cooldown", userId }, "user skipped");
       return { skipped: true, reason: "cooldown" };
     }
 
     const pendingKey = redisKeyNudgePending(userId);
     if (await this.deps.redis.exists(pendingKey)) {
+      log.debug({ choice: "skip", reason: "nudge_pending", userId }, "user skipped");
       return { skipped: true, reason: "nudge_pending" };
     }
 
     const profile = await this.deps.userProfileRepo.findByUserId(userId);
     if (!profile?.smartAccountAddress || !profile.telegramChatId) {
+      log.debug({ choice: "skip", reason: "no_profile", userId }, "user skipped");
       return { skipped: true, reason: "no_profile" };
     }
 
@@ -173,26 +186,39 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     let balance: bigint;
     try {
       balance = await this.deps.chainReader.getErc20Balance(stablecoin.address, userAddress);
-    } catch {
+    } catch (err) {
+      log.error({ err, userId, chainId, token: stablecoin.address }, "getErc20Balance failed");
       return { skipped: true, reason: "rpc_error" };
     }
 
     const balanceUsd = Number(balance) / Math.pow(10, stablecoin.decimals);
     if (balanceUsd < this.deps.idleThresholdUsd) {
+      log.debug(
+        { choice: "skip", reason: "below_threshold", userId, balanceUsd, threshold: this.deps.idleThresholdUsd },
+        "user skipped",
+      );
       return { skipped: true, reason: "below_threshold" };
     }
 
     const bestKey = redisKeyBest(chainId, stablecoin.address);
     const bestRaw = await this.deps.redis.get(bestKey);
-    if (!bestRaw) return { skipped: true, reason: "no_winner" };
+    if (!bestRaw) {
+      log.debug({ choice: "skip", reason: "no_winner", userId, chainId }, "user skipped");
+      return { skipped: true, reason: "no_winner" };
+    }
 
     let best: BestPool;
     try {
       best = JSON.parse(bestRaw) as BestPool;
-    } catch {
+    } catch (err) {
+      log.error({ err, userId, bestKey }, "best-pool parse failed");
       return { skipped: true, reason: "parse_error" };
     }
 
+    log.info(
+      { step: "user-nudged", userId, chainId, balanceUsd, protocolId: best.protocolId, apy: best.apy },
+      "sending idle-balance nudge",
+    );
     await this.deps.sendNudge(userId, profile.telegramChatId, best.apy, best.protocolId);
 
     await this.deps.redis.set(cooldownKey, "1", "EX", this.deps.nudgeCooldownSec);
@@ -406,7 +432,7 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
         const position = await adapter.getUserPosition(userAddress, pos.tokenAddress as Address);
         balanceRaw = position?.balanceRaw ?? 0n;
       } catch (err) {
-        console.error(`[getPositions] getUserPosition ${pos.protocolId}:`, err);
+        log.error({ err, protocolId: pos.protocolId }, "getUserPosition failed");
         continue;
       }
 
@@ -438,7 +464,7 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
         const status = await adapter.getPoolStatus(pos.tokenAddress as Address);
         apy = status.supplyApy;
       } catch (err) {
-        console.error(`[getPositions] getPoolStatus ${pos.protocolId}:`, err);
+        log.error({ err, protocolId: pos.protocolId }, "getPoolStatus failed");
       }
 
       totalPrincipalRaw += principalRaw;

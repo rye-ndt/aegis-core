@@ -1,5 +1,12 @@
 # context.md
 
+## 2026-04-24 — Logging architecture decision (pre-implementation note)
+
+Plan: `be/constructions/logging-plan.md` (pino + helper-style).
+
+**Intentional deviation from strict hexagonal — do not "clean up":**
+The logger lives at `src/helpers/observability/logger.ts` as a singleton factory (`createLogger(scope)`), **not** as an `ILogger` port with adapters. This matches the existing pattern for cross-cutting concerns (`metricsRegistry.ts`, `chainConfig.ts`, `concurrency/openaiLimiter.ts`, `env/yieldEnv.ts`) and was confirmed by the user. A future agent that "refactors logging into a port for hexagonal purity" is undoing a deliberate decision — leave it alone.
+
 ## 2026-04-22T12:28 — Frictionless Delegation Flow — Full Implementation
 
 ### Task summary

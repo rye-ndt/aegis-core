@@ -1,5 +1,8 @@
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import { isWorker } from "../../../../helpers/env/role";
+import { createLogger } from "../../../../helpers/observability/logger";
+
+const log = createLogger("yieldPoolScanJob");
 
 export class YieldPoolScanJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -11,7 +14,7 @@ export class YieldPoolScanJob {
 
   start(): void {
     if (!isWorker()) {
-      console.log("[YieldPoolScanJob] not a worker role — not starting.");
+      log.info("not a worker role — not starting.");
       return;
     }
     this.run();
@@ -26,9 +29,12 @@ export class YieldPoolScanJob {
   }
 
   private run(): void {
-    console.log("[YieldPoolScanJob] scanning pools...");
-    this.optimizer.runPoolScan().catch((err) => {
-      console.error("[YieldPoolScanJob] error:", err);
+    const start = Date.now();
+    log.info({ step: "tick-start" }, "scanning pools");
+    this.optimizer.runPoolScan().then(() => {
+      log.info({ step: "tick-end", durationMs: Date.now() - start }, "pool scan complete");
+    }).catch((err) => {
+      log.error({ err }, "pool scan error");
     });
   }
 }

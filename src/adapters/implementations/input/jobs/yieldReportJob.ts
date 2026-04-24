@@ -2,7 +2,9 @@ import type Redis from "ioredis";
 import { isWorker } from "../../../../helpers/env/role";
 import type { IYieldOptimizerUseCase, DailyReport } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { IYieldRepository } from "../../../../use-cases/interface/yield/IYieldRepository";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("yieldReportJob");
 const TICK_INTERVAL_MS = 5 * 60 * 1000;
 const REPORT_DONE_TTL_SEC = 25 * 60 * 60;
 
@@ -20,7 +22,7 @@ export class YieldReportJob {
 
   start(): void {
     if (!isWorker()) {
-      console.log("[YieldReportJob] not a worker role — not starting.");
+      log.info("not a worker role — not starting.");
       return;
     }
     this.tick();
@@ -36,7 +38,7 @@ export class YieldReportJob {
 
   private tick(): void {
     this.maybeRunReports().catch((err) => {
-      console.error("[YieldReportJob] error:", err);
+      log.error({ err }, "report job error");
     });
   }
 
@@ -49,7 +51,8 @@ export class YieldReportJob {
     const alreadyDone = await this.redis.exists(doneKey);
     if (alreadyDone) return;
 
-    console.log("[YieldReportJob] sending daily reports...");
+    const start = Date.now();
+    log.info({ step: "tick-start", date: today }, "sending daily reports");
 
     const userIds = await this.yieldRepo.listUsersWithPositions();
     for (const userId of userIds) {
@@ -62,10 +65,11 @@ export class YieldReportJob {
 
         await this.sendReport(userId, chatId, report);
       } catch (err) {
-        console.error(`[YieldReportJob] userId=${userId}:`, err);
+        log.error({ err, userId }, "per-user report error");
       }
     }
 
     await this.redis.set(doneKey, "1", "EX", REPORT_DONE_TTL_SEC);
+    log.info({ step: "tick-end", durationMs: Date.now() - start, userCount: userIds.length }, "daily reports sent");
   }
 }
