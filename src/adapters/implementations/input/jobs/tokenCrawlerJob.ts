@@ -1,4 +1,5 @@
 import type { ITokenIngestionUseCase } from "../../../../use-cases/interface/input/tokenIngestion.interface";
+import { isWorker } from "../../../../helpers/env/role";
 
 export class TokenCrawlerJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -10,6 +11,10 @@ export class TokenCrawlerJob {
   ) {}
 
   start(): void {
+    if (!isWorker()) {
+      console.log("[TokenCrawlerJob] not a worker role — not starting.");
+      return;
+    }
     this.run();
     this.timer = setInterval(() => this.run(), this.intervalMs);
   }

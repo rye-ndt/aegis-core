@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
@@ -32,15 +33,17 @@ export class OpenAIIntentClassifier implements IIntentClassifier {
         ? messages[0]!
         : messages.map((m, i) => `[Message ${i + 1}]: ${m}`).join("\n");
 
-    const response = await this.client.chat.completions.parse({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userContent },
-      ],
-      response_format: zodResponseFormat(ClassifySchema, "classification"),
-      max_tokens: 50,
-    });
+    const response = await openaiLimiter(() =>
+      this.client.chat.completions.parse({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: userContent },
+        ],
+        response_format: zodResponseFormat(ClassifySchema, "classification"),
+        max_tokens: 50,
+      }),
+    );
 
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI intent classifier");

@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   Message,
@@ -24,13 +24,14 @@ export class DrizzleMessageRepo implements IMessageDB {
     });
   }
 
-  async findByConversationId(conversationId: string): Promise<Message[]> {
-    const rows = await this.db
+  async findByConversationId(conversationId: string, limit?: number): Promise<Message[]> {
+    const query = this.db
       .select()
       .from(messages)
-      .where(eq(messages.conversationId, conversationId));
-
-    return rows.map((r) => ({
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(desc(messages.createdAtEpoch));
+    const rows = limit === undefined ? await query : await query.limit(limit);
+    return rows.slice().reverse().map((r) => ({
       ...r,
       role: r.role as MESSAGE_ROLE,
       toolName: r.toolName ? (r.toolName as TOOL_TYPE) : undefined,

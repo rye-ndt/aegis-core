@@ -32,6 +32,9 @@ import type {
 import type { DelegationRecord as SessionDelegationRecord } from "../../../../use-cases/interface/output/cache/sessionDelegation.cache";
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
+import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
+
+const METRICS_TOKEN = process.env.METRICS_TOKEN;
 
 const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
   z.object({
@@ -170,6 +173,7 @@ export class HttpApiServer {
       "POST /delegation/grant":         (req, res) => this.handlePostDelegationGrant(req, res),
       "GET /delegation/grant":          (req, res) => this.handleGetDelegationGrant(req, res),
       "GET /yield/positions":           (req, res) => this.handleGetYieldPositions(req, res),
+      "GET /metrics":                   (req, res) => this.handleGetMetrics(req, res),
     };
   }
 
@@ -893,6 +897,19 @@ export class HttpApiServer {
 
     const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
     return this.sendJson(res, 200, { delegations });
+  }
+
+  private async handleGetMetrics(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    if (METRICS_TOKEN) {
+      const header = req.headers["authorization"];
+      if (header !== `Bearer ${METRICS_TOKEN}`) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
+    }
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify(metricsRegistry.snapshot()));
   }
 
   private async handleGetYieldPositions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

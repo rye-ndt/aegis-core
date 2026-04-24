@@ -22,7 +22,8 @@ interface ChainEntry {
   chain: Chain;
   nativeSymbol: string;
   name: string;
-  defaultRpcUrl: string;
+  /** Ordered list of RPC URLs. First is primary; subsequent are fallbacks. */
+  defaultRpcUrls: string[];
   privyNetwork: string;
   /** Common short names the user might type: 'base', 'arb', 'polygon'. */
   aliases: string[];
@@ -36,7 +37,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: avalancheFuji,
     nativeSymbol: "AVAX",
     name: "Avalanche Fuji",
-    defaultRpcUrl: "https://api.avax-test.network/ext/bc/C/rpc",
+    defaultRpcUrls: [
+      "https://api.avax-test.network/ext/bc/C/rpc",
+      "https://avalanche-fuji-c-chain-rpc.publicnode.com",
+      "https://rpc.ankr.com/avalanche_fuji",
+    ],
     privyNetwork: "avalanche-fuji",
     aliases: ["fuji", "avalanche-fuji"],
     relayEnabled: false,
@@ -45,7 +50,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: avalanche,
     nativeSymbol: "AVAX",
     name: "Avalanche",
-    defaultRpcUrl: "https://api.avax.network/ext/bc/C/rpc",
+    defaultRpcUrls: [
+      "https://api.avax.network/ext/bc/C/rpc",
+      "https://avalanche-c-chain-rpc.publicnode.com",
+      "https://rpc.ankr.com/avalanche",
+    ],
     privyNetwork: "avalanche",
     aliases: ["avalanche", "avax"],
     relayEnabled: true,
@@ -68,7 +77,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: mainnet,
     nativeSymbol: "ETH",
     name: "Ethereum",
-    defaultRpcUrl: "https://cloudflare-eth.com",
+    defaultRpcUrls: [
+      "https://cloudflare-eth.com",
+      "https://ethereum-rpc.publicnode.com",
+      "https://rpc.ankr.com/eth",
+    ],
     privyNetwork: "ethereum",
     aliases: ["ethereum", "eth", "mainnet"],
     relayEnabled: true,
@@ -77,7 +90,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: base,
     nativeSymbol: "ETH",
     name: "Base",
-    defaultRpcUrl: "https://mainnet.base.org",
+    defaultRpcUrls: [
+      "https://mainnet.base.org",
+      "https://base-rpc.publicnode.com",
+      "https://base.llamarpc.com",
+    ],
     privyNetwork: "base",
     aliases: ["base"],
     relayEnabled: true,
@@ -86,7 +103,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: polygon,
     nativeSymbol: "POL",
     name: "Polygon",
-    defaultRpcUrl: "https://polygon-rpc.com",
+    defaultRpcUrls: [
+      "https://polygon-rpc.com",
+      "https://polygon-bor-rpc.publicnode.com",
+      "https://rpc.ankr.com/polygon",
+    ],
     privyNetwork: "polygon",
     aliases: ["polygon", "matic"],
     relayEnabled: true,
@@ -95,7 +116,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: arbitrum,
     nativeSymbol: "ETH",
     name: "Arbitrum One",
-    defaultRpcUrl: "https://arb1.arbitrum.io/rpc",
+    defaultRpcUrls: [
+      "https://arb1.arbitrum.io/rpc",
+      "https://arbitrum-one-rpc.publicnode.com",
+      "https://rpc.ankr.com/arbitrum",
+    ],
     privyNetwork: "arbitrum",
     aliases: ["arbitrum", "arb", "arbitrum-one"],
     relayEnabled: true,
@@ -104,7 +129,11 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     chain: optimism,
     nativeSymbol: "ETH",
     name: "Optimism",
-    defaultRpcUrl: "https://mainnet.optimism.io",
+    defaultRpcUrls: [
+      "https://mainnet.optimism.io",
+      "https://optimism-rpc.publicnode.com",
+      "https://rpc.ankr.com/optimism",
+    ],
     privyNetwork: "optimism",
     aliases: ["optimism", "op"],
     relayEnabled: true,
@@ -119,8 +148,13 @@ export function getEnabledYieldChains(): number[] {
   return YIELD_ENV.enabledChainIds.filter((id) => CHAIN_REGISTRY[id]?.yield != null);
 }
 
+export function getChainRpcUrls(chainId: number): string[] {
+  return CHAIN_REGISTRY[chainId]?.defaultRpcUrls ?? [];
+}
+
+/** @deprecated use getChainRpcUrls */
 export function getChainRpcUrl(chainId: number): string {
-  return CHAIN_REGISTRY[chainId]?.defaultRpcUrl ?? "";
+  return getChainRpcUrls(chainId)[0] ?? "";
 }
 
 export function getChainObject(chainId: number): Chain | null {
@@ -158,12 +192,21 @@ const DEFAULT_CHAIN_ID = 43113;
 const chainId = parseInt(process.env.CHAIN_ID ?? String(DEFAULT_CHAIN_ID), 10);
 const entry = CHAIN_REGISTRY[chainId] ?? CHAIN_REGISTRY[DEFAULT_CHAIN_ID]!;
 
+const envOverride = process.env.RPC_URL;
+const envFallbacks = process.env.RPC_URL_FALLBACKS?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
+
+const rpcUrls = envOverride
+  ? [envOverride, ...envFallbacks]
+  : entry.defaultRpcUrls;
+
 export const CHAIN_CONFIG = {
   chainId,
   chain: entry.chain,
   nativeSymbol: entry.nativeSymbol,
   name: entry.name,
-  rpcUrl: process.env.RPC_URL ?? entry.defaultRpcUrl,
+  /** @deprecated Single URL retained for legacy callers. Use `rpcUrls`. */
+  rpcUrl: rpcUrls[0]!,
+  rpcUrls,
   bundlerUrl: process.env.AVAX_BUNDLER_URL,
   paymasterUrl: process.env.AVAX_PAYMASTER_URL,
 } as const;

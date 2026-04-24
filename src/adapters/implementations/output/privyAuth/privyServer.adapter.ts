@@ -1,12 +1,25 @@
 import { PrivyClient } from "@privy-io/server-auth";
 import type { User } from "@privy-io/server-auth";
+import { LRUCache } from "lru-cache";
+import { createHash } from "node:crypto";
 import type { IPrivyAuthService, PrivyUserProfile } from "../../../../use-cases/interface/output/privyAuth.interface";
+
+const PRIVY_VERIFY_CACHE_TTL_MS = Number(process.env.PRIVY_VERIFY_CACHE_TTL_MS ?? 5 * 60_000);
+const PRIVY_VERIFY_CACHE_MAX = Number(process.env.PRIVY_VERIFY_CACHE_MAX ?? 5_000);
 
 export class PrivyServerAuthAdapter implements IPrivyAuthService {
   private client: PrivyClient;
+  private readonly verifyLiteCache = new LRUCache<string, { privyDid: string }>({
+    max: PRIVY_VERIFY_CACHE_MAX,
+    ttl: PRIVY_VERIFY_CACHE_TTL_MS,
+  });
 
   constructor(appId: string, appSecret: string) {
     this.client = new PrivyClient(appId, appSecret);
+  }
+
+  private hashToken(token: string): string {
+    return createHash("sha256").update(token).digest("hex");
   }
 
   async verifyToken(accessToken: string): Promise<PrivyUserProfile> {
@@ -67,8 +80,13 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
   }
 
   async verifyTokenLite(accessToken: string): Promise<{ privyDid: string }> {
+    const key = this.hashToken(accessToken);
+    const cached = this.verifyLiteCache.get(key);
+    if (cached) return cached;
     const claims = await this.client.verifyAuthToken(accessToken);
-    return { privyDid: claims.userId };
+    const result = { privyDid: claims.userId };
+    this.verifyLiteCache.set(key, result);
+    return result;
   }
 
   async getOrCreateWalletByTelegramId(telegramUserId: string): Promise<string> {

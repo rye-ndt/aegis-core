@@ -19,4 +19,17 @@ COPY drizzle ./drizzle
 EXPOSE 8080
 
 USER node
-CMD ["sh", "-c", "HTTP_API_PORT=${PORT:-8080} node dist/telegramCli.js"]
+
+# Role is chosen at deploy time by setting PROCESS_ROLE.
+# Worker:  PROCESS_ROLE=worker → runs dist/workerCli.js
+# HTTP:    PROCESS_ROLE=http   → runs dist/httpCli.js
+# Unset:   legacy combined     → runs dist/telegramCli.js
+CMD ["sh", "-c", "\
+  HTTP_API_PORT=${PORT:-8080}; \
+  case \"${PROCESS_ROLE:-combined}\" in \
+    worker)   exec node dist/workerCli.js ;; \
+    http)     exec node dist/httpCli.js ;; \
+    combined) exec node dist/telegramCli.js ;; \
+    *)        echo \"unknown PROCESS_ROLE=$PROCESS_ROLE\" && exit 1 ;; \
+  esac \
+"]

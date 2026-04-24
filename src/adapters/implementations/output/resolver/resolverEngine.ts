@@ -108,12 +108,8 @@ export class ResolverEngineImpl implements IResolverEngine {
     address: string,
     chainId: number,
   ): Promise<ITokenRecord | null> {
-    // searchBySymbol does ILIKE pattern matching, so filter by exact address.
-    const lowerAddress = address.toLowerCase();
-    const candidates = await this.tokenRegistry.searchBySymbol(address, chainId);
-    return (
-      candidates.find((r) => r.address.toLowerCase() === lowerAddress) ?? null
-    );
+    const record = await this.tokenRegistry.findByAddressAndChain(address, chainId);
+    return record ?? null;
   }
 
   private async resolveTokenField(

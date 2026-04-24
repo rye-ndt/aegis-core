@@ -16,7 +16,6 @@ const MINI_APP_URL = process.env.MINI_APP_URL;
  * CapabilityDispatcher, which owns all business flow logic.
  */
 export class TelegramAssistantHandler {
-  private sessionCache = new Map<number, { userId: string; expiresAtEpoch: number }>();
   private botRef: Bot | null = null;
 
   constructor(
@@ -84,7 +83,6 @@ export class TelegramAssistantHandler {
     bot.command("logout", async (ctx) => {
       const chatId = ctx.chat.id;
       await this.telegramSessions.deleteByChatId(String(chatId));
-      this.sessionCache.delete(chatId);
       await ctx.reply("Logged out. Your session has been invalidated.");
       await this.sendWelcomeWithLoginButton(chatId);
     });
@@ -172,7 +170,6 @@ export class TelegramAssistantHandler {
         userId,
         expiresAtEpoch,
       });
-      this.sessionCache.set(ctx.chat.id, { userId, expiresAtEpoch });
       await ctx.reply("Authenticated with Google. You can now use the Onchain Agent.");
     } catch (err) {
       console.error("[Auth] web_app_data loginWithPrivy failed:", err);
@@ -181,21 +178,12 @@ export class TelegramAssistantHandler {
   }
 
   private async ensureAuthenticated(chatId: number): Promise<{ userId: string } | null> {
-    const now = newCurrentUTCEpoch();
-    const cached = this.sessionCache.get(chatId);
-    if (cached) {
-      if (cached.expiresAtEpoch > now) return { userId: cached.userId };
-      this.sessionCache.delete(chatId);
-      await this.telegramSessions.deleteByChatId(String(chatId));
-      return null;
-    }
     const session = await this.telegramSessions.findByChatId(String(chatId));
     if (!session) return null;
-    if (session.expiresAtEpoch <= now) {
+    if (session.expiresAtEpoch <= newCurrentUTCEpoch()) {
       await this.telegramSessions.deleteByChatId(String(chatId));
       return null;
     }
-    this.sessionCache.set(chatId, { userId: session.userId, expiresAtEpoch: session.expiresAtEpoch });
     return { userId: session.userId };
   }
 }

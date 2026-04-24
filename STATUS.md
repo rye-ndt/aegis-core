@@ -1,5 +1,20 @@
 # Onchain Agent — Status
 
+## Scaling
+
+- 2026-04-24 — DB pool now `max: 25` (env-tunable via `DB_POOL_MAX`). Total Postgres connection budget = replicas × POOL_MAX + 1 worker pool. Do not raise per-replica POOL_MAX without re-budgeting (8 replicas × 25 = 200; server max_connections should be ≥ 250).
+- 2026-04-24 — `IMessageDB.findByConversationId` accepts optional `limit`; assistant chat path caps at `MESSAGE_HISTORY_LIMIT=30` rows (`ORDER BY created_at DESC LIMIT N`, reversed to ascending). Preserves behaviour of the later `.slice(-20)`.
+- 2026-04-24 — Global OpenAI concurrency cap via `helpers/concurrency/openaiLimiter.ts` (env `OPENAI_CONCURRENCY`, default 6). Per-replica. Applied at all 5 OpenAI call sites (orchestrator chat, embedding, intentParser, intentClassifier, schemaCompiler ×2).
+- 2026-04-24 — Datetime moved out of the system prompt (`assistant.usecase.ts`) and into the user-turn prefix so OpenAI's automatic prompt-prefix caching stays warm. Do not put time-varying content in `systemPrompt` again.
+- 2026-04-24 — Privy `verifyTokenLite` now LRU-cached inside the adapter (sha256(token) → `{privyDid}`, TTL 5 min, max 5k entries). In-process only; revoked tokens remain valid in cache for up to `PRIVY_VERIFY_CACHE_TTL_MS`. If finer revocation is ever required, shorten the TTL or move to Redis.
+- 2026-04-24 — `IPendingCollectionStore` has a Redis-backed adapter (`pending_collection:{channelId}` keys, TTL = pending.expiresAt). DI picks Redis when `REDIS_URL` is set, otherwise in-memory. `PendingCollection.state` must stay JSON-safe (no Date/BigInt/Buffer) — Redis impl will throw on JSON.stringify otherwise.
+- 2026-04-24 — Removed `sessionCache` in-memory map from `TelegramAssistantHandler`. Session is now always read from Postgres (`telegram_sessions` indexed on chat_id). Multi-replica-safe. Cost: one extra PK lookup per Telegram message (~1–3 ms, negligible). Do not reintroduce an in-process cache without addressing cross-replica logout staleness first.
+- 2026-04-24 — Split entrypoints: `src/workerCli.ts` (Telegram bot + scheduled jobs; exactly 1 replica) and `src/httpCli.ts` (HTTP API only; N replicas). `src/telegramCli.ts` retained as combined local-dev entry. `PROCESS_ROLE` env (`worker` | `http` | `combined`) gates job startup via `helpers/env/role.ts`. Deploying > 1 worker replica will duplicate Telegram notifications — enforce max-instances=1 on the worker Cloud Run service.
+- 2026-04-24 — `/metrics` operator endpoint (bearer-gated via `METRICS_TOKEN`) exposes pgPool saturation, openai p-limit queue depth, LLM p50/p95 + cache hit ratio, and sampled Redis latency. `MetricsRegistry` singleton in `helpers/observability/metricsRegistry.ts`. Use `scripts/watch-metrics.sh` during load tests. `OPENAI_CONCURRENCY` exported from `openaiLimiter.ts` (was private).
+- 2026-04-24 — Tavily (5 min) and Relay quote (15 s) responses cached in Redis via `helpers/cache/redisResponseCache.ts`. Keys: `tavily:{sha1(q+limit)}`, `relay_quote:{sha1(user+route+amount+type)}`. Caches are opt-in: adapters skip them when `REDIS_URL` is unset. TTLs env-tunable via `TAVILY_CACHE_TTL_SECONDS` / `RELAY_QUOTE_CACHE_TTL_SECONDS`; tighten Tavily if freshness issues surface, tighten Relay if quote-staleness errors appear.
+- 2026-04-24 — `ChainEntry.defaultRpcUrls` is now `string[]` (ordered primary → fallbacks). All viem PublicClients use `fallback([http(u1), http(u2), ...])` with `retryCount: 1`. Env: `RPC_URL_FALLBACKS` (comma-separated) supplements `RPC_URL` at runtime. `getChainRpcUrl` deprecated; prefer `getChainRpcUrls`.
+- 2026-04-24 — Production topology: `aegis-worker` (Cloud Run min=max=1, Telegram + jobs) + `aegis-api` (Cloud Run min=2 max=8, HTTP only). Shared Upstash Redis + managed Postgres. Single image, role chosen via PROCESS_ROLE. Local parity: `docker compose --profile scale up` (1 worker + 3 api + nginx). Do not raise aegis-worker beyond 1 replica without first solving job-singleton via Redis locks and grammy webhook-mode migration.
+
 ## GET /yield/positions — 2026-04-24
 
 HTTP endpoint (Privy-auth) backing the mini-app's `YieldPositions` component on the Home tab. Returns the user's live on-chain yield positions — protocol, token, current $ value, lifetime PnL, 24h delta, APY — plus aggregate totals.
@@ -408,7 +423,9 @@ Non-custodial, intent-based AI trading agent on Avalanche. Hexagonal Architectur
 
 ```text
 src/
-├── telegramCli.ts              # Entry — boots HTTP API + Telegram bot + token crawler
+├── telegramCli.ts              # Combined entry (local dev) — HTTP API + Telegram bot + jobs
+├── workerCli.ts                # Worker entry (PROCESS_ROLE=worker) — Telegram bot + scheduled jobs
+├── httpCli.ts                  # API entry (PROCESS_ROLE=http) — HTTP only, no bot/jobs
 ├── migrate.ts                  # Drizzle migration runner
 ├── use-cases/
 │   ├── implementations/        # assistant, auth, commandMapping, httpQueryTool,
@@ -485,6 +502,7 @@ src/
 │           ├── toolIndex/      # pinecone.toolIndex.ts
 │           ├── cache/          # redis.miniAppRequest, redis.sessionDelegation,
 │           │                   # redis.signingRequest, redis.userProfile
+│           ├── pendingCollectionStore/ # inMemory.ts + redis.ts (multi-replica pending state)
 │           ├── telegram/       # bot notifier (botNotifier.ts), gramjs.telegramResolver.ts
 │           ├── toolRegistry.concrete.ts          # in-memory ITool registry
 │           ├── systemToolProvider.concrete.ts   # assembles system tools
@@ -494,6 +512,10 @@ src/
     ├── chainConfig.ts         # CHAIN_CONFIG — single source of truth per chain
     ├── bigint.ts              # Bigint math helpers (wei conversions, etc.)
     ├── uuid.ts                # newUuid() — v4
+    ├── cache/                 # redisResponseCache.ts — generic SHA1-keyed TTL cache helper
+    ├── concurrency/           # openaiLimiter.ts — p-limit singleton for all OpenAI call sites
+    ├── env/                   # role.ts (PROCESS_ROLE, isWorker), yieldEnv.ts
+    ├── observability/         # metricsRegistry.ts — pgPool / openai / redis / LLM metrics
     ├── enums/                 # executionStatus, intentAction (INTENT_ACTION),
     │                          # intentCommand (INTENT_COMMAND + parseIntentCommand),
     │                          # intentStatus, messageRole, resolverField (RESOLVER_FIELD),
@@ -617,6 +639,9 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | `sign_req:{id}`                  | JSON signing request                    | `max(10s, expiresAt - now)`; `KEEPTTL` on resolve |
 | `mini_app_req:{requestId}`       | JSON `MiniAppRequest` (auth/sign/approve) | 600 s                          |
 | `user_profile:{userId}`          | JSON `PrivyUserProfile`                 | Per-call (min 10 s)              |
+| `pending_collection:{channelId}` | JSON `PendingCollection` (capability multi-step state) | `min(pending.expiresAt - now, 1h)` |
+| `tavily:{sha1(query+limit)}`     | JSON Tavily search response             | `TAVILY_CACHE_TTL_SECONDS` (300 s) |
+| `relay_quote:{sha1(user+route+amount+type)}` | JSON `RelayQuote`           | `RELAY_QUOTE_CACHE_TTL_SECONDS` (15 s) |
 
 ## Environment variables
 
@@ -631,7 +656,8 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | `MAX_TOOL_ROUNDS`                 | `10`                                 | Max agentic tool rounds per chat                       |
 | `MINI_APP_URL`                    | —                                    | Base URL of Telegram Mini App (linked from bot prompts)|
 | `CHAIN_ID`                        | `43113`                              | Resolved against `CHAIN_CONFIG` (43113 Fuji, 43114 C-Chain, 1, 8453, 137, 42161, 10) |
-| `RPC_URL`                         | `CHAIN_CONFIG.defaultRpcUrl`         | EVM chain RPC endpoint override                        |
+| `RPC_URL`                         | `CHAIN_CONFIG.defaultRpcUrls[0]`     | Primary EVM RPC endpoint override                      |
+| `RPC_URL_FALLBACKS`               | `""`                                 | Comma-separated fallback RPC URLs appended to `CHAIN_CONFIG.defaultRpcUrls` |
 | `AVAX_BUNDLER_URL`                | —                                    | ERC-4337 bundler endpoint (e.g. Pimlico)               |
 | `BOT_PRIVATE_KEY`                 | —                                    | 32-byte hex; used by `ZerodevUserOpExecutor`           |
 | `REWARD_CONTROLLER_ADDRESS`       | —                                    | `ClaimRewardsSolver` target                            |
@@ -648,6 +674,18 @@ Key notes: auth gate runs first; fiat shortcuts (`$5`, `N usdc`) auto-inject USD
 | `PINECONE_INDEX_NAME`             | —                                    | Pinecone index name                                    |
 | `PINECONE_HOST`                   | —                                    | Pinecone index host URL                                |
 | `HTTP_TOOL_HEADER_ENCRYPTION_KEY` | —                                    | 32-byte hex key for AES-256-GCM                        |
+| `PROCESS_ROLE`                    | `combined`                           | `worker` (bot+jobs), `http` (API only), or `combined` (dev) |
+| `DB_POOL_MAX`                     | `25`                                 | Postgres pool max per replica                          |
+| `DB_POOL_IDLE_TIMEOUT_MS`         | `30000`                              | Postgres pool idle timeout                             |
+| `DB_POOL_CONNECTION_TIMEOUT_MS`   | `5000`                               | Postgres pool connect timeout                          |
+| `MESSAGE_HISTORY_LIMIT`           | `30`                                 | Rows fetched from `messages` for assistant chat context |
+| `OPENAI_CONCURRENCY`              | `6`                                  | Per-replica cap on concurrent OpenAI calls (p-limit)   |
+| `PRIVY_VERIFY_CACHE_TTL_MS`       | `300000`                             | LRU TTL for Privy `verifyTokenLite` cache              |
+| `PRIVY_VERIFY_CACHE_MAX`          | `5000`                               | LRU max entries for Privy verify cache                 |
+| `TAVILY_CACHE_TTL_SECONDS`        | `300`                                | Redis TTL for Tavily web-search responses              |
+| `RELAY_QUOTE_CACHE_TTL_SECONDS`   | `15`                                 | Redis TTL for Relay quote responses                    |
+| `METRICS_TOKEN`                   | —                                    | Bearer token for `/metrics` endpoint (unset = endpoint disabled) |
+| `RELAY_API_URL`                   | `https://api.relay.link`             | Relay quote API base URL                               |
 
 ## Coding conventions
 

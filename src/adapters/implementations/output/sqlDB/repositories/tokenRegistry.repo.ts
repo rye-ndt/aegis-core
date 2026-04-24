@@ -1,4 +1,4 @@
-import { and, eq, ilike, or } from "drizzle-orm";
+import { and, eq, ilike, or, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   ITokenRecord,
@@ -47,6 +47,21 @@ export class DrizzleTokenRegistryRepo implements ITokenRegistryDB {
       .select()
       .from(tokenRegistry)
       .where(and(eq(tokenRegistry.symbol, symbol), eq(tokenRegistry.chainId, chainId)))
+      .limit(1);
+    if (!rows[0]) return undefined;
+    return this.toRecord(rows[0]);
+  }
+
+  async findByAddressAndChain(address: string, chainId: number): Promise<ITokenRecord | undefined> {
+    const rows = await this.db
+      .select()
+      .from(tokenRegistry)
+      .where(
+        and(
+          eq(tokenRegistry.chainId, chainId),
+          eq(sql`lower(${tokenRegistry.address})`, address.toLowerCase()),
+        ),
+      )
       .limit(1);
     if (!rows[0]) return undefined;
     return this.toRecord(rows[0]);

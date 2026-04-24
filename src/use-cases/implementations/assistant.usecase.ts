@@ -27,6 +27,7 @@ const MAX_TOOL_ROUNDS = parseInt(
   process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS),
   10,
 );
+const MESSAGE_HISTORY_LIMIT = Number(process.env.MESSAGE_HISTORY_LIMIT ?? 30);
 
 interface IToolResult {
   toolCallId: string;
@@ -48,7 +49,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const conversationId = await this.initConversation(input);
 
     const [allMessages] = await Promise.all([
-      this.messageRepo.findByConversationId(conversationId),
+      this.messageRepo.findByConversationId(conversationId, MESSAGE_HISTORY_LIMIT),
       this.messageRepo.create({
         id: newUuid(),
         conversationId,
@@ -63,13 +64,14 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       ...this.buildOrchestratorHistory(recentMessages),
       {
         role: MESSAGE_ROLE.USER,
-        content: input.message,
+        // Datetime in the user turn keeps the system-prompt prefix byte-identical
+        // across calls so OpenAI's automatic prompt-prefix cache stays warm.
+        content: `[Current datetime: ${new Date().toISOString()}]\n${input.message}`,
         imageBase64Url: input.imageBase64Url,
       },
     ];
 
-    const systemPrompt =
-      `${DEFAULT_SYSTEM_PROMPT}\n\nCurrent datetime: ${new Date().toISOString()}.`;
+    const systemPrompt = DEFAULT_SYSTEM_PROMPT;
 
     const toolRegistry = await this.registryFactory(input.userId, conversationId);
     const availableTools = toolRegistry.getAll().map((t) => t.definition());

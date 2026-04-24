@@ -1,4 +1,4 @@
-import { createPublicClient, http, maxUint256, encodeFunctionData, type Address } from "viem";
+import { createPublicClient, fallback, http, maxUint256, encodeFunctionData, type Address } from "viem";
 import type { Chain } from "viem/chains";
 import { YIELD_PROTOCOL_ID } from "../../../../helpers/enums/yieldProtocolId.enum";
 import type { IYieldProtocolAdapter, PoolStatus, TxStep } from "../../../../use-cases/interface/yield/IYieldProtocolAdapter";
@@ -113,8 +113,16 @@ export class AaveV3Adapter implements IYieldProtocolAdapter {
     private readonly dataProviderAddress: Address,
     rpcUrl: string,
     chain: Chain,
+    rpcUrls?: string[],
   ) {
-    this.client = createPublicClient({ chain, transport: http(rpcUrl, { timeout: 10_000 }) });
+    const urls = rpcUrls && rpcUrls.length > 0 ? rpcUrls : [rpcUrl];
+    this.client = createPublicClient({
+      chain,
+      transport: fallback(
+        urls.map((u) => http(u, { timeout: 10_000 })),
+        { retryCount: 1 },
+      ),
+    });
   }
 
   async getPoolStatus(token: Address): Promise<PoolStatus> {

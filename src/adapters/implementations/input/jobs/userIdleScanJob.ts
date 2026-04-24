@@ -1,5 +1,6 @@
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
+import { isWorker } from "../../../../helpers/env/role";
 
 const CONCURRENCY = 5;
 
@@ -27,6 +28,10 @@ export class UserIdleScanJob {
   ) {}
 
   start(): void {
+    if (!isWorker()) {
+      console.log("[UserIdleScanJob] not a worker role — not starting.");
+      return;
+    }
     this.run();
     this.timer = setInterval(() => this.run(), this.intervalMs);
   }
