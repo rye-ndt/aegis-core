@@ -3,7 +3,9 @@ import type { User } from "@privy-io/server-auth";
 import { LRUCache } from "lru-cache";
 import { createHash } from "node:crypto";
 import type { IPrivyAuthService, PrivyUserProfile } from "../../../../use-cases/interface/output/privyAuth.interface";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("privyAuth");
 const PRIVY_VERIFY_CACHE_TTL_MS = Number(process.env.PRIVY_VERIFY_CACHE_TTL_MS ?? 5 * 60_000);
 const PRIVY_VERIFY_CACHE_MAX = Number(process.env.PRIVY_VERIFY_CACHE_MAX ?? 5_000);
 
@@ -95,24 +97,23 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
     try {
       user = await this.client.getUserByTelegramUserId(telegramUserId);
       if (user) {
-        console.log(`[Privy] found existing user for telegramUserId=${telegramUserId} id=${user.id}`);
+        log.debug({ choice: "existing-user", telegramUserId, userId: user.id }, "found existing Privy user");
       }
     } catch (err) {
-      console.error(`[Privy] getUserByTelegramUserId error for telegramUserId=${telegramUserId}:`, err instanceof Error ? err.message : err);
+      log.error({ err, telegramUserId }, "getUserByTelegramUserId error");
     }
 
     if (!user) {
-      console.log(`[Privy] no existing user for telegramUserId=${telegramUserId}, importing...`);
+      log.debug({ choice: "import-user", telegramUserId }, "no existing user, importing");
       user = await this.client.importUser({
         linkedAccounts: [
           { type: "telegram", telegramUserId } as Parameters<PrivyClient["importUser"]>[0]["linkedAccounts"][0],
         ],
         createEthereumWallet: true,
       });
-      console.log(`[Privy] created new user for telegramUserId=${telegramUserId} id=${user.id}`);
+      log.info({ step: "user-created", telegramUserId, userId: user.id }, "created new Privy user");
     }
 
-    // If the user exists but has no embedded wallet, create one
     const embeddedWallet = user.linkedAccounts.find(
       (a) => a.type === "wallet" && (a as { walletClientType?: string }).walletClientType === "privy",
     );
@@ -121,8 +122,7 @@ export class PrivyServerAuthAdapter implements IPrivyAuthService {
       return (embeddedWallet as { address: string }).address;
     }
 
-    // No embedded wallet yet — create one
-    console.log(`[Privy] no embedded wallet for telegramUserId=${telegramUserId}, creating...`);
+    log.debug({ telegramUserId }, "no embedded wallet, creating one");
     const updated = await this.client.createWallets({ userId: user.id, createEthereumWallet: true });
     const newWallet = updated.linkedAccounts.find(
       (a) => a.type === "wallet" && (a as { walletClientType?: string }).walletClientType === "privy",

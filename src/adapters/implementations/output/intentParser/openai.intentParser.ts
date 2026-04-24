@@ -10,7 +10,9 @@ import type {
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { WINDOW_SIZE } from "../../../../use-cases/interface/input/intent.errors";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("intentParser");
 const BUILTIN_ACTIONS = Object.values(INTENT_ACTION).join(" | ");
 const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
@@ -40,7 +42,7 @@ If the user is NOT asking for any on-chain action (e.g. chatting, asking a quest
 
 If the user IS requesting an on-chain action, extract:
 - action: one of the built-in actions (${BUILTIN_ACTIONS}) OR a dynamic toolId if applicable
-- fromTokenSymbol: token the user wants to spend/send (e.g. "${CHAIN_CONFIG.nativeSymbol}", "USDC"). 
+- fromTokenSymbol: token the user wants to spend/send (e.g. "${CHAIN_CONFIG.nativeSymbol}", "USDC").
   notice that $ symbol, with no ticker will be intepreted as USDC token
 - toTokenSymbol: token the user wants to receive (swaps only)
 - amountHuman: human-readable amount as a string (e.g. "1.5", "100")
@@ -107,7 +109,7 @@ export class OpenAIIntentParser implements IIntentParser {
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI");
 
-    console.log("[OpenAIIntentParser] parsed:", parsed);
+    log.info({ step: "intent-parsed", action: parsed.intent?.action ?? null, isOnChain: parsed.intent?.isOnChainAction ?? false }, "intent parsed");
 
     if (parsed.intent === null || !parsed.intent.isOnChainAction) return null;
 

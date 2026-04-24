@@ -1,4 +1,5 @@
 import { newCurrentUTCEpoch } from '../../helpers/time/dateTime';
+import { createLogger } from '../../helpers/observability/logger';
 import type { ISigningRequestUseCase } from '../interface/input/signingRequest.interface';
 import type {
   ISigningRequestCache,
@@ -6,6 +7,7 @@ import type {
   SigningRequestRecord,
 } from '../interface/output/cache/signingRequest.cache';
 
+const log = createLogger("signingRequest");
 const POLL_INTERVAL_MS = 500;
 
 export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
@@ -16,6 +18,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
 
   async create(record: SigningRequestRecord): Promise<void> {
     await this.cache.save(record);
+    log.info({ step: "signing-request-created", requestId: record.id, userId: record.userId }, "signing request created");
   }
 
   async resolveRequest(params: {
@@ -33,21 +36,39 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
 
     const rejected = params.rejected === true;
     await this.cache.resolve(params.requestId, rejected ? 'rejected' : 'approved', params.txHash);
+    log.info({ step: "signing-request-resolved", requestId: params.requestId, rejected, hasTxHash: !!params.txHash }, "signing request resolved");
 
     this.onResolved(record.chatId, params.txHash, rejected);
   }
 
   async waitFor(requestId: string, timeoutMs: number): Promise<ResolvedSigningRequest> {
     const deadline = Date.now() + timeoutMs;
+    log.debug({ choice: "waitFor-start", requestId, timeoutMs }, "waiting for signing request");
     while (Date.now() < deadline) {
       const record = await this.cache.findById(requestId);
-      if (!record) return { status: 'expired' };
-      if (record.status === 'approved') return { status: 'approved', txHash: record.txHash };
-      if (record.status === 'rejected') return { status: 'rejected' };
-      if (record.status === 'expired') return { status: 'expired' };
-      if (record.expiresAt <= newCurrentUTCEpoch()) return { status: 'expired' };
+      if (!record) {
+        log.info({ step: "waitFor-expired", requestId }, "signing request not found — expired");
+        return { status: 'expired' };
+      }
+      if (record.status === 'approved') {
+        log.info({ step: "waitFor-approved", requestId }, "signing request approved");
+        return { status: 'approved', txHash: record.txHash };
+      }
+      if (record.status === 'rejected') {
+        log.info({ step: "waitFor-rejected", requestId }, "signing request rejected");
+        return { status: 'rejected' };
+      }
+      if (record.status === 'expired') {
+        log.info({ step: "waitFor-expired", requestId }, "signing request expired");
+        return { status: 'expired' };
+      }
+      if (record.expiresAt <= newCurrentUTCEpoch()) {
+        log.info({ step: "waitFor-timeout", requestId }, "signing request past expiresAt");
+        return { status: 'expired' };
+      }
       await sleep(POLL_INTERVAL_MS);
     }
+    log.info({ step: "waitFor-timeout", requestId, timeoutMs }, "waitFor timed out");
     return { status: 'expired' };
   }
 }

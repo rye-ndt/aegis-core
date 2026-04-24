@@ -11,6 +11,9 @@ import type { IPrivyAuthService } from "../../../../use-cases/interface/output/p
 import type { ITokenRecord } from "../../../../use-cases/interface/output/repository/tokenRegistry.repo";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { toRaw } from "../../../../helpers/bigint";
+import { createLogger } from "../../../../helpers/observability/logger";
+
+const log = createLogger("resolverEngine");
 
 export class ResolverEngineImpl implements IResolverEngine {
   constructor(
@@ -27,7 +30,6 @@ export class ResolverEngineImpl implements IResolverEngine {
   }): Promise<ResolvedPayload> {
     const { resolverFields, userId, chainId } = params;
 
-    // ── Sender address — always injected from the user's session profile ─────
     const profile = await this.userProfileDB.findByUserId(userId);
     const senderAddress = profile?.eoaAddress ?? null;
 
@@ -37,26 +39,21 @@ export class ResolverEngineImpl implements IResolverEngine {
     const fromToken = await this.resolveTokenField("from", fromSymbol, chainId);
     const toToken = await this.resolveTokenField("to", toSymbol, chainId);
 
-    // ── Amount resolver ───────────────────────────────────────────────────────
-    // Requires:  readableAmount  (e.g. "5", "0.25") from the LLM
-    //            fromToken       already resolved above so decimals are known
-    //
-    // Converts human-readable amount → raw integer string using BigInt
-    // arithmetic (no floating-point loss at any decimal precision).
     let rawAmount: string | null = null;
     const humanAmount = resolverFields[RESOLVER_FIELD.READABLE_AMOUNT];
     if (humanAmount && fromToken) {
       rawAmount = toRaw(humanAmount, fromToken.decimals);
-      console.log(
-        `[ResolverEngine] amount "${humanAmount}" → rawAmount="${rawAmount}" (decimals=${fromToken.decimals}, token=${fromToken.symbol})`,
+      log.info(
+        { step: "amount-resolved", humanAmount, rawAmount, decimals: fromToken.decimals, token: fromToken.symbol },
+        "amount converted",
       );
     } else if (humanAmount && !fromToken) {
-      console.warn(
-        `[ResolverEngine] readableAmount="${humanAmount}" provided but fromToken is null — rawAmount cannot be computed yet`,
+      log.warn(
+        { reason: "fromToken-missing", humanAmount },
+        "readableAmount provided but fromToken is null — rawAmount cannot be computed yet",
       );
     }
 
-    // ── User handle → EVM wallet ─────────────────────────────────────────────
     let recipientAddress: string | null = null;
     let recipientTelegramUserId: string | null = null;
 
@@ -68,13 +65,11 @@ export class ResolverEngineImpl implements IResolverEngine {
         );
       }
 
-      console.log(`[ResolverEngine] resolving Telegram handle "@${handle}"`);
+      log.debug({ choice: "telegram-handle", handle }, "resolving Telegram handle");
       let telegramUserId: string;
       try {
         telegramUserId = await this.telegramResolver.resolveHandle(handle);
-        console.log(
-          `[ResolverEngine] @${handle} → telegramUserId=${telegramUserId}`,
-        );
+        log.info({ step: "handle-resolved", handle, telegramUserId }, "Telegram handle resolved");
       } catch (err) {
         if (err instanceof TelegramHandleNotFoundError) {
           throw new Error(
@@ -89,9 +84,7 @@ export class ResolverEngineImpl implements IResolverEngine {
           telegramUserId,
         );
       recipientTelegramUserId = telegramUserId;
-      console.log(
-        `[ResolverEngine] telegramUserId=${telegramUserId} → wallet=${recipientAddress}`,
-      );
+      log.info({ step: "wallet-resolved", telegramUserId, wallet: recipientAddress }, "wallet resolved from Telegram handle");
     }
 
     return {
@@ -121,18 +114,18 @@ export class ResolverEngineImpl implements IResolverEngine {
     const label = `${slot}Token`;
 
     if (/^0x[0-9a-fA-F]{40}$/.test(symbol)) {
-      console.log(`[ResolverEngine] ${label} is a 0x address, resolving by address: ${symbol}`);
+      log.debug({ choice: "address", label, symbol }, "resolving token by address");
       const token = await this.resolveTokenByAddress(symbol, chainId);
       if (!token) {
         throw new Error(
           `Token address ${symbol} not found in registry for chainId ${chainId}.`,
         );
       }
-      console.log(`[ResolverEngine] ${label} resolved (address) → ${token.symbol} (${token.address})`);
+      log.debug({ label, symbol: token.symbol, address: token.address }, "token resolved by address");
       return token;
     }
 
-    console.log(`[ResolverEngine] resolving ${label} symbol="${symbol}" chainId=${chainId}`);
+    log.debug({ choice: "symbol", label, symbol, chainId }, "resolving token by symbol");
     const candidates = await this.tokenRegistry.searchBySymbol(symbol, chainId);
     if (candidates.length === 0) {
       throw new Error(
@@ -143,7 +136,7 @@ export class ResolverEngineImpl implements IResolverEngine {
       throw new DisambiguationRequiredError(slot, symbol, candidates);
     }
     const token = candidates[0]!;
-    console.log(`[ResolverEngine] ${label} resolved (symbol) → ${token.symbol} (${token.address})`);
+    log.debug({ label, symbol: token.symbol, address: token.address }, "token resolved by symbol");
     return token;
   }
 }

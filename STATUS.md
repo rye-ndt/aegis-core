@@ -1,5 +1,27 @@
 # Onchain Agent — Status
 
+## Structured logging (pino) — 2026-04-24
+
+Replaced all `console.*` calls across `src/` with structured pino logging via a singleton helper at `src/helpers/observability/logger.ts`.
+
+**What was done:**
+- Installed `pino` (prod dep) and `pino-pretty` (devDep only — never in prod image).
+- Created `createLogger(scope)` factory; all modules use `const log = createLogger("scope")` at the top of the file — no DI injection.
+- Migrated all 127 `console.*` calls across 29 files to structured log calls.
+- Added Step 4 new critical-flow instrumentation: `assistant.usecase.ts` (history-loaded, llm-response, tool-result), `intent.usecase.ts` (parse-start, intent-parsed, calldata-built, vector/ILIKE search), `signingRequest.usecase.ts` (created, resolved, waitFor lifecycle), `capabilityDispatcher.usecase.ts` (resolution choice matched/resumed/default, invoke, collect/run errors), all 4 `cache/redis.*` adapters (hit/miss debug), `yieldPoolRanker.ts` (pool-ranked info + low-liquidity/high-utilization disqualification debug), `yieldOptimizerUseCase.ts` (user-nudged info + idle-scan skip reasons).
+- `docker-compose.yml` updated: `LOG_LEVEL=debug`, `LOG_PRETTY=true` on all local services (`app`, `worker`, `api`).
+
+**Conventions:**
+- `const log = createLogger("scope")` — one child logger per module, scope is a short camelCase identifier.
+- First argument is always a structured object `{ step, choice, err, ... }`, second is a short message string.
+- `err` is always a field, never interpolated into the message string.
+- `step` key used for output of long procedures (info level); `choice` key for branch decisions (debug level).
+- `console.*` is banned everywhere in `src/` except `db/migrate.ts` (Drizzle migration runner must use console for output).
+- `LOG_PRETTY=true` is local-dev only; production emits raw JSON (Cloud Logging parses it).
+- `LOG_LEVEL` defaults: `info` in production, `debug` otherwise.
+
+**Why helper (not a port/adapter):** Logger is cross-cutting infrastructure like `metricsRegistry` — injecting it as a port would require threading it through every constructor for no abstraction benefit.
+
 ## Scaling
 
 - 2026-04-24 — DB pool now `max: 25` (env-tunable via `DB_POOL_MAX`). Total Postgres connection budget = replicas × POOL_MAX + 1 worker pool. Do not raise per-replica POOL_MAX without re-budgeting (8 replicas × 25 = 200; server max_connections should be ≥ 250).

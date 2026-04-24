@@ -29,6 +29,9 @@ import type { IIntentClassifier } from "../interface/output/intentClassifier.int
 import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
 import type { ICommandToolMappingDB } from "../interface/output/repository/commandToolMapping.repo";
 
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("intentUseCase");
 const CONFIDENCE_THRESHOLD = 0.7;
 
 export class IntentUseCaseImpl implements IIntentUseCase {
@@ -67,14 +70,14 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const messages = [...priorUserContent, params.rawInput];
 
     // 2. Discover relevant dynamic tools and parse intent
-    console.log(`[IntentUseCase] parseAndExecute userId=${params.userId} input="${params.rawInput.slice(0, 80)}"`);
+    log.info({ step: "parse-start", userId: params.userId, inputPreview: params.rawInput.slice(0, 80) }, "parseAndExecute");
     const relevantManifests = await this.discoverRelevantTools(params.rawInput);
 
     let intent: IntentPackage | null;
     try {
-      console.log(`[IntentUseCase] calling intentParser with ${messages.length} messages and ${relevantManifests.length} manifests`);
+      log.debug({ choice: "intent-parse", messageCount: messages.length, manifestCount: relevantManifests.length }, "calling intentParser");
       intent = await this.intentParser.parse(messages, params.userId, relevantManifests);
-      console.log(`[IntentUseCase] intentParser result: ${intent === null ? "null" : `action=${intent.action} confidence=${intent.confidence}`}`);
+      log.info({ step: "intent-parsed", action: intent?.action ?? null, confidence: intent?.confidence ?? null }, "intent parsed");
 
       let manifest: ToolManifest | undefined;
       if (intent !== null && !Object.values(INTENT_ACTION).includes(intent.action as INTENT_ACTION)) {
@@ -117,7 +120,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     // 3. Confidence check
-    console.log(`[IntentUseCase] confidence check: ${intent.confidence} (threshold ${CONFIDENCE_THRESHOLD}) action=${intent.action}`);
+    log.debug({ choice: "confidence-check", confidence: intent.confidence, threshold: CONFIDENCE_THRESHOLD, action: intent.action }, "confidence check");
     if (
       intent.confidence < CONFIDENCE_THRESHOLD ||
       intent.action === INTENT_ACTION.UNKNOWN
@@ -143,9 +146,9 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     // 4. Get solver
-    console.log(`[IntentUseCase] looking up solver for action="${intent.action}"`);
+    log.debug({ choice: "solver-lookup", action: intent.action }, "looking up solver");
     const solver = await this.solverRegistry.getSolverAsync(intent.action);
-    console.log(`[IntentUseCase] solver: ${solver ? solver.name : "none found"}`);
+    log.debug({ choice: "solver-result", action: intent.action, found: !!solver }, "solver resolved");
     if (!solver) {
       await this.intentDB.create({
         id: intentId,
@@ -172,11 +175,11 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const userAddress = profile?.eoaAddress ?? "";
 
     // 6. Build calldata
-    console.log(`[IntentUseCase] building calldata userAddress=${userAddress}`);
+    log.debug({ choice: "build-calldata", userAddress }, "building calldata");
     let calldata: { to: string; data: string; value: string };
     try {
       calldata = await solver.buildCalldata(intent, userAddress);
-      console.log(`[IntentUseCase] calldata built to=${calldata.to} value=${calldata.value} dataLen=${calldata.data.length}`);
+      log.info({ step: "calldata-built", to: calldata.to, value: calldata.value, dataLen: calldata.data.length }, "calldata built");
     } catch (err) {
       const reason = toErrorMessage(err);
       await this.intentDB.create({
@@ -242,14 +245,10 @@ export class IntentUseCaseImpl implements IIntentUseCase {
       if (mapping) {
         const record = await this.toolManifestDB.findByToolId(mapping.toolId);
         if (record?.isActive) {
-          console.log(
-            `[IntentUseCase] selectTool → explicit mapping: command="${bareCommand}" → toolId="${mapping.toolId}"`,
-          );
+          log.info({ step: "select-tool", choice: "explicit-mapping", command: bareCommand, toolId: mapping.toolId }, "selectTool resolved via command mapping");
           return { toolId: record.toolId, manifest: deserializeManifest(record) };
         }
-        console.log(
-          `[IntentUseCase] selectTool: explicit mapping exists for "${bareCommand}" but tool "${mapping.toolId}" is inactive/missing — falling back to RAG`,
-        );
+        log.warn({ reason: "mapping_inactive", command: bareCommand, toolId: mapping.toolId }, "explicit mapping inactive — falling back to RAG");
       }
     }
 
@@ -258,7 +257,7 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     const manifests = await this.discoverRelevantTools(query);
     if (manifests.length === 0) return null;
     const top = manifests[0]!;
-    console.log(`[IntentUseCase] selectTool → RAG: ${top.toolId} (${manifests.length} candidates)`);
+    log.info({ step: "select-tool", choice: "rag", toolId: top.toolId, candidateCount: manifests.length }, "selectTool resolved via RAG");
     return { toolId: top.toolId, manifest: top };
   }
 
@@ -340,43 +339,43 @@ export class IntentUseCaseImpl implements IIntentUseCase {
   private async discoverRelevantTools(rawInput: string): Promise<ToolManifest[]> {
     if (this.toolIndexService) {
       try {
-        console.log(`[IntentUseCase] vector search query="${rawInput.slice(0, 80)}" chainId=${this.chainId}`);
+        log.debug({ choice: "vector-search", queryPreview: rawInput.slice(0, 80), chainId: this.chainId }, "running vector search");
         const hits = await this.toolIndexService.search(rawInput, {
           topK: 20,
           chainId: this.chainId,
           minScore: 0.3,
         });
-        console.log(`[IntentUseCase] vector search returned ${hits.length} hits: [${hits.map((h) => `${h.toolId}(${h.score.toFixed(2)})`).join(", ")}]`);
+        log.debug({ choice: "vector-hits", hitCount: hits.length, hits: hits.map((h) => `${h.toolId}(${h.score.toFixed(2)})`) }, "vector search complete");
 
         if (hits.length > 0) {
           const toolIds = hits.map((h) => h.toolId);
           const records = await this.toolManifestDB.findByToolIds(toolIds);
-          console.log(`[IntentUseCase] loaded ${records.length} manifests from DB for vector hits`);
+          log.debug({ choice: "vector-manifests", count: records.length }, "manifests loaded from DB");
 
           const scoreMap = new Map(hits.map((h) => [h.toolId, h.score]));
           records.sort((a, b) => (scoreMap.get(b.toolId) ?? 0) - (scoreMap.get(a.toolId) ?? 0));
 
           const resolved = this.resolveConflicts(records, rawInput);
-          console.log(`[IntentUseCase] resolved tools (vector): [${resolved.map((t) => t.toolId).join(", ")}]`);
+          log.debug({ choice: "vector-resolved", tools: resolved.map((t) => t.toolId) }, "tools resolved (vector)");
           return resolved;
         }
 
-        console.log(`[IntentUseCase] vector search: 0 results above threshold, returning empty`);
+        log.debug({ choice: "vector-empty" }, "vector search: 0 results above threshold");
         return [];
       } catch (err) {
-        console.error("[IntentUseCase] vector search failed, falling back to ILIKE:", err);
+        log.error({ err }, "vector search failed, falling back to ILIKE");
       }
     } else {
-      console.log(`[IntentUseCase] no toolIndexService configured, using ILIKE fallback`);
+      log.debug({ choice: "ilike-fallback" }, "no toolIndexService configured, using ILIKE fallback");
     }
 
     const candidates = await this.toolManifestDB.search(rawInput, {
       limit: 15,
       chainId: this.chainId,
     });
-    console.log(`[IntentUseCase] ILIKE fallback returned ${candidates.length} candidates: [${candidates.map((c) => c.toolId).join(", ")}]`);
+    log.debug({ choice: "ilike-results", candidateCount: candidates.length, candidates: candidates.map((c) => c.toolId) }, "ILIKE fallback complete");
     const resolved = this.resolveConflicts(candidates, rawInput);
-    console.log(`[IntentUseCase] resolved tools (ILIKE): [${resolved.map((t) => t.toolId).join(", ")}]`);
+    log.debug({ choice: "ilike-resolved", tools: resolved.map((t) => t.toolId) }, "tools resolved (ILIKE)");
     return resolved;
   }
 

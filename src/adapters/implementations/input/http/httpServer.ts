@@ -33,7 +33,9 @@ import type { DelegationRecord as SessionDelegationRecord } from "../../../../us
 import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("httpServer");
 const METRICS_TOKEN = process.env.METRICS_TOKEN;
 
 const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
@@ -103,7 +105,7 @@ export class HttpApiServer {
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
-        console.error("HttpApiServer unhandled error:", err);
+        log.error({ err }, "unhandled request error");
         this.sendJson(res, 500, { error: "Internal server error" });
       });
     });
@@ -117,7 +119,7 @@ export class HttpApiServer {
     const reqId = newUuid().slice(0, 8);
     this.reqLogIds.set(req, reqId);
     this.resLogIds.set(res, reqId);
-    console.log(`[API ${reqId}] → ${method} ${url.pathname}${url.search}`);
+    log.info({ reqId, method, path: `${url.pathname}${url.search}` }, "request received");
 
     // CORS — allow the mini app dev server and any deployed origin
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -480,7 +482,7 @@ export class HttpApiServer {
       userId = result.userId;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[API] auth loginWithPrivy failed: ${msg}`);
+      log.warn({ reason: msg }, "auth loginWithPrivy failed");
       return this.sendJson(res, 401, { error: 'Unauthorized' });
     }
 
@@ -932,7 +934,7 @@ export class HttpApiServer {
       req.on("end", () => {
         try {
           const parsed = JSON.parse(body);
-          console.log(`[API ${reqId}] body: ${JSON.stringify(parsed)}`);
+          log.debug({ reqId, body: parsed }, "request body");
           resolve(parsed);
         } catch { reject(new Error("Invalid JSON")); }
       });
@@ -942,14 +944,14 @@ export class HttpApiServer {
 
   private sendJson(res: http.ServerResponse, status: number, data: unknown): void {
     const reqId = this.resLogIds.get(res) ?? '?';
-    console.log(`[API ${reqId}] ← ${status} ${JSON.stringify(data)}`);
+    log.info({ reqId, status }, "response sent");
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(data));
   }
 
   start(): void {
     this.server.listen(this.port, () => {
-      console.log(`HTTP API server listening on port ${this.port}`);
+      log.info({ port: this.port }, "HTTP API server listening");
     });
   }
 

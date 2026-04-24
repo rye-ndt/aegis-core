@@ -2,6 +2,9 @@ import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions";
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import { createLogger } from "../../../../helpers/observability/logger";
+
+const log = createLogger("gramjsTelegramResolver");
 
 export class GramjsTelegramResolver implements ITelegramHandleResolver {
   private client: TelegramClient;
@@ -28,16 +31,15 @@ export class GramjsTelegramResolver implements ITelegramHandleResolver {
     try {
       await this.client.start({ botAuthToken: this.botToken });
       this.connected = true;
-      this.connectPromise = null; // allow GC; subsequent resolveHandle calls skip the await
+      this.connectPromise = null;
       const savedSession = this.client.session.save() as unknown as string;
-      console.log("[GramjsTelegramResolver] connected. Session (save to TG_SESSION):", savedSession);
+      log.info({ step: "connected", session: savedSession }, "MTProto connected (save session to TG_SESSION)");
     } catch (err) {
-      console.error("[GramjsTelegramResolver] connection failed:", err instanceof Error ? err.message : err);
+      log.error({ err }, "MTProto connection failed");
     }
   }
 
   async resolveHandle(username: string): Promise<string> {
-    // Ensure connected before resolving
     if (this.connectPromise) {
       await this.connectPromise;
     }
@@ -58,11 +60,7 @@ export class GramjsTelegramResolver implements ITelegramHandleResolver {
     } catch (err) {
       if (err instanceof TelegramHandleNotFoundError) throw err;
       const msg = err instanceof Error ? err.message : String(err);
-      // Common MTProto errors:
-      // USERNAME_NOT_OCCUPIED — handle doesn't exist
-      // USERNAME_INVALID      — invalid format
-      // FLOOD_WAIT_X          — rate limit
-      console.error(`[GramjsTelegramResolver] resolveHandle failed for @${username}:`, msg);
+      log.error({ err: msg, username }, "resolveHandle failed");
       throw new TelegramHandleNotFoundError(username, msg);
     }
   }

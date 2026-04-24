@@ -42,6 +42,7 @@ import { DelegationRequestBuilder } from '../implementations/output/delegation/d
 import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
 import Redis from 'ioredis';
 import { metricsRegistry } from "../../helpers/observability/metricsRegistry";
+import { createLogger } from "../../helpers/observability/logger";
 import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
 import { RedisMiniAppRequestCache } from '../implementations/output/cache/redis.miniAppRequest';
 import type { IMiniAppRequestCache } from '../../use-cases/interface/output/cache/miniAppRequest.cache';
@@ -96,6 +97,8 @@ import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainRpcUrls,
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
 import type { DailyReport } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
+
+const log = createLogger("assistantDI");
 
 export class AssistantInject {
   private sqlDB: DrizzleSqlDB | null = null;
@@ -401,8 +404,8 @@ export class AssistantInject {
     if (!url) return undefined;
     if (!this._redis) {
       this._redis = new Redis(url, { lazyConnect: false });
-      this._redis.on('error', (err: Error) => console.error('[Redis]', err.message));
-      this._redis.on('ready', () => console.log('[Redis] ready'));
+      this._redis.on('error', (err: Error) => log.error({ err }, 'Redis error'));
+      this._redis.on('ready', () => log.info('Redis ready'));
       metricsRegistry.bindRedis(this._redis);
       const _origSend = this._redis.sendCommand.bind(this._redis);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -642,7 +645,7 @@ export class AssistantInject {
         }),
       );
     } else {
-      console.warn("[AssistantInject] /swap capability skipped — signing-request use case not ready (Redis unavailable?)");
+      log.warn({ reason: "redis_unavailable" }, "/swap capability skipped — signing-request use case not ready");
     }
 
     const yieldOptimizer = this.getYieldOptimizerUseCase();
@@ -655,7 +658,7 @@ export class AssistantInject {
         }),
       );
     } else {
-      console.warn("[AssistantInject] /yield capability skipped — Redis unavailable");
+      log.warn({ reason: "redis_unavailable" }, "/yield capability skipped");
     }
 
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash

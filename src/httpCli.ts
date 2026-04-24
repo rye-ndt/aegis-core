@@ -3,11 +3,14 @@ process.env.PROCESS_ROLE = "http";
 
 import { Api } from "grammy";
 import { AssistantInject } from "./adapters/inject/assistant.di";
+import { createLogger } from "./helpers/observability/logger";
+
+const log = createLogger("httpCli");
 
 (async () => {
   const tgToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!tgToken) {
-    console.error("TELEGRAM_BOT_TOKEN is required (for outbound notifications).");
+    log.error("TELEGRAM_BOT_TOKEN is required (for outbound notifications).");
     process.exit(1);
   }
 
@@ -26,17 +29,17 @@ import { AssistantInject } from "./adapters/inject/assistant.di";
   const httpServer = inject.getHttpApiServer(signingRequestUseCase);
   httpServer.start();
 
-  console.log("[httpCli] HTTP API-only replica up.");
+  log.info("HTTP API-only replica up.");
 
   process.on("SIGTERM", async () => {
-    console.log("[httpCli] SIGTERM — shutting down…");
+    log.info("SIGTERM — shutting down…");
     httpServer.stop();
     await inject.getRedis()?.quit();
     process.exit(0);
   });
 
   process.on("SIGINT", async () => {
-    console.log("[httpCli] SIGINT — shutting down…");
+    log.info("SIGINT — shutting down…");
     httpServer.stop();
     await inject.getRedis()?.quit();
     process.exit(0);

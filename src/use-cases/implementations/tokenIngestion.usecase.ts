@@ -3,6 +3,9 @@ import type { ITokenCrawlerJob } from "../interface/output/tokenCrawler.interfac
 import type { ITokenRegistryDB, TokenRecordInit } from "../interface/output/repository/tokenRegistry.repo";
 import { newUuid } from "../../helpers/uuid";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
+import { createLogger } from "../../helpers/observability/logger";
+
+const log = createLogger("tokenIngestion");
 
 export class TokenIngestionUseCase implements ITokenIngestionUseCase {
   constructor(
@@ -13,7 +16,7 @@ export class TokenIngestionUseCase implements ITokenIngestionUseCase {
   async ingest(chainId: number): Promise<void> {
     const tokens = await this.crawler.fetchTokens(chainId);
     if (tokens.length === 0) {
-      console.log("[TokenIngestionUseCase] no tokens returned, skipping upsert");
+      log.info({ step: "ingest-skip", chainId }, "no tokens returned, skipping upsert");
       return;
     }
     const now = newCurrentUTCEpoch();
@@ -37,9 +40,9 @@ export class TokenIngestionUseCase implements ITokenIngestionUseCase {
         await this.tokenRegistryDB.upsert(record);
         upserted++;
       } catch (err) {
-        console.error(`[TokenIngestionUseCase] upsert failed for ${token.symbol}:`, err);
+        log.error({ err, symbol: token.symbol }, "token upsert failed");
       }
     }
-    console.log(`[TokenIngestionUseCase] upserted ${upserted}/${tokens.length} tokens for chainId=${chainId}`);
+    log.info({ step: "ingest-done", upserted, total: tokens.length, chainId }, "token ingestion complete");
   }
 }

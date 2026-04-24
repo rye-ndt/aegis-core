@@ -1,6 +1,9 @@
 import { encodeFunctionData } from "viem";
 import type { ToolStep } from "../../../../../use-cases/interface/output/toolManifest.types";
 import { resolve, resolveRecord, type TemplateContext } from "./templateEngine";
+import { createLogger } from "../../../../../helpers/observability/logger";
+
+const log = createLogger("stepExecutors");
 export type { TemplateContext };
 
 type StepOutput = Record<string, string>;
@@ -58,7 +61,7 @@ export async function executeHttpPost(
   for (const [key, value] of Object.entries(step.body)) {
     resolvedBody[key] = typeof value === "string" ? resolve(value, ctx) : value;
   }
-  console.log(`[stepExecutors] http_post ${url}`, JSON.stringify(resolvedBody));
+  log.debug({ step: "http_post", url, body: resolvedBody }, "executing HTTP post step");
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -11,6 +11,9 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
 import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import type { ViemClientAdapter } from "../blockchain/viemClient";
+import { createLogger } from "../../../../helpers/observability/logger";
+
+const log = createLogger("getPortfolioTool");
 
 const ERC20_BALANCE_ABI = [
   {
@@ -46,9 +49,9 @@ export class GetPortfolioTool implements ITool {
 
   async execute(_input: IToolInput): Promise<IToolOutput> {
     try {
-      console.log(`[GetPortfolioTool] start userId=${this.userId}`);
+      log.debug({ step: "start", userId: this.userId }, "portfolio fetch started");
       const profile = await this.userProfileDB.findByUserId(this.userId);
-      console.log(`[GetPortfolioTool] db profile found=${!!profile} sca=${profile?.smartAccountAddress ?? "none"}`);
+      log.debug({ found: !!profile, sca: profile?.smartAccountAddress ?? "none" }, "db profile loaded");
 
       let walletAddress: `0x${string}` | undefined;
       let walletLabel = "Smart Contract Account";
@@ -57,7 +60,7 @@ export class GetPortfolioTool implements ITool {
         walletAddress = profile.smartAccountAddress as `0x${string}`;
       } else {
         const cached = await this.userProfileCache?.get(this.userId).catch(() => null);
-        console.log(`[GetPortfolioTool] redis cache hit=${!!cached} embedded=${cached?.embeddedWalletAddress ?? "none"}`);
+        log.debug({ choice: cached ? "cache-hit" : "cache-miss", embedded: cached?.embeddedWalletAddress ?? "none" }, "Redis cache lookup");
         if (cached?.embeddedWalletAddress) {
           walletAddress = cached.embeddedWalletAddress as `0x${string}`;
           walletLabel = "Embedded Wallet (SCA not yet deployed)";
@@ -72,14 +75,13 @@ export class GetPortfolioTool implements ITool {
       }
 
       const scaAddress = walletAddress;
-      console.log(`[GetPortfolioTool] fetching balances for ${walletLabel} address=${scaAddress}`);
+      log.debug({ step: "fetch-balances", walletLabel, address: scaAddress }, "fetching balances");
       const tokens = await this.tokenRegistryService.listByChain(this.chainId);
-      console.log(`[GetPortfolioTool] token count=${tokens.length} chainId=${this.chainId}`);
+      log.debug({ tokenCount: tokens.length, chainId: this.chainId }, "token list loaded");
 
       const nativeTokens = tokens.filter((t) => t.isNative);
       const erc20Tokens = tokens.filter((t) => !t.isNative);
 
-      // Fetch native balances (one call each — typically just one native token)
       const nativeBalances = await Promise.all(
         nativeTokens.map((t) =>
           this.viemClient.publicClient
@@ -89,7 +91,6 @@ export class GetPortfolioTool implements ITool {
         ),
       );
 
-      // Batch all ERC20 balanceOf calls into a single multicall
       const erc20Results = erc20Tokens.length > 0
         ? await this.viemClient.publicClient.multicall({
             contracts: erc20Tokens.map((t) => ({
@@ -102,7 +103,7 @@ export class GetPortfolioTool implements ITool {
           })
         : [];
 
-      console.log(`[GetPortfolioTool] multicall done erc20Results=${erc20Results.length}`);
+      log.debug({ step: "multicall-done", erc20Count: erc20Results.length }, "multicall complete");
 
       const rows: string[] = [`${walletLabel}: ${scaAddress}`, "", "Token | Balance", "------|-------"];
 
@@ -117,10 +118,10 @@ export class GetPortfolioTool implements ITool {
         rows.push(`${token.symbol} | ${(Number(raw) / 10 ** token.decimals).toFixed(6)}`);
       }
 
-      console.log(`[GetPortfolioTool] done rows=${rows.length}`);
+      log.info({ step: "done", rowCount: rows.length }, "portfolio fetch complete");
       return { success: true, data: rows.join("\n") };
     } catch (err) {
-      console.error(`[GetPortfolioTool] error:`, err);
+      log.error({ err }, "portfolio fetch error");
       const message = toErrorMessage(err);
       return { success: false, error: message };
     }

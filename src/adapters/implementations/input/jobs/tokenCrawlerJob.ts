@@ -1,5 +1,8 @@
 import type { ITokenIngestionUseCase } from "../../../../use-cases/interface/input/tokenIngestion.interface";
 import { isWorker } from "../../../../helpers/env/role";
+import { createLogger } from "../../../../helpers/observability/logger";
+
+const log = createLogger("tokenCrawlerJob");
 
 export class TokenCrawlerJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -12,7 +15,7 @@ export class TokenCrawlerJob {
 
   start(): void {
     if (!isWorker()) {
-      console.log("[TokenCrawlerJob] not a worker role — not starting.");
+      log.info("not a worker role — not starting.");
       return;
     }
     this.run();
@@ -27,9 +30,12 @@ export class TokenCrawlerJob {
   }
 
   private run(): void {
-    console.log("[TokenCrawlerJob] triggering token ingestion...");
-    this.tokenIngestionUseCase.ingest(this.chainId).catch((err) => {
-      console.error("[TokenCrawlerJob] ingestion error:", err);
+    const start = Date.now();
+    log.info({ step: "tick-start" }, "triggering token ingestion");
+    this.tokenIngestionUseCase.ingest(this.chainId).then(() => {
+      log.info({ step: "tick-end", durationMs: Date.now() - start }, "token ingestion complete");
+    }).catch((err) => {
+      log.error({ err }, "ingestion error");
     });
   }
 }

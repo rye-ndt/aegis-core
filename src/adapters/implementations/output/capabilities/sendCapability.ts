@@ -26,6 +26,7 @@ import type { ITelegramHandleResolver } from "../../../../use-cases/interface/ou
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
+import { createLogger } from "../../../../helpers/observability/logger";
 import {
   buildConfirmationMessage,
   buildDelegationPrompt,
@@ -39,6 +40,7 @@ import {
   pickCandidateByInput,
 } from "./send.utils";
 
+const log = createLogger("sendCapability");
 const DEFAULT_MAX_COMPILE_TURNS = 10;
 const MAX_COMPILE_TURNS = parseInt(
   process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_COMPILE_TURNS),
@@ -143,9 +145,7 @@ export class SendCapability implements Capability<SendParams> {
       return this.abort(`No tool is registered for ${this.command}. Contact the admin.`);
     }
 
-    console.log(
-      `[SendCapability] command=${this.command} → tool=${toolResult.toolId}, compiling schema…`,
-    );
+    log.info({ step: "tool-selected", command: this.command, toolId: toolResult.toolId }, "compiling schema");
     return this.initSessionFromTool(ctx, text, toolResult);
   }
 
@@ -161,7 +161,7 @@ export class SendCapability implements Capability<SendParams> {
         amountHuman: params.partialParams.amountHuman as string | undefined,
       });
     } catch (err) {
-      console.error("[SendCapability] buildRequestBody failed:", err);
+      log.error({ err }, "buildRequestBody failed");
       return {
         kind: "chat",
         text: `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
@@ -170,15 +170,14 @@ export class SendCapability implements Capability<SendParams> {
 
     const fromToken = params.resolvedFrom;
 
-    console.log("[SendCapability] autosign guard", {
+    log.debug({
       hasFromToken: !!fromToken,
       isNative: fromToken?.isNative,
       symbol: fromToken?.symbol,
-      address: fromToken?.address,
       hasTokenDelegationDB: !!this.deps.tokenDelegationDB,
       hasExecutionEstimator: !!this.deps.executionEstimator,
       usesDualSchema: params.usesDualSchema,
-    });
+    }, "autosign guard check");
 
     // Auto-sign path: delegation already sufficient.
     if (
@@ -196,9 +195,7 @@ export class SendCapability implements Capability<SendParams> {
         executionEstimator: this.deps.executionEstimator,
       });
       if (guard.ok) {
-        console.log(
-          `[SendCapability] delegation sufficient — pushing auto-sign request to Mini App for userId=${ctx.userId}`,
-        );
+        log.info({ step: "auto-sign", userId: ctx.userId }, "delegation sufficient — pushing auto-sign request");
         await ctx.emit({
           kind: "chat",
           text: "✅ Check the Aegis mini app to complete the transaction automatically.",
@@ -621,7 +618,7 @@ export class SendCapability implements Capability<SendParams> {
       const msg = isNotFound
         ? `Sorry, I couldn't find a Telegram user for @${handle}. Double-check the handle and try again.`
         : `Sorry, something went wrong resolving @${handle}. Please try again.`;
-      if (!isNotFound) console.error(`[SendCapability] resolveHandle error for @${handle}:`, err);
+      if (!isNotFound) log.error({ err, handle }, "resolveHandle error");
       await ctx.emit({ kind: "chat", text: msg });
       return false;
     }
@@ -640,10 +637,7 @@ export class SendCapability implements Capability<SendParams> {
         parseMode: "Markdown",
       });
     } catch (err) {
-      console.error(
-        `[SendCapability] Privy wallet resolution failed for telegramUserId=${telegramUserId}:`,
-        err,
-      );
+      log.error({ err, telegramUserId }, "Privy wallet resolution failed");
       await ctx.emit({
         kind: "chat",
         text: `Sorry, I couldn't set up a wallet for @${handle}. Please try again later.`,
@@ -688,7 +682,7 @@ export class SendCapability implements Capability<SendParams> {
         parseMode: "Markdown",
       });
     } catch (err) {
-      console.error("[SendCapability] delegation request error:", err);
+      log.error({ err }, "delegation request error");
     }
   }
 

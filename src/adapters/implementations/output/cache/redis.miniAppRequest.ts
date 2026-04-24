@@ -1,7 +1,9 @@
 import type Redis from 'ioredis';
 import type { IMiniAppRequestCache } from '../../../../use-cases/interface/output/cache/miniAppRequest.cache';
 import type { MiniAppRequest } from '../../../../use-cases/interface/output/cache/miniAppRequest.types';
+import { createLogger } from '../../../../helpers/observability/logger';
 
+const log = createLogger('miniAppRequestCache');
 const REQUEST_TTL_SECONDS = 600;
 
 export class RedisMiniAppRequestCache implements IMiniAppRequestCache {
@@ -29,6 +31,7 @@ export class RedisMiniAppRequestCache implements IMiniAppRequestCache {
 
   async retrieve(requestId: string): Promise<MiniAppRequest | null> {
     const raw = await this.redis.get(this.key(requestId));
+    log.debug({ choice: raw ? 'hit' : 'miss', requestId }, 'mini-app request lookup');
     return raw ? (JSON.parse(raw) as MiniAppRequest) : null;
   }
 
@@ -42,10 +45,12 @@ export class RedisMiniAppRequestCache implements IMiniAppRequestCache {
 
   async findNextPendingSignForUser(userId: string): Promise<MiniAppRequest | null> {
     const ids = await this.redis.zrange(this.userSignQueueKey(userId), 0, -1);
+    log.debug({ choice: 'queue-scan', userId, queueDepth: ids.length }, 'scanning user sign queue');
     for (const id of ids) {
       const record = await this.retrieve(id);
       if (record && record.requestType === 'sign') return record;
       // Stale queue entry (TTL expired or already deleted) — clean up.
+      log.debug({ choice: 'stale-evict', userId, staleId: id }, 'evicting stale queue entry');
       await this.redis.zrem(this.userSignQueueKey(userId), id);
     }
     return null;

@@ -6,6 +6,8 @@ services:
       HTTP_API_PORT: "4000"
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+      LOG_LEVEL: debug
+      LOG_PRETTY: "true"
     ports:
       - "4000:4000"
     depends_on:
@@ -44,6 +46,8 @@ services:
       PROCESS_ROLE: worker
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+      LOG_LEVEL: debug
+      LOG_PRETTY: "true"
     depends_on: [redis, postgres]
     restart: unless-stopped
 
@@ -56,6 +60,8 @@ services:
       HTTP_API_PORT: "8080"
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+      LOG_LEVEL: debug
+      LOG_PRETTY: "true"
     depends_on: [redis, postgres]
     deploy:
       replicas: 3

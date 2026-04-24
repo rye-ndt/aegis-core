@@ -7,7 +7,9 @@ import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { AuthRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
+import { createLogger } from "../../../../helpers/observability/logger";
 
+const log = createLogger("telegramHandler");
 const MINI_APP_URL = process.env.MINI_APP_URL;
 
 /**
@@ -29,8 +31,7 @@ export class TelegramAssistantHandler {
     this.botRef = bot;
 
     bot.catch((err) => {
-      console.error("Bot error:", err.message);
-      if (err.error) console.error("Cause:", err.error);
+      log.error({ err: err.message, cause: err.error }, "bot error");
     });
 
     bot.command("start", async (ctx) => {
@@ -75,7 +76,7 @@ export class TelegramAssistantHandler {
           input: { kind: "callback", data },
         });
       } catch (err) {
-        console.error("[Handler] callback dispatch error:", err);
+        log.error({ err }, "callback dispatch error");
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
@@ -114,7 +115,7 @@ export class TelegramAssistantHandler {
           await ctx.reply("I didn't understand that. Try a natural-language prompt.");
         }
       } catch (err) {
-        console.error("[Handler] error handling message:", err);
+        log.error({ err }, "error handling message");
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
@@ -172,7 +173,7 @@ export class TelegramAssistantHandler {
       });
       await ctx.reply("Authenticated with Google. You can now use the Onchain Agent.");
     } catch (err) {
-      console.error("[Auth] web_app_data loginWithPrivy failed:", err);
+      log.error({ err }, "web_app_data loginWithPrivy failed");
       await ctx.reply("Authentication failed. Please try again from the mini app.");
     }
   }
