@@ -76,6 +76,10 @@ import { TelegramArtifactRenderer } from "../implementations/output/artifactRend
 import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
 import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
 import { SendCapability } from "../implementations/output/capabilities/sendCapability";
+import { SwapCapability } from "../implementations/output/capabilities/swapCapability";
+import { RelayClient } from "../implementations/output/relay/relayClient";
+import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
+import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
 import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
 
 export class AssistantInject {
@@ -114,6 +118,8 @@ export class AssistantInject {
   private _executionEstimator: IExecutionEstimator | null = null;
   private _userOpExecutor: IUserOpExecutor | null = null;
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
+  private _relayClient: IRelayClient | null = null;
+  private _relaySwapTool: RelaySwapTool | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -541,6 +547,20 @@ export class AssistantInject {
     return this._systemToolProvider;
   }
 
+  getRelayClient(): IRelayClient {
+    if (!this._relayClient) {
+      this._relayClient = new RelayClient();
+    }
+    return this._relayClient;
+  }
+
+  getRelaySwapTool(): RelaySwapTool {
+    if (!this._relaySwapTool) {
+      this._relaySwapTool = new RelaySwapTool(this.getRelayClient());
+    }
+    return this._relaySwapTool;
+  }
+
   getCommandMappingUseCase(): ICommandMappingUseCase {
     if (!this._commandMappingUseCase) {
       const db = this.getSqlDB();
@@ -583,12 +603,35 @@ export class AssistantInject {
       chainId: this.getChainId(),
     };
 
-    // One SendCapability instance per INTENT_COMMAND (except BUY, owned by
-    // BuyCapability). All share the same deps + same compile→resolve→sign
-    // pipeline; the command is just a trigger.
+    // One SendCapability instance per INTENT_COMMAND (except BUY and SWAP,
+    // which own their own dedicated capabilities). All share the same deps +
+    // compile→resolve→sign pipeline; the command is just a trigger.
     for (const command of Object.values(INTENT_COMMAND)) {
       if (command === INTENT_COMMAND.BUY) continue;
+      if (command === INTENT_COMMAND.SWAP) continue;
       registry.register(new SendCapability(command, sendDeps));
+    }
+
+    // /swap — Relay-backed intent swap. Requires a live signing-request
+    // use case (created in telegramCli.ts before this dispatcher) because
+    // step-by-step execution awaits each signing response. If Redis isn't
+    // configured the capability is skipped silently — same policy as
+    // mini-app dependent capabilities elsewhere.
+    if (this._signingRequestUseCase) {
+      registry.register(
+        new SwapCapability({
+          intentUseCase: this.getIntentUseCase(),
+          resolverEngine: this.getResolverEngine(),
+          relaySwapTool: this.getRelaySwapTool(),
+          signingRequestUseCase: this._signingRequestUseCase,
+          tokenDelegationDB: this.getTokenDelegationRepo(),
+          executionEstimator: this.getExecutionEstimator(),
+          userProfileRepo: sqlDB.userProfiles,
+          chainId: this.getChainId(),
+        }),
+      );
+    } else {
+      console.warn("[AssistantInject] /swap capability skipped — signing-request use case not ready (Redis unavailable?)");
     }
 
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash

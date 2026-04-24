@@ -24,8 +24,12 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
     const prior = await this.pending.get(ctx.channelId);
     const now = newCurrentUTCEpoch();
 
-    // Prefer a fresh command match over a stale pending continuation:
-    // typing a new slash command should cancel any half-finished flow.
+    // Priority order:
+    //   1. A fresh slash-command / callback match pre-empts any stale flow.
+    //   2. Otherwise, resume an active pending-collection.
+    //   3. Otherwise, fall back to the default free-text capability.
+    // This ordering ensures mid-flow replies like "8" (a disambiguation
+    // choice) are not stolen by the default assistant LLM capability.
     const matchFirst = this.registry.match(ctx.input);
 
     let capability = matchFirst;
@@ -33,6 +37,9 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
     if (!capability && prior && prior.expiresAt > now) {
       capability = this.registry.byId(prior.capabilityId) ?? null;
       resuming = prior.state;
+    }
+    if (!capability) {
+      capability = this.registry.getDefault();
     }
 
     if (!capability) {

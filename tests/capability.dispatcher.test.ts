@@ -269,6 +269,30 @@ test("dispatcher: free text without a slash-command falls through to default", a
   if (art.kind === "chat") assert.equal(art.text, "default reply");
 });
 
+test("dispatcher: terminal result renders artifact and clears pending, skips run()", async () => {
+  let runCalled = false;
+  const cap: Capability = {
+    id: "term",
+    triggers: { command: INTENT_COMMAND.SEND },
+    async collect() {
+      return { kind: "terminal", artifact: { kind: "chat", text: "bye" } };
+    },
+    async run() {
+      runCalled = true;
+      return { kind: "noop" };
+    },
+  };
+  const { dispatcher, renderer, pending } = mkDispatcher([cap]);
+  // Prime with a pending state we expect to be cleared.
+  await pending.save("c1", { capabilityId: "term", state: { foo: 1 }, expiresAt: 9e9 });
+  const r = await dispatcher.handle(baseCtx({ input: { kind: "text", text: "/send" } }));
+  assert.equal(r.handled, true);
+  assert.equal(runCalled, false);
+  assert.equal(await pending.get("c1"), null);
+  const art = renderer.rendered[0]!;
+  if (art.kind === "chat") assert.equal(art.text, "bye");
+});
+
 test("pendingStore: expired entry is treated as absent", async () => {
   const store = new InMemoryPendingCollectionStore();
   await store.save("c", { capabilityId: "x", state: {}, expiresAt: 0 });

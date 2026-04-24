@@ -178,7 +178,7 @@ export class HttpApiServer {
       [{ method: "GET",    regex: /^\/intent\/([^/]+)$/ },            (req, res, url) => this.handleGetIntent(req, res, url)],
       [{ method: "DELETE", regex: /^\/tools\/([^/]+)$/ },             (req, res, url) => this.handleDeleteTool(req, res, url)],
       [{ method: "POST",   regex: /^\/delegation\/([^/]+)\/signed$/ }, (req, res, _u, id) => this.handlePostDelegationSigned(req, res, id)],
-      [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, _u, requestId) => this.handleGetMiniAppRequest(req, res, requestId)],
+      [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, url, requestId) => this.handleGetMiniAppRequest(req, res, url, requestId)],
       [{ method: "DELETE", regex: /^\/command-mappings\/(.+)$/ },     (req, res, _u, command) => this.handleDeleteCommandMapping(req, res, decodeURIComponent(command))],
       [{ method: "DELETE", regex: /^\/http-tools\/([^/]+)$/ },        (req, res, _u, id) => this.handleDeleteHttpTool(req, res, id)],
     ];
@@ -388,12 +388,29 @@ export class HttpApiServer {
   // ── GET /request/:requestId (no auth) ────────────────────────────────────────
 
   private async handleGetMiniAppRequest(
-    _req: http.IncomingMessage,
+    req: http.IncomingMessage,
     res: http.ServerResponse,
+    url: URL,
     requestId: string,
   ): Promise<void> {
     if (!this.miniAppRequestCache) {
       return this.sendJson(res, 503, { error: 'Mini app request service not available' });
+    }
+
+    // `?after=<prevId>` means "give me the next queued SignRequest for the
+    // authenticated user, regardless of the :id in the path". Used by the
+    // mini-app's step-chaining flow for multi-step swaps — the FE doesn't
+    // know the next request's id ahead of time.
+    const after = url.searchParams.get('after');
+    if (after) {
+      const userId = await this.extractUserId(req);
+      if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
+      const next = await this.miniAppRequestCache.findNextPendingSignForUser(userId);
+      if (!next) return this.sendJson(res, 404, { error: 'No next request' });
+      if (next.expiresAt <= newCurrentUTCEpoch()) {
+        return this.sendJson(res, 410, { error: 'Expired' });
+      }
+      return this.sendJson(res, 200, next);
     }
 
     const request = await this.miniAppRequestCache.retrieve(requestId);

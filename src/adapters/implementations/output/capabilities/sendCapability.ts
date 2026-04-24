@@ -25,9 +25,7 @@ import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
-import type { ApproveRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
-import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
-import { newUuid } from "../../../../helpers/uuid";
+import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import {
   buildConfirmationMessage,
   buildDelegationPrompt,
@@ -172,6 +170,16 @@ export class SendCapability implements Capability<SendParams> {
 
     const fromToken = params.resolvedFrom;
 
+    console.log("[SendCapability] autosign guard", {
+      hasFromToken: !!fromToken,
+      isNative: fromToken?.isNative,
+      symbol: fromToken?.symbol,
+      address: fromToken?.address,
+      hasTokenDelegationDB: !!this.deps.tokenDelegationDB,
+      hasExecutionEstimator: !!this.deps.executionEstimator,
+      usesDualSchema: params.usesDualSchema,
+    });
+
     // Auto-sign path: delegation already sufficient.
     if (
       fromToken &&
@@ -179,15 +187,15 @@ export class SendCapability implements Capability<SendParams> {
       this.deps.tokenDelegationDB &&
       this.deps.executionEstimator
     ) {
-      const delegations = await this.deps.tokenDelegationDB.findActiveByUserId(ctx.userId);
-      const estimationResult = await this.deps.executionEstimator.estimate({
-        delegations,
-        intentTokenAddress: fromToken.address,
-        intentTokenSymbol: fromToken.symbol,
-        intentAmountRaw: (params.partialParams.amountRaw as string) ?? "0",
-        intentAmountHuman: (params.partialParams.amountHuman as string) ?? "0",
+      const guard = await checkTokenDelegation({
+        userId: ctx.userId,
+        fromToken,
+        amountHuman: (params.partialParams.amountHuman as string) ?? "0",
+        amountRaw: (params.partialParams.amountRaw as string) ?? "0",
+        tokenDelegationDB: this.deps.tokenDelegationDB,
+        executionEstimator: this.deps.executionEstimator,
       });
-      if (!estimationResult.shouldApproveMore) {
+      if (guard.ok) {
         console.log(
           `[SendCapability] delegation sufficient — pushing auto-sign request to Mini App for userId=${ctx.userId}`,
         );
@@ -208,28 +216,10 @@ export class SendCapability implements Capability<SendParams> {
         return { kind: "noop" };
       }
 
-      // Not sufficient — push an Aegis Guard re-approval mini-app button.
-      const amountHumanNum = parseFloat((params.partialParams.amountHuman as string) ?? "0");
-      const topUp = Math.max(amountHumanNum, 100);
-      const rawForReapproval = (
-        BigInt(Math.round(topUp)) * 10n ** BigInt(fromToken.decimals)
-      ).toString();
-      const now = newCurrentUTCEpoch();
-      const approveRequest: ApproveRequest = {
-        requestId: newUuid(),
-        requestType: "approve",
-        userId: ctx.userId,
-        subtype: "aegis_guard",
-        createdAt: now,
-        expiresAt: now + 600,
-        reapproval: true,
-        tokenAddress: fromToken.address,
-        amountRaw: rawForReapproval,
-      };
       return {
         kind: "mini_app",
-        request: approveRequest,
-        promptText: estimationResult.displayMessage,
+        request: guard.reapprovalRequest,
+        promptText: guard.displayMessage,
         buttonText: "Approve More",
       };
     }

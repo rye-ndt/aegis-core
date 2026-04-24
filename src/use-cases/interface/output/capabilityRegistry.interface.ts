@@ -11,14 +11,14 @@ export interface ICapabilityRegistry {
   registerDefault(capability: Capability): void;
   byId(id: string): Capability | undefined;
   /**
-   * Find the capability that should handle this input when no prior
-   * pending-collection is active. Returns null if nothing matches — the
-   * caller may then fall through to a legacy path.
-   *
-   * If a default capability is registered, `match` on a text input that
-   * doesn't match a command falls through to it rather than returning null.
+   * Find the capability that explicitly matches this input via a slash
+   * command or callback prefix. Returns null when only the default would
+   * apply — callers must resume any pending-collection before falling back
+   * to `getDefault()`, so a multi-turn flow is not pre-empted by free text.
    */
   match(input: DispatchInput): Capability | null;
+  /** The catch-all free-text capability, if one was registered. */
+  getDefault(): Capability | null;
   /** For debugging / admin. */
   listCommands(): Array<{ id: string; command?: INTENT_COMMAND }>;
 }

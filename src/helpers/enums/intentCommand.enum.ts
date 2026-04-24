@@ -6,6 +6,7 @@ export enum INTENT_COMMAND {
   TOPUP   = "/topup",
   DCA     = "/dca",
   SEND    = "/send",
+  SWAP    = "/swap",
 }
 
 /**
