@@ -52,7 +52,7 @@ export class CapabilityRegistry implements ICapabilityRegistry {
         const cap = this.byCommand.get(command);
         if (cap) return cap;
       }
-      return this.defaultCapability;
+      return null;
     }
     // callback
     for (const { prefix, capability } of this.byCallbackPrefix) {
@@ -61,6 +61,10 @@ export class CapabilityRegistry implements ICapabilityRegistry {
       }
     }
     return null;
+  }
+
+  getDefault(): Capability | null {
+    return this.defaultCapability;
   }
 
   listCommands(): Array<{ id: string; command?: INTENT_COMMAND }> {

@@ -18,3 +18,8 @@ export interface ISigningRequestCache {
   findById(id: string): Promise<SigningRequestRecord | null>;
   resolve(id: string, status: 'approved' | 'rejected', txHash?: string): Promise<void>;
 }
+
+export type ResolvedSigningRequest =
+  | { status: 'approved'; txHash?: string }
+  | { status: 'rejected' }
+  | { status: 'expired' };

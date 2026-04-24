@@ -1,5 +1,77 @@
 # Onchain Agent — Status
 
+## /swap — 2026-04-24
+
+New Telegram command: `/swap`. Relay-backed intent swap with autonomous
+execution via the user's session key. Same-chain and cross-chain.
+
+**Flow** (capability-first, mirrors `/send`'s gather pipeline):
+
+1. `SwapCapability` registered in the dispatcher for `INTENT_COMMAND.SWAP`.
+2. `collect()` reuses `intentUseCase.compileSchema` + `ResolverEngine` to
+   gather `fromTokenSymbol`, `toTokenSymbol`, `readableAmount`, and optional
+   `fromChainSymbol` / `toChainSymbol`. Disambiguation on multi-candidate
+   symbols uses `buildDisambiguationPrompt` from `send.messages.ts`.
+3. `run()` runs the **shared Aegis Guard interceptor** on the origin token
+   (`use-cases/implementations/aegisGuardInterceptor.ts` — extracted from
+   `SendCapability` to de-duplicate). If insufficient, returns an
+   `ApproveRequest` mini-app artifact; user re-runs `/swap` after approving.
+4. Calls `RelaySwapTool.execute(...)` which hits `${RELAY_API_URL}/quote`
+   and returns the ordered list of transactions to sign.
+5. Per step: creates a `SigningRequestRecord` (via new
+   `ISigningRequestUseCase.create`), emits a `mini_app` artifact with a
+   matching `SignRequest`, then awaits via new `waitFor(requestId, timeoutMs)`
+   which polls the `sign_req:{id}` Redis key. Rejection / timeout short-
+   circuits the queue.
+
+**No /confirm gate.** Once Aegis Guard passes, the capability schedules
+each step directly. Mini-app session key signs everything.
+
+**Chain coverage.** `src/helpers/chainConfig.ts` is now the single source
+of truth — added `relayEnabled: boolean` per entry + exported
+`RELAY_SUPPORTED_CHAIN_IDS` + `resolveChainSymbol(sym?)` helper. Mainnets
+enabled; Fuji disabled (Relay testnet coverage is limited).
+
+**Conventions introduced / enforced:**
+
+- Aegis Guard re-approval logic lives in one place
+  (`use-cases/implementations/aegisGuardInterceptor.ts`). `SendCapability`
+  and `SwapCapability` both call `checkTokenDelegation(...)`; new autonomous
+  flows must do the same rather than inlining.
+- New cross-chain port: `IRelayClient` in
+  `use-cases/interface/output/relay.interface.ts`. The `RelayClient`
+  adapter is a thin `fetch` wrapper; no transport-layer complexity in the
+  use-case layer.
+- System tools may opt out of `SystemToolProviderConcrete` when they're
+  command-path only — `RelaySwapTool` is registered solely through the
+  DI factory (`getRelaySwapTool()`), not in the LLM tool registry. The LLM
+  sees `execute_intent`, not `relay_swap`.
+- `SwapCapability` constructs its `ToolManifest` in-memory (no DB seed).
+  Acceptable because the manifest is consumed only by the compile+resolver
+  pipeline — Relay supplies calldata, so `buildRequestBody` / solver
+  registry are bypassed. Do not "fix" by seeding `tool_manifests`.
+- `ISigningRequestUseCase` now exposes `create()` and
+  `waitFor(requestId, timeoutMs)`. New multi-step autonomous flows should
+  use the same pair rather than fire-and-forget artifacts.
+- New optional env var: `RELAY_API_URL` (defaults to `https://api.relay.link`).
+
+**FE continuation endpoint:** `GET /request/:id?after=<prevId>` returns the
+next pending `SignRequest` for the authenticated user (privy token required).
+Backed by a new `user_pending_signs:<userId>` Redis ZSET maintained by
+`RedisMiniAppRequestCache.store/delete`. This is what lets the mini-app stay
+open across multi-step swaps instead of closing after every tx. Path `:id`
+is ignored when `?after=` is present — it's there for URL symmetry only.
+
+**Convention introduced:** any cache that implements `IMiniAppRequestCache`
+must index `SignRequest` entries by `userId` so the continuation endpoint can
+look up next-pending without an O(N) Redis scan. New variants that require
+the same "what's next for user X" lookup should reuse the ZSET.
+
+**Out of scope (v1):**
+
+- Slippage control (Relay default used).
+- Destination-fill polling for cross-chain (Relay's `/intents/status/v2`).
+
 ## Capability refactor (phase 2, complete) — 2026-04-23
 
 All steps from `constructions/capability-convergence-plan.md` are now
@@ -67,8 +139,12 @@ the LLM fallback **remain on the legacy handler path** — see below.
 - `use-cases/implementations/capabilityRegistry.ts` — in-memory index by
   id / command / callback-prefix.
 - `use-cases/implementations/capabilityDispatcher.usecase.ts` — single
-  entry point. Fresh command match always beats a stale pending flow
-  (typing `/send` cancels an unfinished `/buy`).
+  entry point. Priority: (1) fresh slash-command / callback match, which
+  pre-empts and clears any stale pending flow; (2) resume active
+  pending-collection; (3) default free-text capability. Typing `/send`
+  cancels an unfinished `/buy`, but a bare reply like "8" to a
+  disambiguation prompt resumes the pending flow instead of being
+  swallowed by the default assistant LLM.
 - `adapters/implementations/output/pendingCollectionStore/inMemory.ts` —
   TTL-backed per-channel pending state.
 - `adapters/implementations/output/artifactRenderer/telegram.ts` — one
@@ -124,6 +200,12 @@ the working `/send` flow.
 - When adding a default-match fallback (e.g. wiring
   `AssistantChatCapability`), extend `ICapabilityRegistry` explicitly —
   do not special-case it in the dispatcher.
+- `ICapabilityRegistry.match()` returns **only** explicit command /
+  callback matches (never the default). The dispatcher owns the
+  "pending beats default" ordering via `getDefault()`. Do not revive the
+  old behaviour of returning the default from `match()` — it causes
+  multi-turn replies (e.g. disambiguation "8") to be stolen by the LLM
+  and silently clears the pending flow.
 
 ## Onramp /buy — 2026-04-23
 
