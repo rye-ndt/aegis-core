@@ -34,6 +34,43 @@ services:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
 
+  # Multi-replica profile: `docker compose --profile scale up --build`
+  # Simulates the Cloud Run topology: 1 worker + 3 api replicas + nginx LB.
+  worker:
+    profiles: ["scale"]
+    build: .
+    env_file: .env
+    environment:
+      PROCESS_ROLE: worker
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+    depends_on: [redis, postgres]
+    restart: unless-stopped
+
+  api:
+    profiles: ["scale"]
+    build: .
+    env_file: .env
+    environment:
+      PROCESS_ROLE: http
+      HTTP_API_PORT: "8080"
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
+    depends_on: [redis, postgres]
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+  lb:
+    profiles: ["scale"]
+    image: nginx:1.27-alpine
+    ports:
+      - "4000:80"
+    volumes:
+      - ./nginx.scale.conf:/etc/nginx/nginx.conf:ro
+    depends_on: [api]
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redis_data:

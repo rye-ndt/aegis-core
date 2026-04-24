@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { INTENT_ACTION } from "../../../../helpers/enums/intentAction.enum";
@@ -92,14 +93,16 @@ export class OpenAIIntentParser implements IIntentParser {
 
     const systemPrompt = buildSystemPrompt(relevantManifests ?? []);
 
-    const response = await this.client.chat.completions.parse({
-      model: this.model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-      response_format: zodResponseFormat(ResponseSchema, "response"),
-    });
+    const response = await openaiLimiter(() =>
+      this.client.chat.completions.parse({
+        model: this.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+        response_format: zodResponseFormat(ResponseSchema, "response"),
+      }),
+    );
 
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI");

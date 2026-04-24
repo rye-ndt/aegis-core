@@ -1,6 +1,7 @@
 import {
   createPublicClient,
   createWalletClient,
+  fallback,
   http,
   type PublicClient,
   type WalletClient,
@@ -26,12 +27,17 @@ export class ViemClientAdapter implements IChainReader {
 
   constructor(params: {
     rpcUrl: string;
+    rpcUrls?: string[];
     botPrivateKey: string;
     chainId: number;
     chain: Chain;
   }) {
     this.chainId = params.chainId;
-    const transport = http(params.rpcUrl, { timeout: 10_000 });
+    const urls = params.rpcUrls && params.rpcUrls.length > 0 ? params.rpcUrls : [params.rpcUrl];
+    const transport = fallback(
+      urls.map((url) => http(url, { timeout: 10_000 })),
+      { rank: false, retryCount: 1 },
+    );
 
     this.publicClient = createPublicClient({ chain: params.chain, transport });
 

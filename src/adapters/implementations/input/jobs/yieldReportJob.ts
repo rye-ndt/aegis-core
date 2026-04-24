@@ -1,4 +1,5 @@
 import type Redis from "ioredis";
+import { isWorker } from "../../../../helpers/env/role";
 import type { IYieldOptimizerUseCase, DailyReport } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { IYieldRepository } from "../../../../use-cases/interface/yield/IYieldRepository";
 
@@ -18,6 +19,10 @@ export class YieldReportJob {
   ) {}
 
   start(): void {
+    if (!isWorker()) {
+      console.log("[YieldReportJob] not a worker role — not starting.");
+      return;
+    }
     this.tick();
     this.timer = setInterval(() => this.tick(), TICK_INTERVAL_MS);
   }

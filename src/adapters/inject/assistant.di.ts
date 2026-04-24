@@ -41,6 +41,7 @@ import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/
 import { DelegationRequestBuilder } from '../implementations/output/delegation/delegationRequestBuilder';
 import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
 import Redis from 'ioredis';
+import { metricsRegistry } from "../../helpers/observability/metricsRegistry";
 import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
 import { RedisMiniAppRequestCache } from '../implementations/output/cache/redis.miniAppRequest';
 import type { IMiniAppRequestCache } from '../../use-cases/interface/output/cache/miniAppRequest.cache';
@@ -72,6 +73,8 @@ import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRe
 import { CapabilityDispatcher } from "../../use-cases/implementations/capabilityDispatcher.usecase";
 import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capabilityDispatcher.interface";
 import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
+import { RedisPendingCollectionStore } from "../implementations/output/pendingCollectionStore/redis";
+import type { IPendingCollectionStore } from "../../use-cases/interface/output/pendingCollectionStore.interface";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
 import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
@@ -91,7 +94,7 @@ import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob
 import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
 import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { YieldCapability, buildNudgeKeyboard } from "../implementations/output/capabilities/yieldCapability";
-import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainObject } from "../../helpers/chainConfig";
+import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainRpcUrls, getChainObject } from "../../helpers/chainConfig";
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
 import type { DailyReport } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
@@ -158,6 +161,7 @@ export class AssistantInject {
     if (!this._viemClient) {
       this._viemClient = new ViemClientAdapter({
         rpcUrl: CHAIN_CONFIG.rpcUrl,
+        rpcUrls: CHAIN_CONFIG.rpcUrls as string[],
         botPrivateKey: "",
         chainId: CHAIN_CONFIG.chainId,
         chain: CHAIN_CONFIG.chain,
@@ -315,6 +319,7 @@ export class AssistantInject {
 
       const webSearchService = new TavilyWebSearchService(
         process.env.TAVILY_API_KEY ?? "",
+        this.getRedis(),
       );
 
       const chainId = this.getChainId();
@@ -404,6 +409,16 @@ export class AssistantInject {
     if (!this._redis) {
       this._redis = new Redis(url, { lazyConnect: false });
       this._redis.on('error', (err: Error) => console.error('[Redis]', err.message));
+      this._redis.on('ready', () => console.log('[Redis] ready'));
+      metricsRegistry.bindRedis(this._redis);
+      const _origSend = this._redis.sendCommand.bind(this._redis);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._redis as any).sendCommand = (cmd: any) => {
+        const start = Date.now();
+        const promise = _origSend(cmd);
+        Promise.resolve(promise).finally(() => metricsRegistry.recordRedisOp(Date.now() - start));
+        return promise;
+      };
     }
     return this._redis;
   }
@@ -460,6 +475,7 @@ export class AssistantInject {
         CHAIN_CONFIG.rpcUrl,
         CHAIN_CONFIG.chain,
         CHAIN_CONFIG.paymasterUrl,
+        CHAIN_CONFIG.rpcUrls as string[],
       );
     }
     return this._userOpExecutor;
@@ -568,7 +584,7 @@ export class AssistantInject {
 
   getRelayClient(): IRelayClient {
     if (!this._relayClient) {
-      this._relayClient = new RelayClient();
+      this._relayClient = new RelayClient(undefined, this.getRedis());
     }
     return this._relayClient;
   }
@@ -602,7 +618,10 @@ export class AssistantInject {
     if (!bot) return undefined;
 
     const registry = new CapabilityRegistry();
-    const pending = new InMemoryPendingCollectionStore();
+    const redisForPending = this.getRedis();
+    const pending: IPendingCollectionStore = redisForPending
+      ? new RedisPendingCollectionStore(redisForPending)
+      : new InMemoryPendingCollectionStore();
     const renderer = new TelegramArtifactRenderer(bot, this.getMiniAppRequestCache());
     const sqlDB = this.getSqlDB();
 
@@ -689,17 +708,18 @@ export class AssistantInject {
         const chain = getChainObject(chainId);
         if (!chain) continue;
         // Prefer env override for the configured chain; otherwise use default RPC from registry.
-        const rpcUrl =
+        const rpcUrls =
           chainId === CHAIN_CONFIG.chainId
-            ? CHAIN_CONFIG.rpcUrl
-            : getChainRpcUrl(chainId);
+            ? (CHAIN_CONFIG.rpcUrls as string[])
+            : getChainRpcUrls(chainId);
         adapters.push(
           new AaveV3Adapter(
             chainId,
             yieldConfig.aave.poolAddress,
             yieldConfig.aave.dataProviderAddress,
-            rpcUrl,
+            rpcUrls[0] ?? "",
             chain,
+            rpcUrls,
           ),
         );
       }

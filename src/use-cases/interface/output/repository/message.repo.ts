@@ -13,6 +13,6 @@ export interface Message {
 
 export interface IMessageDB {
   create(message: Message): Promise<void>;
-  findByConversationId(conversationId: string): Promise<Message[]>;
+  findByConversationId(conversationId: string, limit?: number): Promise<Message[]>;
   deleteByConversationId(conversationId: string): Promise<void>;
 }

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import type { ISchemaCompiler, CompileResult } from "../../../../use-cases/interface/output/schemaCompiler.interface";
@@ -111,14 +112,16 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
 
     const systemPrompt = buildSystemPrompt(manifest, autoFilled, partialParams);
 
-    const response = await this.client.chat.completions.parse({
-      model: OPENAI_MODEL,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-      response_format: zodResponseFormat(CompileSchema, "compile_result"),
-    });
+    const response = await openaiLimiter(() =>
+      this.client.chat.completions.parse({
+        model: OPENAI_MODEL,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent },
+        ],
+        response_format: zodResponseFormat(CompileSchema, "compile_result"),
+      }),
+    );
 
     const parsed = response.choices[0]?.message.parsed;
     if (!parsed) throw new Error("No parsed response from OpenAI schema compiler");
@@ -167,15 +170,17 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       .map((f) => properties[f]?.description ? `${f} (${properties[f].description})` : f)
       .join(", ");
 
-    const response = await this.client.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
-        },
-      ],
-    });
+    const response = await openaiLimiter(() =>
+      this.client.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: "user",
+            content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
+          },
+        ],
+      }),
+    );
 
     return (
       response.choices[0]?.message.content ??

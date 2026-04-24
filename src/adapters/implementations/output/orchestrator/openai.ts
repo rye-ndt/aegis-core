@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
+import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionTool,
@@ -65,12 +67,25 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     }));
 
     console.log(`[OpenAIOrchestrator] calling model=${this.model} messages=${messages.length} tools=${tools.length}`);
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages,
-      ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
-    });
-    console.log(`[OpenAIOrchestrator] response finish_reason=${response.choices[0]?.finish_reason} promptTokens=${response.usage?.prompt_tokens} completionTokens=${response.usage?.completion_tokens}`);
+    const startedAt = Date.now();
+    const response = await openaiLimiter(() =>
+      this.client.chat.completions.create({
+        model: this.model,
+        messages,
+        ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
+      }),
+    );
+    const elapsed = Date.now() - startedAt;
+    const cached = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+    const prompt = response.usage?.prompt_tokens ?? 0;
+    const completionTokens = response.usage?.completion_tokens ?? 0;
+    metricsRegistry.recordLlmCall(elapsed, prompt, cached, completionTokens);
+    const cacheHitRatio = prompt > 0 ? (cached / prompt).toFixed(2) : "0.00";
+    console.log(
+      `[OpenAIOrchestrator] ms=${elapsed} finish_reason=${response.choices[0]?.finish_reason} ` +
+      `promptTokens=${prompt} cachedTokens=${cached} cacheHitRatio=${cacheHitRatio} ` +
+      `completionTokens=${completionTokens}`,
+    );
 
     const choice = response.choices[0];
     const message = choice.message;

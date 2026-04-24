@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import type { IEmbeddingService } from "../../../../use-cases/interface/output/embedding.interface";
 
 const EMBEDDING_MODEL = "text-embedding-3-small";
@@ -14,11 +15,13 @@ export class OpenAIEmbeddingService implements IEmbeddingService {
   async embed(input: {
     text: string;
   }): Promise<{ vector: number[]; tokenCount: number }> {
-    const response = await this.client.embeddings.create({
-      model: EMBEDDING_MODEL,
-      input: input.text,
-      dimensions: EMBEDDING_DIMENSIONS,
-    });
+    const response = await openaiLimiter(() =>
+      this.client.embeddings.create({
+        model: EMBEDDING_MODEL,
+        input: input.text,
+        dimensions: EMBEDDING_DIMENSIONS,
+      }),
+    );
 
     const vector = response.data[0].embedding;
     const tokenCount = response.usage.total_tokens;

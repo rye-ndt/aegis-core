@@ -1,4 +1,4 @@
-import { createPublicClient, http, type Chain, type Hex, type PublicClient } from 'viem';
+import { createPublicClient, fallback, http, type Chain, type Hex, type PublicClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createKernelAccountClient, createKernelAccount, createZeroDevPaymasterClient } from '@zerodev/sdk';
 import { getEntryPoint, KERNEL_V3_1 } from '@zerodev/sdk/constants';
@@ -22,8 +22,13 @@ export class ZerodevUserOpExecutor implements IUserOpExecutor {
     rpcUrl: string,
     private readonly chain: Chain,
     private readonly paymasterUrl?: string,
+    rpcUrls?: string[],
   ) {
-    this.publicClient = createPublicClient({ transport: http(rpcUrl), chain });
+    const urls = rpcUrls && rpcUrls.length > 0 ? rpcUrls : [rpcUrl];
+    this.publicClient = createPublicClient({
+      transport: fallback(urls.map((u) => http(u)), { retryCount: 1 }),
+      chain,
+    });
   }
 
   async execute(params: ExecuteUserOpParams): Promise<ExecuteUserOpResult> {
