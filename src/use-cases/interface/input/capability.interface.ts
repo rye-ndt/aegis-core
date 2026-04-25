@@ -10,6 +10,8 @@ import type { MiniAppRequest } from "../output/cache/miniAppRequest.types";
 export interface TriggerSpec {
   /** Fired when the user types this slash command as the first token. */
   command?: INTENT_COMMAND;
+  /** Fired when the user types any of these slash commands as the first token. */
+  commands?: INTENT_COMMAND[];
   /**
    * Prefix used to route Telegram callback queries back to this capability.
    * E.g. "buy" matches callback data `buy:y:50`. The capability receives the

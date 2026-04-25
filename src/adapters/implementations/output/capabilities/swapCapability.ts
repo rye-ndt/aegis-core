@@ -29,6 +29,7 @@ import type { SignRequest } from "../../../../use-cases/interface/output/cache/m
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import type { RelaySwapTool, RelaySwapToolOutputData } from "../tools/system/relaySwap.tool";
+import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import { buildDisambiguationPrompt } from "./send.messages";
 import { getMissingRequiredFields, pickCandidateByInput } from "./send.utils";
 
@@ -81,6 +82,7 @@ export interface SwapCapabilityDeps {
   executionEstimator?: IExecutionEstimator;
   userProfileRepo: IUserProfileDB;
   chainId: number;
+  loyaltyUseCase?: ILoyaltyUseCase;
 }
 
 /**
@@ -237,6 +239,13 @@ export class SwapCapability implements Capability<SwapParams> {
       }
       txHashes.push(resolution.txHash);
     }
+
+    const actionType = params.fromChainId === params.toChainId ? "swap_same_chain" : "swap_cross_chain";
+    void this.deps.loyaltyUseCase?.awardPoints({
+      userId: ctx.userId,
+      actionType,
+      usdValue: undefined,
+    }).catch(() => undefined);
 
     return {
       kind: "chat",

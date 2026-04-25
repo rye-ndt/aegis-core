@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, text, uuid, unique, index } from "drizzle-orm/pg-core";
+import { bigint, boolean, integer, jsonb, pgTable, text, uuid, unique, index } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -7,6 +7,7 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   privyDid: text("privy_did").unique(),
   status: text("status").notNull(),
+  loyaltyStatus: text("loyalty_status").notNull().default("normal"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
@@ -248,5 +249,44 @@ export const tokenDelegations = pgTable('token_delegations', {
   updatedAtEpoch: integer('updated_at_epoch').notNull(),
 }, (t) => ({
   userTokenUniq: unique().on(t.userId, t.tokenAddress),
+}));
+
+export const loyaltyActionTypes = pgTable("loyalty_action_types", {
+  id:              text("id").primaryKey(),
+  displayName:     text("display_name").notNull(),
+  defaultBase:     bigint("default_base", { mode: "bigint" }).notNull(),
+  isActive:        boolean("is_active").notNull().default(true),
+  createdAtEpoch:  integer("created_at_epoch").notNull(),
+});
+
+export const loyaltySeasons = pgTable("loyalty_seasons", {
+  id:              text("id").primaryKey(),
+  name:            text("name").notNull(),
+  startsAtEpoch:   integer("starts_at_epoch").notNull(),
+  endsAtEpoch:     integer("ends_at_epoch").notNull(),
+  status:          text("status").notNull(),
+  formulaVersion:  text("formula_version").notNull(),
+  configJson:      jsonb("config_json").notNull(),
+  createdAtEpoch:  integer("created_at_epoch").notNull(),
+  updatedAtEpoch:  integer("updated_at_epoch").notNull(),
+});
+
+export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
+  id:                  text("id").primaryKey(),
+  userId:              uuid("user_id").notNull().references(() => users.id),
+  seasonId:            text("season_id").notNull().references(() => loyaltySeasons.id),
+  actionType:          text("action_type").notNull().references(() => loyaltyActionTypes.id),
+  pointsRaw:           bigint("points_raw", { mode: "bigint" }).notNull(),
+  intentExecutionId:   uuid("intent_execution_id"),
+  externalRef:         text("external_ref"),
+  formulaVersion:      text("formula_version").notNull(),
+  computedFromJson:    jsonb("computed_from_json").notNull(),
+  metadataJson:        jsonb("metadata_json"),
+  createdAtEpoch:      integer("created_at_epoch").notNull(),
+}, (t) => ({
+  userSeasonIdx:         index().on(t.userId, t.seasonId),
+  seasonPointsIdx:       index().on(t.seasonId, t.pointsRaw.desc()),
+  intentExecutionUniq:   unique("loyalty_ledger_intent_execution_uniq").on(t.intentExecutionId),
+  userActionRefUniq:     unique("loyalty_ledger_user_action_ref_uniq").on(t.userId, t.actionType, t.externalRef),
 }));
 

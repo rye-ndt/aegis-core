@@ -95,8 +95,12 @@ import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { YieldCapability, buildNudgeKeyboard } from "../implementations/output/capabilities/yieldCapability";
 import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainRpcUrls, getChainObject } from "../../helpers/chainConfig";
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
+import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
 import type { DailyReport } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
+import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCase";
+import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
+import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
 
 const log = createLogger("assistantDI");
 
@@ -142,6 +146,7 @@ export class AssistantInject {
   private _yieldPoolScanJob: YieldPoolScanJob | null = null;
   private _userIdleScanJob: UserIdleScanJob | null = null;
   private _yieldReportJob: YieldReportJob | null = null;
+  private _loyaltyUseCase: ILoyaltyUseCase | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -613,6 +618,7 @@ export class AssistantInject {
       pendingDelegationRepo: sqlDB.pendingDelegations,
       delegationBuilder: this.getDelegationRequestBuilder(),
       chainId: this.getChainId(),
+      loyaltyUseCase: this.getLoyaltyUseCase(),
     };
 
     // One SendCapability instance per INTENT_COMMAND (except BUY and SWAP,
@@ -623,6 +629,8 @@ export class AssistantInject {
       if (command === INTENT_COMMAND.SWAP) continue;
       if (command === INTENT_COMMAND.YIELD) continue;
       if (command === INTENT_COMMAND.WITHDRAW) continue;
+      if (command === INTENT_COMMAND.POINTS) continue;
+      if (command === INTENT_COMMAND.LEADERBOARD) continue;
       registry.register(new SendCapability(command, sendDeps));
     }
 
@@ -642,6 +650,7 @@ export class AssistantInject {
           executionEstimator: this.getExecutionEstimator(),
           userProfileRepo: sqlDB.userProfiles,
           chainId: this.getChainId(),
+          loyaltyUseCase: this.getLoyaltyUseCase(),
         }),
       );
     } else {
@@ -655,11 +664,19 @@ export class AssistantInject {
           optimizer: yieldOptimizer,
           miniAppRequestCache: this.getMiniAppRequestCache(),
           signingRequestUseCase: this._signingRequestUseCase ?? undefined,
+          loyaltyUseCase: this.getLoyaltyUseCase(),
         }),
       );
     } else {
       log.warn({ reason: "redis_unavailable" }, "/yield capability skipped");
     }
+
+    registry.register(
+      new LoyaltyCapability({
+        loyaltyUseCase: this.getLoyaltyUseCase(),
+        leaderboardDefaultLimit: LOYALTY_ENV.leaderboardDefaultLimit,
+      }),
+    );
 
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
     // command and isn't continuing a pending capability flow.
@@ -808,6 +825,18 @@ export class AssistantInject {
     return this._yieldReportJob;
   }
 
+  getLoyaltyUseCase(): ILoyaltyUseCase {
+    if (!this._loyaltyUseCase) {
+      this._loyaltyUseCase = new LoyaltyUseCaseImpl({
+        repo: this.getSqlDB().loyaltyRepo,
+        redis: this.getRedis(),
+        activeSeasonCacheTtlMs: LOYALTY_ENV.activeSeasonCacheTtlMs,
+        leaderboardCacheTtlMs: LOYALTY_ENV.leaderboardCacheTtlMs,
+      });
+    }
+    return this._loyaltyUseCase;
+  }
+
   getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
@@ -829,6 +858,7 @@ export class AssistantInject {
       this.getSqlDB().telegramSessions,
       this.getTelegramNotifier(),
       this.getYieldOptimizerUseCase(),
+      this.getLoyaltyUseCase(),
     );
   }
 }

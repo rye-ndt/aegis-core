@@ -7,12 +7,14 @@ services:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
       LOG_LEVEL: debug
-      LOG_PRETTY: "true"
+      LOG_PRETTY: "false"
     ports:
       - "4000:4000"
     depends_on:
-      - redis
-      - postgres
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     dns:
       - 8.8.8.8
       - 1.1.1.1
@@ -34,6 +36,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # Multi-replica profile: `docker compose --profile scale up --build`
@@ -47,8 +54,12 @@ services:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
       LOG_LEVEL: debug
-      LOG_PRETTY: "true"
-    depends_on: [redis, postgres]
+      LOG_PRETTY: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   api:
@@ -61,8 +72,12 @@ services:
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/jarvis
       LOG_LEVEL: debug
-      LOG_PRETTY: "true"
-    depends_on: [redis, postgres]
+      LOG_PRETTY: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     deploy:
       replicas: 3
     restart: unless-stopped

@@ -21,6 +21,8 @@ import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/
 import type { ITelegramNotifier } from "../../../../use-cases/interface/output/telegramNotifier.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
+import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import { LOYALTY_ENV } from "../../../../helpers/env/loyaltyEnv";
 import type {
   MiniAppResponse,
   AuthResponse,
@@ -102,6 +104,7 @@ export class HttpApiServer {
     private readonly telegramSessionRepo?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
     private readonly yieldOptimizerUseCase?: IYieldOptimizerUseCase,
+    private readonly loyaltyUseCase?: ILoyaltyUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -175,6 +178,9 @@ export class HttpApiServer {
       "POST /delegation/grant":         (req, res) => this.handlePostDelegationGrant(req, res),
       "GET /delegation/grant":          (req, res) => this.handleGetDelegationGrant(req, res),
       "GET /yield/positions":           (req, res) => this.handleGetYieldPositions(req, res),
+      "GET /loyalty/balance":           (req, res) => this.handleGetLoyaltyBalance(req, res),
+      "GET /loyalty/history":           (req, res, url) => this.handleGetLoyaltyHistory(req, res, url),
+      "GET /loyalty/leaderboard":       (req, res, url) => this.handleGetLoyaltyLeaderboard(req, res, url),
       "GET /metrics":                   (req, res) => this.handleGetMetrics(req, res),
     };
   }
@@ -896,6 +902,62 @@ export class HttpApiServer {
 
     const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
     return this.sendJson(res, 200, { delegations });
+  }
+
+  private async handleGetLoyaltyBalance(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.loyaltyUseCase) return this.sendJson(res, 503, { error: "Loyalty service not available" });
+
+    const balance = await this.loyaltyUseCase.getBalance(userId);
+    return this.sendJson(res, 200, {
+      seasonId: balance.seasonId,
+      pointsTotal: balance.pointsTotal.toString(),
+      rank: balance.rank,
+    });
+  }
+
+  private async handleGetLoyaltyHistory(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.loyaltyUseCase) return this.sendJson(res, 503, { error: "Loyalty service not available" });
+
+    const limitStr = url.searchParams.get("limit");
+    const cursorStr = url.searchParams.get("cursorCreatedAtEpoch");
+    const limit = Math.min(limitStr ? parseInt(limitStr, 10) : 20, 100);
+    const cursor = cursorStr ? parseInt(cursorStr, 10) : undefined;
+
+    const entries = await this.loyaltyUseCase.getHistory(userId, { limit, cursorCreatedAtEpoch: cursor });
+    const nextCursor = entries.length === limit ? entries[entries.length - 1].createdAtEpoch : null;
+    return this.sendJson(res, 200, {
+      entries: entries.map((e) => ({
+        actionType: e.actionType,
+        points: e.pointsRaw.toString(),
+        createdAtEpoch: e.createdAtEpoch,
+      })),
+      nextCursor,
+    });
+  }
+
+  private async handleGetLoyaltyLeaderboard(_req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    if (!this.loyaltyUseCase) return this.sendJson(res, 503, { error: "Loyalty service not available" });
+
+    const limitStr = url.searchParams.get("limit");
+    const limit = Math.min(limitStr ? parseInt(limitStr, 10) : LOYALTY_ENV.leaderboardDefaultLimit, LOYALTY_ENV.leaderboardMaxLimit);
+
+    const requestedSeasonId = url.searchParams.get("seasonId");
+    const activeSeasonId = requestedSeasonId ?? (await this.loyaltyUseCase.getActiveSeasonId());
+    if (!activeSeasonId) {
+      return this.sendJson(res, 200, { seasonId: null, entries: [] });
+    }
+    const { entries, seasonId } = await this.loyaltyUseCase.getLeaderboard(activeSeasonId, limit);
+    return this.sendJson(res, 200, {
+      seasonId,
+      entries: entries.map((e) => ({
+        rank: e.rank,
+        pointsTotal: e.pointsTotal.toString(),
+      })),
+    });
   }
 
   private async handleGetMetrics(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

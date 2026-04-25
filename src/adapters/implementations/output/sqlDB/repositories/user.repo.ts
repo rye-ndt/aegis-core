@@ -8,6 +8,7 @@ import type {
   UserUpdate,
 } from "../../../../../use-cases/interface/output/repository/user.repo";
 import { USER_STATUSES } from "../../../../../helpers/enums/statuses.enum";
+import { LOYALTY_STATUSES } from "../../../../../helpers/enums/loyaltyStatuses.enum";
 import { users } from "../schema";
 
 export class DrizzleUserRepo implements IUserDB {
@@ -84,6 +85,7 @@ export class DrizzleUserRepo implements IUserDB {
       email: row.email,
       privyDid: row.privyDid ?? undefined,
       status: row.status as USER_STATUSES,
+      loyaltyStatus: (row.loyaltyStatus as LOYALTY_STATUSES) ?? LOYALTY_STATUSES.NORMAL,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,
     };

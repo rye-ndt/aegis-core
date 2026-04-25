@@ -1,14 +1,16 @@
 export enum INTENT_COMMAND {
-  MONEY    = "/money",
-  BUY      = "/buy",
-  SELL     = "/sell",
-  CONVERT  = "/convert",
-  TOPUP    = "/topup",
-  DCA      = "/dca",
-  SEND     = "/send",
-  SWAP     = "/swap",
-  YIELD    = "/yield",
-  WITHDRAW = "/withdraw",
+  MONEY       = "/money",
+  BUY         = "/buy",
+  SELL        = "/sell",
+  CONVERT     = "/convert",
+  TOPUP       = "/topup",
+  DCA         = "/dca",
+  SEND        = "/send",
+  SWAP        = "/swap",
+  YIELD       = "/yield",
+  WITHDRAW    = "/withdraw",
+  POINTS      = "/points",
+  LEADERBOARD = "/leaderboard",
 }
 
 /**

@@ -1,5 +1,63 @@
 # Onchain Agent — Status
 
+## Loyalty Program — 2026-04-25
+
+Full implementation of the Season 0 loyalty/points system (foundation + integrations + Telegram UI). First cut was reviewed and patched the same day — see "Review fixes" below before assuming the original spec applies.
+
+**What was done:**
+- Schema: 3 new tables (`loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger`) + `users.loyalty_status` column. Migration at `drizzle/0020_flippant_living_mummy.sql` — seeds 7 action types + `season-0` (active, `globalMultiplier: 3.0`) inline via `INSERT … ON CONFLICT DO NOTHING`. No separate seed script.
+- Formula: `computePointsV1` in `src/helpers/loyalty/pointsFormula.ts` — deterministic multi-factor: `base × volFactor × actionMult × globalMult × userMult`, capped at `perActionCap`, floored at 1, returns `0n` (caller skips insert) when below `actionMinUsd`. `SeasonConfig` validated via Zod at the repo boundary.
+- Ports (hexagonal-compliant):
+  - `src/use-cases/interface/input/loyalty.interface.ts` — `ILoyaltyUseCase`, `AwardPointsInput`, `AdjustInput`, `BalanceView`, `LeaderboardView`.
+  - `src/use-cases/interface/output/repository/loyalty.repo.ts` — `ILoyaltyRepository`, `LedgerEntry`, `NewLedgerEntry`, `LoyaltySeason`, `LoyaltyActionType`.
+- Use case: `LoyaltyUseCaseImpl` (`src/use-cases/implementations/loyaltyUseCase.ts`) with forbidden/flagged short-circuits, **idempotency on `intent_execution_id` via pre-check + unique-violation catch returning the existing entry**, active-season Redis cache (60s), daily user cap enforcement, leaderboard Redis cache (30s, **keyed by `seasonId:limit`**).
+- Repo adapter: `DrizzleLoyaltyRepo` at `src/adapters/implementations/output/sqlDB/repositories/loyalty.repo.ts`. Hung off `DrizzleSqlDB.loyaltyRepo` like all other repos. `SUM(points_raw)` for balance; rank via subquery; `findByIntentExecutionId` for idempotency lookup.
+- HTTP routes (Privy auth except leaderboard which is public):
+  - `GET /loyalty/balance` → `{ seasonId, pointsTotal: string, rank: number|null }`.
+  - `GET /loyalty/history?limit=&cursorCreatedAtEpoch=` → `{ entries: { actionType, points: string, createdAtEpoch }[], nextCursor: number|null }`.
+  - `GET /loyalty/leaderboard?limit=&seasonId=` → `{ seasonId, entries: { rank, pointsTotal: string }[] }`. Defaults `seasonId` to active season via `getActiveSeasonId()` (no hardcoded `season-0`).
+- Telegram: `LoyaltyCapability` handles `/points` and `/leaderboard` (anonymised — rank + truncated id + points; no full userId/wallet). Uses `triggers.commands[]` plural form. Time helper uses `newCurrentUTCEpoch()`. Markdown-friendly formatting (no `padEnd`/`padStart` — relies on Telegram bold/italic).
+- Integration hooks (all wrapped in `void capability?.awardPoints(...).catch(() => undefined)`; the use-case itself never throws — failures log + emit metric + return null):
+  - `SwapCapability.run` — after all `signingRequestUseCase.waitFor` resolve; emits `swap_same_chain` or `swap_cross_chain`. **`usdValue: undefined`** (Relay quote not currently surfaced into the capability) → flat-base points in v1.
+  - `SendCapability` — emits `send_erc20` on `requestExecution` submission (only for `/send` command, not buy/swap variants). **Awards on submit, not confirm** (no clean post-confirm hook exists; see "Plan deviations" below).
+  - `YieldCapability` (deposit) — emits `yield_deposit` with `usdValue ≈ amountRaw / 10^decimals` (USDC ≈ $1) after `finalizeDeposit`.
+  - `yield_hold_day` — **not yet wired**. Requires a daily worker-only cron pass per user with active positions. Deferred per plan §3.
+- Metrics: `metricsRegistry.recordLoyaltyAward(action, outcome, points?, durationMs?)`. Outcomes: `awarded`, `duplicate`, `forbidden`, `no_season`, `inactive_action`, `below_min_usd`, `daily_cap`, `error`. Exposed under `snapshot().loyalty`.
+- Tests: 16 formula tests + 13 use-case tests in `tests/loyalty.*.test.ts`. Repo integration tests deferred (no Drizzle test harness exists).
+- Env vars (all optional, hoisted in `src/helpers/env/loyaltyEnv.ts`): `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS=60000`, `LOYALTY_LEADERBOARD_CACHE_TTL_MS=30000`, `LOYALTY_LEADERBOARD_DEFAULT_LIMIT=100`, `LOYALTY_LEADERBOARD_MAX_LIMIT=1000`.
+
+**Conventions introduced:**
+- `TriggerSpec.commands?: INTENT_COMMAND[]` — multi-command capabilities use this instead of registering N singleton instances. `CapabilityRegistry.register()` indexes commands from both `command` and `commands`. Existing single-command capabilities keep using `command`.
+- Loyalty awards must always be fire-and-forget at the call site (`void useCase?.awardPoints(...).catch(() => undefined)`). The use-case has its own internal try/catch that logs + emits a metric — the outer `.catch` is just defence in depth. Host transactions never depend on loyalty success.
+- New action types: add row to `loyalty_action_types` (DB) **and** add a label entry to the `ACTION_LABELS` map in `loyaltyCapability.ts` and the FE `PointsTab.tsx`. The seven canonical types are: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `yield_deposit`, `yield_hold_day`, `referral`, `manual_adjust`.
+- New `loyalty_status` axis on `users` (separate from existing `status` lifecycle). Values via `LOYALTY_STATUSES` enum: `normal` (default), `flagged` (suppress balance/leaderboard but keep accruing), `forbidden` (block awards entirely). Changeable with a single UPDATE; reversible.
+- `loyalty:*` Redis key prefix (mirrors `yield:*`). Active season at `loyalty:season:active`; leaderboard at `loyalty:leaderboard:{seasonId}:{limit}`.
+- `getActiveSeasonId()` on `ILoyaltyUseCase` is the canonical way to resolve the active season from outside the use-case (e.g. HTTP handlers). Do **not** call `getBalance("")` to fish out the season id.
+
+### Review fixes (same-day, 2026-04-25)
+
+The first cut was reviewed and the following were corrected before merge:
+
+1. **Migration didn't seed.** Original had a separate `drizzle/seed/loyalty.ts` script that nothing invoked — fresh DB had no active season → every `awardPoints` returned null. Inlined the action-type rows + Season 0 row into the migration with `INSERT … ON CONFLICT DO NOTHING`. Seed script deleted.
+2. **HTTP `/loyalty/history` wire shape didn't match the FE.** Was returning `pointsRaw` (FE expects `points`), missing `nextCursor`, and accepting `?cursor=` while FE sends `?cursorCreatedAtEpoch=`. All three fixed; `nextCursor` is derived as `entries.length === limit ? last.createdAtEpoch : null`.
+3. **`/loyalty/leaderboard` hardcoded `seasonId` to `"season-0"`.** Now defaults to `loyaltyUseCase.getActiveSeasonId()`; returns `{ seasonId: null, entries: [] }` when no season is active.
+4. **`getSumPointsToday` used `gt` (strict `>`).** Entries created exactly at midnight UTC were excluded from the daily cap. Fixed to `gte`.
+5. **`getLeaderboard` Redis cache key omitted `limit`.** First call with limit=10 poisoned subsequent limit=100 calls. Cache key now `loyalty:leaderboard:{seasonId}:{limit}`.
+6. **Idempotency on `intent_execution_id` was logged as an error.** Plan said: return the existing record. Now does a pre-check via `findByIntentExecutionId`, and additionally catches PG error code `23505` on insert (race window) to return the existing row. Counted under metric outcome `duplicate`, not `error`.
+7. **`LoyaltyCapability.formatRelativeTime` used `Math.floor(Date.now()/1000)`.** Replaced with `newCurrentUTCEpoch()` per project convention. `<60s` now renders as `just now` instead of `0m ago`.
+8. **Telegram alignment via `padEnd`/`padStart` didn't render** (Telegram is non-monospace). Switched to bold/italic markdown styling.
+9. **Hexagonal port location violation.** Original placed ports in `use-cases/interface/loyalty/` (`ILoyaltyUseCase.ts`, `ILoyaltyRepository.ts`) and the Drizzle adapter in `adapters/implementations/output/loyalty/`. CLAUDE.md mandates the existing convention: ports in `interface/input/` + `interface/output/repository/`, repo adapters under `sqlDB/repositories/`, lowercase dot-suffixed filenames. All three moved + renamed (`loyalty.interface.ts`, `loyalty.repo.ts`); old `loyalty/` directories deleted.
+10. **Dead code purged**: `void id` in `adjustPoints`, unused `loyaltyUseCase?: ILoyaltyUseCase` injection in `YieldOptimizerDeps` (never read in the file), `void sql;` in the seed script.
+11. **Inconsistent `breakdown` for sub-min-USD skip.** Was returning `actionMult: 0` and `volFactor: 0` while keeping a real `base` — confusing for support audits. Now returns the real `actionMult`/`globalMult`, zeroes only `volFactor` and `raw`/`capped`.
+12. **`loyalty_points_ledger.points_raw` index was ASC.** Changed to `DESC` to match leaderboard query order; reflected in both `schema.ts` and the migration.
+
+### Plan deviations (intentional, documented in case scope grows)
+
+1. **SwapCapability passes `usdValue: undefined`** — Relay's per-step USD pricing isn't currently surfaced into `RelaySwapToolOutputData`. v1 awards flat base × global multiplier; volume bonus reactivates once Relay USD is plumbed through.
+2. **SendCapability awards on submission, not confirmation.** The capability returns `noop` after `requestExecution` is enqueued; there is no in-process post-confirm callback today (signing happens out-of-band via the mini-app). Failed sends will award 1 point each — acceptable while send is the lowest-weight action. Revisit if abuse appears or when a webhook/post-confirm hook lands.
+3. **`yield_hold_day` not awarded.** Requires a daily worker-only pass over active positions; deferred per plan §3.
+4. **No HTTP write endpoints** for `adjustPoints` (admin clawbacks). The method exists on the use-case but is unreachable from outside. Wire when admin tooling lands.
+
 ## Structured logging (pino) — 2026-04-24
 
 Replaced all `console.*` calls across `src/` with structured pino logging via a singleton helper at `src/helpers/observability/logger.ts`.

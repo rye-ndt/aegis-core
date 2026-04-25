@@ -1,6 +1,7 @@
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import { USER_STATUSES } from "../../helpers/enums/statuses.enum";
+import { LOYALTY_STATUSES } from "../../helpers/enums/loyaltyStatuses.enum";
 import type { IUserDB } from "../interface/output/repository/user.repo";
 import type {
   IAuthUseCase,
@@ -76,7 +77,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         updatedAtEpoch: now,
       });
 
-      user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
+      user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, loyaltyStatus: LOYALTY_STATUSES.NORMAL, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
     }
 
     const expiresAtEpoch = newCurrentUTCEpoch() + SESSION_TTL_SECONDS;

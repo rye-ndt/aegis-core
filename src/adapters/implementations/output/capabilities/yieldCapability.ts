@@ -20,6 +20,7 @@ import type {
 } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
 import type { TxStep } from "../../../../use-cases/interface/yield/IYieldProtocolAdapter";
+import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 
 const SIGN_REQUEST_TTL_SECONDS = 600;
 const SIGN_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -34,6 +35,7 @@ export interface YieldCapabilityDeps {
   optimizer: IYieldOptimizerUseCase;
   miniAppRequestCache?: IMiniAppRequestCache;
   signingRequestUseCase?: ISigningRequestUseCase;
+  loyaltyUseCase?: ILoyaltyUseCase;
 }
 
 function formatHumanAmount(amountRaw: bigint, decimals: number): string {
@@ -147,6 +149,14 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
     const txHash = result.txHashes[result.txHashes.length - 1];
     if (txHash) {
       await this.deps.optimizer.finalizeDeposit(ctx.userId, plan.depositId, txHash);
+      const usdValue = stablecoin
+        ? Number(BigInt(plan.amountRaw)) / Math.pow(10, stablecoin.decimals)
+        : undefined;
+      void this.deps.loyaltyUseCase?.awardPoints({
+        userId: ctx.userId,
+        actionType: "yield_deposit",
+        usdValue,
+      }).catch(() => undefined);
     }
 
     return {

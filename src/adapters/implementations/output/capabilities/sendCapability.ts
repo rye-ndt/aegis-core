@@ -27,6 +27,7 @@ import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/out
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import { createLogger } from "../../../../helpers/observability/logger";
+import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import {
   buildConfirmationMessage,
   buildDelegationPrompt,
@@ -91,6 +92,7 @@ export interface SendCapabilityDeps {
   pendingDelegationRepo?: IPendingDelegationDB;
   delegationBuilder?: IDelegationRequestBuilder;
   chainId: number;
+  loyaltyUseCase?: ILoyaltyUseCase;
 }
 
 /**
@@ -209,6 +211,9 @@ export class SendCapability implements Capability<SendParams> {
           description: `Autonomous execution for ${params.manifest.name}`,
           autoSign: true,
         });
+        if (this.command === INTENT_COMMAND.SEND) {
+          void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
+        }
         await this.tryEmitDelegationRequest(ctx, params, fromToken);
         return { kind: "noop" };
       }
@@ -259,6 +264,9 @@ export class SendCapability implements Capability<SendParams> {
       autoSign: false,
     });
 
+    if (this.command === INTENT_COMMAND.SEND) {
+      void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
+    }
     await this.tryEmitDelegationRequest(ctx, params, params.resolvedFrom);
     return { kind: "noop" };
   }

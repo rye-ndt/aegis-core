@@ -1,4 +1,5 @@
 import { USER_STATUSES } from "../../../../helpers/enums/statuses.enum";
+import { LOYALTY_STATUSES } from "../../../../helpers/enums/loyaltyStatuses.enum";
 
 export interface UserInit {
   id: string;
@@ -7,6 +8,7 @@ export interface UserInit {
   email: string;
   privyDid?: string;
   status: USER_STATUSES;
+  loyaltyStatus?: LOYALTY_STATUSES;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -20,7 +22,9 @@ export interface UserUpdate {
   updatedAtEpoch: number;
 }
 
-export interface IUser extends UserInit {}
+export interface IUser extends UserInit {
+  loyaltyStatus: LOYALTY_STATUSES;
+}
 
 export interface IUserDB {
   create(user: UserInit): Promise<void>;

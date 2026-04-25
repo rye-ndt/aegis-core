@@ -15,12 +15,13 @@ export class CapabilityRegistry implements ICapabilityRegistry {
     }
     this.byIdMap.set(capability.id, capability);
 
-    const { command, callbackPrefix } = capability.triggers;
-    if (command) {
-      if (this.byCommand.has(command)) {
-        throw new Error(`Command conflict for ${command}: ${capability.id} vs ${this.byCommand.get(command)!.id}`);
+    const { command, commands, callbackPrefix } = capability.triggers;
+    const allCommands = [...(commands ?? []), ...(command ? [command] : [])];
+    for (const cmd of allCommands) {
+      if (this.byCommand.has(cmd)) {
+        throw new Error(`Command conflict for ${cmd}: ${capability.id} vs ${this.byCommand.get(cmd)!.id}`);
       }
-      this.byCommand.set(command, capability);
+      this.byCommand.set(cmd, capability);
     }
     if (callbackPrefix) {
       // Longest-prefix-first so "buy_vip" wins over "buy" when both are registered.

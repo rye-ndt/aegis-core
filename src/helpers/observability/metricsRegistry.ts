@@ -24,9 +24,13 @@ class RollingHistogram {
 class MetricsRegistry {
   private readonly llmLatency = new RollingHistogram();
   private readonly redisLatency = new RollingHistogram();
+  private readonly loyaltyAwardDuration = new RollingHistogram();
   private llmCacheHitTokens = 0;
   private llmPromptTokens = 0;
   private llmCompletionTokens = 0;
+
+  private readonly loyaltyAwardsTotal: Map<string, number> = new Map();
+  private readonly loyaltyPointsTotal: Map<string, bigint> = new Map();
 
   private pgPool?: Pool;
   private redis?: Redis;
@@ -43,6 +47,18 @@ class MetricsRegistry {
 
   recordRedisOp(ms: number): void {
     this.redisLatency.record(ms);
+  }
+
+  recordLoyaltyAward(action: string, outcome: string, points?: bigint, durationMs?: number): void {
+    const key = `${action}:${outcome}`;
+    this.loyaltyAwardsTotal.set(key, (this.loyaltyAwardsTotal.get(key) ?? 0) + 1);
+    if (points !== undefined && outcome === "awarded") {
+      const existing = this.loyaltyPointsTotal.get(action) ?? 0n;
+      this.loyaltyPointsTotal.set(action, existing + points);
+    }
+    if (durationMs !== undefined) {
+      this.loyaltyAwardDuration.record(durationMs);
+    }
   }
 
   snapshot() {
@@ -77,6 +93,11 @@ class MetricsRegistry {
         p50Ms: redis.p50,
         p95Ms: redis.p95,
         opCount: redis.count,
+      },
+      loyalty: {
+        awardsTotal: Object.fromEntries(this.loyaltyAwardsTotal),
+        pointsTotal: Object.fromEntries([...this.loyaltyPointsTotal.entries()].map(([k, v]) => [k, v.toString()])),
+        awardDurationMs: this.loyaltyAwardDuration.snapshot(),
       },
     };
   }
