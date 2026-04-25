@@ -84,6 +84,7 @@ export class HttpApiServer {
   private server: http.Server;
   private readonly reqLogIds = new WeakMap<http.IncomingMessage, string>();
   private readonly resLogIds = new WeakMap<http.ServerResponse, string>();
+  private readonly startedAtEpoch = newCurrentUTCEpoch();
 
   constructor(
     private readonly authUseCase: IAuthUseCase,
@@ -182,6 +183,7 @@ export class HttpApiServer {
       "GET /loyalty/history":           (req, res, url) => this.handleGetLoyaltyHistory(req, res, url),
       "GET /loyalty/leaderboard":       (req, res, url) => this.handleGetLoyaltyLeaderboard(req, res, url),
       "GET /metrics":                   (req, res) => this.handleGetMetrics(req, res),
+      "POST /health":                   (req, res) => this.handleHealth(req, res),
     };
   }
 
@@ -971,6 +973,67 @@ export class HttpApiServer {
     }
     res.setHeader("content-type", "application/json");
     res.end(JSON.stringify(metricsRegistry.snapshot()));
+  }
+
+  private async handleHealth(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? '?';
+    const start = Date.now();
+
+    const mem = process.memoryUsage();
+    const toMb = (n: number) => Math.round((n / 1024 / 1024) * 100) / 100;
+
+    const services: Record<string, boolean> = {
+      auth: true,
+      intent: !!this.intentUseCase,
+      portfolio: !!this.portfolioUseCase,
+      toolRegistration: !!this.toolRegistrationUseCase,
+      sessionDelegation: !!this.sessionDelegationUseCase,
+      pendingDelegation: !!this.pendingDelegationRepo,
+      miniAppRequest: !!this.miniAppRequestCache,
+      signingRequest: !!this.signingRequestUseCase,
+      commandMapping: !!this.commandMappingUseCase,
+      userProfileCache: !!this.userProfileCache,
+      httpQueryTool: !!this.httpQueryToolUseCase,
+      userPreferences: !!this.userPreferencesRepo,
+      tokenDelegation: !!this.tokenDelegationRepo,
+      userProfileDB: !!this.userProfileDB,
+      telegramSession: !!this.telegramSessionRepo,
+      telegramNotifier: !!this.telegramNotifier,
+      yieldOptimizer: !!this.yieldOptimizerUseCase,
+      loyalty: !!this.loyaltyUseCase,
+    };
+
+    const now = newCurrentUTCEpoch();
+    const payload = {
+      status: "ok" as const,
+      service: "memora-be",
+      version: process.env.SERVICE_VERSION ?? "unknown",
+      processRole: process.env.PROCESS_ROLE ?? "unknown",
+      nodeEnv: process.env.NODE_ENV ?? "development",
+      runtime: {
+        node: process.version,
+        platform: process.platform,
+        arch: process.arch,
+      },
+      chain: {
+        chainId: CHAIN_CONFIG.chainId,
+        name: CHAIN_CONFIG.name,
+        nativeSymbol: CHAIN_CONFIG.nativeSymbol,
+      },
+      uptimeSeconds: Math.round(process.uptime()),
+      startedAtEpoch: this.startedAtEpoch,
+      timestampEpoch: now,
+      memoryMb: {
+        rss: toMb(mem.rss),
+        heapUsed: toMb(mem.heapUsed),
+        heapTotal: toMb(mem.heapTotal),
+        external: toMb(mem.external),
+      },
+      services,
+    };
+
+    log.info({ reqId, step: "succeeded", durationMs: Date.now() - start }, "health check");
+    return this.sendJson(res, 200, payload);
   }
 
   private async handleGetYieldPositions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

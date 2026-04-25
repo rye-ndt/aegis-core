@@ -55,15 +55,19 @@ RUN ./node_modules/.bin/esbuild src/entrypoint.ts \
 # out of the already-installed builder modules. No second `npm install`, no
 # lockfile gymnastics. Missing optional deps (bufferutil, pg-native, etc.)
 # are silently skipped — `ws`/`pg` fall back to JS, which is what we want.
-RUN mkdir -p /app/runtime_modules && \
+RUN mkdir -p /app/runtime_modules /app/runtime_modules/@pinojs && \
     for pkg in pino thread-stream sonic-boom pino-std-serializers \
                safe-stable-stringify atomic-sleep on-exit-leak-free \
                process-warning quick-format-unescaped real-require \
-               fast-redact pino-abstract-transport split2; do \
+               pino-abstract-transport split2 \
+               bufferutil utf-8-validate node-gyp-build; do \
       if [ -d "node_modules/$pkg" ]; then \
         cp -R "node_modules/$pkg" /app/runtime_modules/; \
       fi; \
-    done
+    done && \
+    if [ -d "node_modules/@pinojs/redact" ]; then \
+      cp -R node_modules/@pinojs/redact /app/runtime_modules/@pinojs/; \
+    fi
 
 # ── runtime: minimal slim image, no build tools ───────────────────────────────
 FROM node:20.19-slim AS runtime
