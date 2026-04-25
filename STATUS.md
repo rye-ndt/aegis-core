@@ -158,13 +158,15 @@ Runs on `HTTP_API_PORT` (default 4000). Native `node:http`. CORS allows all orig
 | `GET` | `/loyalty/history?limit=&cursorCreatedAtEpoch=` | Privy | `{ entries[], nextCursor }` |
 | `GET` | `/loyalty/leaderboard?limit=&seasonId=` | None | Defaults `seasonId` to `getActiveSeasonId()` |
 | `GET` | `/tokens?chainId=` | None | Verified tokens |
-| `POST` `GET` `DELETE /:toolId` | `/tools` | mixed | Dynamic tool manifests |
-| `GET` | `/permissions?public_key=` | None | Session-key delegation by address |
+| `POST` `DELETE /:toolId` | `/tools` | Admin (`ADMIN_PRIVY_DIDS`) | Register/deactivate dynamic tool manifests |
+| `GET` | `/tools` | None | List dynamic tool manifests |
+| `GET` | `/permissions?public_key=` | Privy + ownership (caller's SCA must match `public_key`) | Session-key delegation by address |
 | `GET` `POST /:id/signed` | `/delegation/pending` | Privy | ZeroDev message lifecycle |
-| `GET` | `/request/:requestId` | None | Mini-app polls work items |
+| `GET` | `/request/:requestId` | None for `auth` type; Privy + ownership for `sign`/`approve`/`onramp` | Mini-app polls work items |
 | `GET` | `/request/:requestId?after=<id>` | Privy | Next queued sign request for user (Redis ZSET `user_pending_signs:<userId>`) |
 | `POST` | `/response` | mixed | Mini-app result; `auth` calls `loginWithPrivy` directly (no `resolveUserId` gate). Sign/approve keep ownership gate. |
-| `POST` `GET` `DELETE /:command` | `/command-mappings` | None | command → toolId |
+| `POST` `DELETE /:command` | `/command-mappings` | Admin (`ADMIN_PRIVY_DIDS`) | Set/delete command → toolId mappings |
+| `GET` | `/command-mappings` | None | List command → toolId mappings |
 | `POST` `GET` `DELETE /:id` | `/http-tools` | Privy | HTTP query tools (AES-256-GCM headers) |
 | `GET` `POST` | `/preference` | Privy | `aegisGuardEnabled` |
 | `GET` | `/delegation/approval-params` | Privy | Default tokens + suggested limits |
@@ -271,6 +273,7 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `PROCESS_ROLE` | `combined` | `worker` \| `http` \| `combined` |
 | `DB_POOL_MAX`, `DB_POOL_IDLE_TIMEOUT_MS`, `DB_POOL_CONNECTION_TIMEOUT_MS` | `25` / `30000` / `5000` | Postgres pool |
 | `METRICS_TOKEN` | — | `/metrics` bearer (unset = disabled) |
+| `ADMIN_PRIVY_DIDS` | — | Comma-separated Privy DIDs allowed to call `POST /tools`, `POST /command-mappings`, `DELETE /command-mappings/:command`. Unset = all admin routes return 403. |
 | `LOG_LEVEL`, `LOG_PRETTY` | `info` (prod) / `debug` else; `false` | pino config |
 | `SERVICE_VERSION` | `unknown` | Surfaced by `/health` |
 | `YIELD_IDLE_USDC_THRESHOLD_USD` | `10` | Min idle to nudge |
@@ -536,6 +539,14 @@ End-to-end smoke: send any message to the Telegram bot.
 **Cost (~$15–20/mo):** worker always-on ~$13–18; http ~$0–2; AR <$1; Neon/Upstash/SecretMgr free.
 
 **Follow-ups:** update `MINI_APP_URL` from ngrok before shipping; if `worker.exposedPort` ever needs external callers, change to `--allow-unauthenticated` or front via `aegis-http`; if load grows, split crons → Cloud Run **Jobs** triggered by Cloud Scheduler.
+
+## Feature log
+
+### Endpoint auth hardening — 2026-04-25
+- `POST /tools`, `POST /command-mappings`, `DELETE /command-mappings/:command` — require admin (Privy token resolved to `privyDid` checked against `ADMIN_PRIVY_DIDS` env var).
+- `GET /permissions?public_key=` — require Privy; 403 if caller's `smartAccountAddress` ≠ queried `public_key`.
+- `GET /request/:requestId` (no `?after=`) — `auth`-type requests remain public (bootstrap); all other types (`sign`, `approve`, `onramp`) require Privy + ownership (`request.userId === caller`).
+- Approach: `requireAdmin(req, res)` helper injected with `IUserDB` (new optional constructor param on `HttpApiServer`). No schema change, no new ports.
 
 ## Backlog
 - Proactive agent: daily market sentiment → investment verdict.

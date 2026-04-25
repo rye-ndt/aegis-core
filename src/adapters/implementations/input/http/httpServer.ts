@@ -17,6 +17,7 @@ import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/inpu
 import type { IUserPreferencesDB } from "../../../../use-cases/interface/output/repository/userPreference.repo";
 import type { ITokenDelegationDB, NewTokenDelegation } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IUserDB } from "../../../../use-cases/interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../../../../use-cases/interface/output/telegramNotifier.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
@@ -39,6 +40,9 @@ import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("httpServer");
 const METRICS_TOKEN = process.env.METRICS_TOKEN;
+const ADMIN_PRIVY_DIDS = new Set(
+  (process.env.ADMIN_PRIVY_DIDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
+);
 
 const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
   z.object({
@@ -106,6 +110,7 @@ export class HttpApiServer {
     private readonly telegramNotifier?: ITelegramNotifier,
     private readonly yieldOptimizerUseCase?: IYieldOptimizerUseCase,
     private readonly loyaltyUseCase?: ILoyaltyUseCase,
+    private readonly userDB?: IUserDB,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -264,47 +269,55 @@ export class HttpApiServer {
   }
 
   private async handlePostTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const userId = await this.requireAdmin(req, res);
+    if (!userId) return;
+
     if (!this.toolRegistrationUseCase) {
-      return this.sendJson(res, 503, { error: "Tool registration service not available" });
+      return this.sendJson(res, 503, { error: "tool registration service not available" });
     }
 
     let body: unknown;
     try {
       body = await this.readJson(req);
     } catch {
-      return this.sendJson(res, 400, { error: "Invalid JSON" });
+      return this.sendJson(res, 400, { error: "invalid JSON" });
     }
 
     const parsed = ToolManifestSchema.safeParse(body);
     if (!parsed.success) {
-      return this.sendJson(res, 400, { error: "Invalid manifest", details: parsed.error.issues });
+      return this.sendJson(res, 400, { error: "invalid manifest", details: parsed.error.issues });
     }
 
     try {
       const result = await this.toolRegistrationUseCase.register(parsed.data);
+      log.info({ userId, route: "POST /tools", toolId: parsed.data.toolId }, "admin-action");
       return this.sendJson(res, 201, result);
     } catch (err) {
+      const msg = toErrorMessage(err);
+      log.warn({ userId, route: "POST /tools", toolId: parsed.data.toolId, err: msg }, "admin-action-failed");
       if (err instanceof Error && err.message.startsWith("TOOL_ID_TAKEN")) {
-        return this.sendJson(res, 409, { error: "Tool ID already registered" });
+        return this.sendJson(res, 409, { error: "tool ID already registered" });
       }
       throw err;
     }
   }
 
   private async handleDeleteTool(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.toolRegistrationUseCase) return this.sendJson(res, 503, { error: "Tool registration service not available" });
+    const userId = await this.requireAdmin(req, res);
+    if (!userId) return;
+    if (!this.toolRegistrationUseCase) return this.sendJson(res, 503, { error: "tool registration service not available" });
 
     const toolId = url.pathname.split("/").pop()?.trim();
     if (!toolId) return this.sendJson(res, 400, { error: "toolId is required" });
 
     try {
       await this.toolRegistrationUseCase.deactivate(toolId);
+      log.info({ userId, route: "DELETE /tools", toolId }, "admin-action");
       return this.sendJson(res, 200, { toolId, deactivated: true });
     } catch (err) {
       const message = toErrorMessage(err);
       const status = message.startsWith("TOOL_NOT_FOUND") ? 404 : 500;
+      log.warn({ userId, route: "DELETE /tools", toolId, err: message }, "admin-action-failed");
       return this.sendJson(res, status, { error: message });
     }
   }
@@ -325,6 +338,9 @@ export class HttpApiServer {
     res: http.ServerResponse,
     url: URL,
   ): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: 'unauthorized' });
+
     if (!this.sessionDelegationUseCase) {
       return this.sendJson(res, 503, { error: 'Session delegation store not available' });
     }
@@ -338,6 +354,12 @@ export class HttpApiServer {
       return this.sendJson(res, 400, {
         error: 'public_key must be a valid Ethereum address (0x followed by 40 hex characters)',
       });
+    }
+
+    const profile = await this.userProfileDB?.findByUserId(userId);
+    if (!profile?.smartAccountAddress || profile.smartAccountAddress.toLowerCase() !== param.toLowerCase()) {
+      log.warn({ userId, route: "GET /permissions" }, "permissions-forbidden");
+      return this.sendJson(res, 403, { error: 'forbidden' });
     }
 
     const record = await this.sessionDelegationUseCase.findByAddress(param);
@@ -422,6 +444,16 @@ export class HttpApiServer {
 
     const now = newCurrentUTCEpoch();
     if (request.expiresAt <= now) return this.sendJson(res, 410, { error: 'Expired' });
+
+    if (request.requestType !== 'auth') {
+      const userId = await this.extractUserId(req);
+      if (!userId) return this.sendJson(res, 401, { error: 'unauthorized' });
+      const ownerUserId = (request as { userId: string }).userId;
+      if (ownerUserId !== userId) {
+        log.warn({ requestId, callerUserId: userId, ownerUserId }, "request-ownership-mismatch");
+        return this.sendJson(res, 403, { error: 'forbidden' });
+      }
+    }
 
     return this.sendJson(res, 200, request);
   }
@@ -643,14 +675,17 @@ export class HttpApiServer {
     req: http.IncomingMessage,
     res: http.ServerResponse,
   ): Promise<void> {
+    const userId = await this.requireAdmin(req, res);
+    if (!userId) return;
+
     if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+      return this.sendJson(res, 503, { error: "command mapping service not available" });
     }
     let body: unknown;
     try {
       body = await this.readJson(req);
     } catch {
-      return this.sendJson(res, 400, { error: "Invalid JSON" });
+      return this.sendJson(res, 400, { error: "invalid JSON" });
     }
     const parsed = z.object({
       command: z.string().min(1),
@@ -661,9 +696,11 @@ export class HttpApiServer {
     }
     try {
       const result = await this.commandMappingUseCase.setMapping(parsed.data.command, parsed.data.toolId);
+      log.info({ userId, route: "POST /command-mappings", command: parsed.data.command, toolId: parsed.data.toolId }, "admin-action");
       return this.sendJson(res, 201, result);
     } catch (err) {
       const msg = toErrorMessage(err);
+      log.warn({ userId, route: "POST /command-mappings", command: parsed.data.command, toolId: parsed.data.toolId, err: msg }, "admin-action-failed");
       if (msg.startsWith("UNKNOWN_COMMAND")) return this.sendJson(res, 400, { error: msg });
       if (msg.startsWith("TOOL_NOT_FOUND"))  return this.sendJson(res, 404, { error: msg });
       throw err;
@@ -675,26 +712,31 @@ export class HttpApiServer {
     res: http.ServerResponse,
   ): Promise<void> {
     if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+      return this.sendJson(res, 503, { error: "command mapping service not available" });
     }
     const mappings = await this.commandMappingUseCase.listMappings();
     return this.sendJson(res, 200, { mappings });
   }
 
   private async handleDeleteCommandMapping(
-    _req: http.IncomingMessage,
+    req: http.IncomingMessage,
     res: http.ServerResponse,
     command: string,
   ): Promise<void> {
+    const userId = await this.requireAdmin(req, res);
+    if (!userId) return;
+
     if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "Command mapping service not available" });
+      return this.sendJson(res, 503, { error: "command mapping service not available" });
     }
     if (!command) return this.sendJson(res, 400, { error: "command is required" });
     try {
       await this.commandMappingUseCase.deleteMapping(command);
+      log.info({ userId, route: "DELETE /command-mappings", command }, "admin-action");
       return this.sendJson(res, 200, { command, deleted: true });
     } catch (err) {
       const msg = toErrorMessage(err);
+      log.warn({ userId, route: "DELETE /command-mappings", command, err: msg }, "admin-action-failed");
       if (msg.startsWith("MAPPING_NOT_FOUND")) return this.sendJson(res, 404, { error: msg });
       throw err;
     }
@@ -1043,6 +1085,18 @@ export class HttpApiServer {
 
     const result = await this.yieldOptimizerUseCase.getPositions(userId);
     return this.sendJson(res, 200, result);
+  }
+
+  private async requireAdmin(req: http.IncomingMessage, res: http.ServerResponse): Promise<string | null> {
+    const userId = await this.extractUserId(req);
+    if (!userId) { this.sendJson(res, 401, { error: "unauthorized" }); return null; }
+    const user = await this.userDB?.findById(userId);
+    if (!user?.privyDid || !ADMIN_PRIVY_DIDS.has(user.privyDid)) {
+      log.warn({ userId }, "admin-forbidden");
+      this.sendJson(res, 403, { error: "forbidden" });
+      return null;
+    }
+    return userId;
   }
 
   private async extractUserId(req: http.IncomingMessage): Promise<string | null> {

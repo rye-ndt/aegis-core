@@ -859,6 +859,7 @@ export class AssistantInject {
       this.getTelegramNotifier(),
       this.getYieldOptimizerUseCase(),
       this.getLoyaltyUseCase(),
+      this.getSqlDB().users,
     );
   }
 }
