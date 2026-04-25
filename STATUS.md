@@ -1,5 +1,30 @@
 # Onchain Agent — Status
 
+## Dockerfile — esbuild single-bundle rewrite — 2026-04-25
+
+**What:** Replaced the Alpine + `tsc` + full `node_modules` image with a Debian-slim + esbuild single-bundle pipeline. New `src/entrypoint.ts` statically dispatches to `migrate` then one of `workerCli` / `httpCli` / `telegramCli` based on `PROCESS_ROLE`. One bundle (`dist/server.js`), one tiny runtime `node_modules` containing only the externals.
+
+**Why:** Old image was ~225 MB and shipped the full prod `node_modules` (viem, openai, telegram, drizzle, etc.) plus dead artifacts the inline `find` cleanup tried to scrub. Bundling tree-shakes per-entrypoint and dedupes shared deps. Slim base avoids Alpine's musl recompilation pain for native deps.
+
+**Builder needs gyp toolchain.** `telegram` (gramJS) pulls in transitive `websocket`, which nests its own `utf-8-validate` and runs `node-gyp` at install time. The builder stage installs `python3 make g++`; the runtime stage does not. Don't drop the apt layer.
+
+**Externals (must NOT be bundled):**
+- `pino`, `thread-stream`, `sonic-boom`, `pino-std-serializers` — pino uses `worker_threads` + dynamic transport require; bundling breaks transports and can break `worker_threads` paths.
+- `bufferutil`, `utf-8-validate` — optional native peers of `ws` (ship JS fallback).
+- `pg-native`, `pg-cloudflare` — optional `pg` peers; not used.
+
+If you add a new dep that does any of: dynamic `require(variable)`, reads files via its own `__dirname`, or has a `.node` binary — add it to the externals list AND to the runtime-modules copy loop in the Dockerfile.
+
+**Conventions introduced:**
+- `src/entrypoint.ts` is THE production entrypoint. The four CLIs (`migrate.ts`, `workerCli.ts`, `httpCli.ts`, `telegramCli.ts`) remain valid `tsx` dev targets but are no longer build outputs — only `dist/server.js` is shipped.
+- `esbuild` is installed inline in the builder stage at a pinned version. Promote to `devDependencies` if you want lockfile-tracked reproducibility.
+- Runtime image carries sourcemaps; `NODE_OPTIONS=--enable-source-maps` is set so stack traces map back to TS.
+
+**Side effects to watch:**
+- `db:migrate` script in `package.json` still references `ts-node src/migrate.ts` — unchanged, dev-only.
+- `LOG_PRETTY=true` in prod requires `pino-pretty` in the runtime modules — currently NOT copied (it's a devDep). Don't enable `LOG_PRETTY` in the container without adding it.
+- Cloud Run `PORT` → `HTTP_API_PORT` remap moved from the old shell `CMD` into `entrypoint.ts`.
+
 ## Loyalty Program — 2026-04-25
 
 Full implementation of the Season 0 loyalty/points system (foundation + integrations + Telegram UI). First cut was reviewed and patched the same day — see "Review fixes" below before assuming the original spec applies.

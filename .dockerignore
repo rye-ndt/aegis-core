@@ -3,3 +3,15 @@ dist
 .env*
 .git
 *.md
+.vscode
+.idea
+coverage
+.DS_Store
+*.log
+*.test.ts
+*.spec.ts
+__tests__
+.eslintrc*
+eslint.config.*
+.prettierrc*
+.prettierignore

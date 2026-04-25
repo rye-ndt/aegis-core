@@ -1,51 +1,88 @@
-# ── base: shared OS build tools (cached until apk command changes) ────────────
-FROM node:20.19-alpine3.21 AS base
+# syntax=docker/dockerfile:1.7
+
+# ── builder: full deps + single esbuild bundle ────────────────────────────────
+# Build tools are required because `telegram` (gramJS) pulls in transitive
+# `websocket`, which nests its own `utf-8-validate` and runs node-gyp at
+# install time. They live in the builder stage only — the runtime image stays
+# clean. esbuild is installed pinned for reproducibility — promote to
+# devDependencies later if you prefer.
+FROM node:20.19-slim AS builder
 WORKDIR /app
-RUN apk add --no-cache python3 make g++
 
-# ── deps: clean production-only node_modules ─────────────────────────────────
-# Cached as long as package-lock.json doesn't change.
-# Fresh npm ci --omit=dev avoids prune artifacts (e.g. typescript leaking in).
-FROM base AS deps
-COPY package*.json ./
-RUN npm ci --omit=dev --omit=optional --no-audit --no-fund && \
-    rm -rf node_modules/typescript node_modules/@simplewebauthn/typescript-types && \
-    find node_modules -type f \( -name "*.d.ts" -o -name "*.d.ts.map" -o -name "*.map" -o -name "*.md" -o -name "LICENSE" -o -name "LICENCE" -o -name "CHANGELOG*" -o -name "*.txt" \) -delete && \
-    find node_modules -type d \( -name "__tests__" -o -name ".github" \) -exec rm -rf {} + 2>/dev/null || true
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 make g++ ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-# ── builder: full deps + compile ──────────────────────────────────────────────
-# npm ci layer is cached when lock file is unchanged; only tsc reruns on src changes.
-FROM base AS builder
 COPY package*.json tsconfig.json ./
-RUN npm ci --no-audit --no-fund
+RUN npm ci --no-audit --no-fund && \
+    npm i --no-save --no-audit --no-fund esbuild@0.24.0
+
 COPY src ./src
-RUN npm run build
 
-# ── runtime: lean final image ─────────────────────────────────────────────────
-FROM node:20.19-alpine3.21 AS runtime
+# Single bundle from src/entrypoint.ts. The entrypoint statically requires
+# migrate + the three CLIs, so esbuild traces the whole graph once and dedupes
+# heavy shared deps (viem, openai, telegram, drizzle-orm).
+#
+# Externals — packages that misbehave when bundled:
+#   pino + thread-stream + sonic-boom + pino-std-serializers
+#       worker_threads + dynamic transport require
+#   bufferutil, utf-8-validate
+#       optional native peers of `ws` (used by viem/telegram websockets)
+#   pg-native
+#       optional libpq binding for `pg`
+#   pg-cloudflare
+#       optional `pg` peer for Workers runtime
+RUN ./node_modules/.bin/esbuild src/entrypoint.ts \
+      --bundle \
+      --platform=node \
+      --target=node20 \
+      --format=cjs \
+      --outfile=dist/server.js \
+      --minify \
+      --sourcemap=external \
+      --legal-comments=none \
+      --keep-names \
+      --external:pino \
+      --external:thread-stream \
+      --external:sonic-boom \
+      --external:pino-std-serializers \
+      --external:bufferutil \
+      --external:utf-8-validate \
+      --external:pg-native \
+      --external:pg-cloudflare
+
+# Tiny runtime node_modules: copy only the externals' install dirs straight
+# out of the already-installed builder modules. No second `npm install`, no
+# lockfile gymnastics. Missing optional deps (bufferutil, pg-native, etc.)
+# are silently skipped — `ws`/`pg` fall back to JS, which is what we want.
+RUN mkdir -p /app/runtime_modules && \
+    for pkg in pino thread-stream sonic-boom pino-std-serializers \
+               safe-stable-stringify atomic-sleep on-exit-leak-free \
+               process-warning quick-format-unescaped real-require \
+               fast-redact pino-abstract-transport split2; do \
+      if [ -d "node_modules/$pkg" ]; then \
+        cp -R "node_modules/$pkg" /app/runtime_modules/; \
+      fi; \
+    done
+
+# ── runtime: minimal slim image, no build tools ───────────────────────────────
+FROM node:20.19-slim AS runtime
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    NODE_OPTIONS=--enable-source-maps
 
-COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/runtime_modules ./node_modules
+# Drizzle migration SQL + journal — read at runtime by migrator(migrationsFolder).
 COPY drizzle ./drizzle
 
-# Cloud Run injects PORT; remap to HTTP_API_PORT which the app reads.
 EXPOSE 8080
-
 USER node
 
 # Role is chosen at deploy time by setting PROCESS_ROLE.
-# Worker:  PROCESS_ROLE=worker → runs dist/workerCli.js
-# HTTP:    PROCESS_ROLE=http   → runs dist/httpCli.js
-# Unset:   legacy combined     → runs dist/telegramCli.js
-CMD ["sh", "-c", "\
-  export HTTP_API_PORT=${PORT:-8080}; \
-  node dist/migrate.js && \
-  case \"${PROCESS_ROLE:-combined}\" in \
-    worker)   exec node dist/workerCli.js ;; \
-    http)     exec node dist/httpCli.js ;; \
-    combined) exec node dist/telegramCli.js ;; \
-    *)        echo \"unknown PROCESS_ROLE=$PROCESS_ROLE\" && exit 1 ;; \
-  esac \
-"]
+# Worker:    PROCESS_ROLE=worker   → workerCli
+# HTTP:      PROCESS_ROLE=http     → httpCli
+# Combined:  PROCESS_ROLE unset    → telegramCli (legacy default)
+# Migrations run inline before the CLI starts; move to a dedicated Cloud Run
+# Job if you want to decouple migration from boot.
+CMD ["node", "dist/server.js"]

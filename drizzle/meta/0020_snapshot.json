@@ -645,7 +645,7 @@
             {
               "expression": "points_raw",
               "isExpression": false,
-              "asc": true,
+              "asc": false,
               "nulls": "last"
             }
           ],
