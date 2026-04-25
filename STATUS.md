@@ -1,5 +1,15 @@
 # Onchain Agent — Status
 
+## Healthcheck endpoint — 2026-04-25
+
+**What:** Added `POST /health` to `HttpApiServer` (`src/adapters/implementations/input/http/httpServer.ts`). Unauthenticated; returns insensitive deployment metadata: `status`, `service`, `version` (from `SERVICE_VERSION` env), `processRole`, `nodeEnv`, `runtime` (node/platform/arch), `chain` (id/name/nativeSymbol via `CHAIN_CONFIG`), `uptimeSeconds`, `startedAtEpoch`, `timestampEpoch`, `memoryMb` (rss/heapUsed/heapTotal/external), and a `services` boolean map showing which optional use cases/repos were wired into the constructor.
+
+**Why:** Need a single deployment-verification probe that confirms the bundle booted, identifies which `PROCESS_ROLE` is responding, and signals which optional dependencies are wired without revealing secrets, addresses, RPC URLs, or env values. Chose POST per request even though the handler is read-only — easier to gate behind a simple body filter later if needed without changing the route shape. Surfaces a `services` map (booleans only — names, not values) because the constructor takes 17 optional deps; without this you can't tell from outside whether e.g. the loyalty or yield path is live in a given deployment.
+
+**Sensitive fields explicitly NOT included:** RPC URLs, contract addresses, env var values, METRICS_TOKEN, any user-scoped data, queue depths or pending counts (could leak load patterns). `version` falls back to `"unknown"` if `SERVICE_VERSION` isn't set — wire it at deploy time if you want it populated.
+
+**Side effects to watch:** None functional. Adds one `startedAtEpoch` field captured at server construction (was previously inferable only via `process.uptime()`).
+
 ## Dockerfile — esbuild single-bundle rewrite — 2026-04-25
 
 **What:** Replaced the Alpine + `tsc` + full `node_modules` image with a Debian-slim + esbuild single-bundle pipeline. New `src/entrypoint.ts` statically dispatches to `migrate` then one of `workerCli` / `httpCli` / `telegramCli` based on `PROCESS_ROLE`. One bundle (`dist/server.js`), one tiny runtime `node_modules` containing only the externals.
@@ -902,3 +912,151 @@ endpoint wants.
 a gate. They verify the token via `loginWithPrivy` / `verifyToken` and use
 the returned `userId`. Every other endpoint keeps calling `resolveUserId`
 and 401s on null.
+
+
+## 2026-04-25 — Cloud Run deployment + GitHub Actions CI/CD
+
+**What**: stood up the production deployment on Google Cloud Run (project
+`aegis-494004`, region `us-east1`), with auto-deploy on push to `main` via
+GitHub Actions. Two services, one image, role chosen at deploy time by
+`PROCESS_ROLE`.
+
+### Topology
+
+| Service        | Role     | Public | Scaling          | Notes                                                        |
+|----------------|----------|--------|------------------|--------------------------------------------------------------|
+| `aegis-http`   | `http`   | yes    | 0–3, conc=80     | `httpCli` — assistant HTTP API. Scales to zero when idle.   |
+| `aegis-worker` | `worker` | no (IAM) | pinned 1, no CPU throttling | `workerCli` — Telegram (grammy) long-poll + cron jobs (`tokenCrawler`, `yieldPoolScan`, `userIdleScan`, `yieldReport`) + signing-callback HTTP. |
+
+Single image `us-east1-docker.pkg.dev/aegis-494004/aegis/aegis-backend:<sha>`.
+Both listen on `8080` (Cloud Run injects `PORT`; `entrypoint.ts` already
+maps `PORT` → `HTTP_API_PORT`). Both run drizzle migrations on boot via
+`entrypoint.ts → migrate.ts` before dispatching to the role CLI.
+
+**Why pin worker to 1 instance with `--no-cpu-throttling`**: it owns
+long-lived state (gramJS MTProto socket, grammy long-poll loop) and timer-
+driven cron jobs that must fire while there's no incoming HTTP traffic. CPU
+throttling would freeze timers between requests; multi-instance would
+duplicate Telegram polling and double-fire crons.
+
+### External storage (free tier)
+
+- **Postgres**: Neon (`us-east-1`, pooled connection string). Free tier;
+  scales to zero. No Cloud SQL — its minimum cost (~$9/mo idle) wasn't
+  worth it for current traffic.
+- **Redis**: Upstash (`rediss://`, TLS). Pay-per-request, free tier
+  covers expected load. Memorystore minimum (~$35–50/mo) was excessive.
+- **Region pinning**: Neon, Upstash, and Cloud Run all in `us-east-1` to
+  keep latency low and cross-region egress at zero.
+
+### Secrets (Secret Manager)
+
+All sensitive env vars live in **Google Secret Manager** and are mounted
+into both services via `--set-secrets KEY=KEY:latest`. Non-sensitive
+config (model name, intervals, pool sizes, `CHAIN_ID`, etc.) is passed
+plainly via `--set-env-vars`. Compute SA was granted
+`roles/secretmanager.secretAccessor` so Cloud Run can read at runtime.
+
+Secrets stored: `DATABASE_URL`, `REDIS_URL`, `OPENAI_API_KEY`,
+`PINECONE_API_KEY`, `PINECONE_HOST`, `PINECONE_INDEX_NAME`,
+`TELEGRAM_BOT_TOKEN`, `TG_API_ID`, `TG_API_HASH`, `TG_SESSION`,
+`PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `TAVILY_API_KEY`,
+`HTTP_TOOL_HEADER_ENCRYPTION_KEY`, `METRICS_TOKEN`, `AVAX_BUNDLER_URL`,
+`AVAX_PAYMASTER_URL`, `REWARD_CONTROLLER_ADDRESS`, `MINI_APP_URL`.
+
+`MINI_APP_URL` currently points at the dev ngrok URL — update via
+`gcloud secrets versions add MINI_APP_URL --data-file=- --project=aegis-494004`
+then redeploy (services pin secret to `:latest` but Cloud Run only re-reads
+on revision creation).
+
+### CI/CD — GitHub Actions + Workload Identity Federation
+
+Repo: `rye-ndt/onchain-agent`. No JSON service-account key — auth via
+**WIF** so GitHub OIDC tokens impersonate the deploy SA directly.
+
+- WIF pool: `github-pool` (global)
+- WIF provider: `github-provider`, scoped by
+  `attribute.repository_owner == 'rye-ndt'`
+- Deploy SA: `aegis-deployer@aegis-494004.iam.gserviceaccount.com`
+  bound to `principalSet://…/attribute.repository/rye-ndt/onchain-agent`
+- SA roles: `run.admin`, `artifactregistry.writer`,
+  `iam.serviceAccountUser`, `secretmanager.secretAccessor`
+
+Repo variables (set via `gh variable set`, **not** secrets — they're not
+sensitive):
+- `GCP_PROJECT=aegis-494004`
+- `WIF_PROVIDER=projects/431902544869/locations/global/workloadIdentityPools/github-pool/providers/github-provider`
+- `SERVICE_ACCOUNT=aegis-deployer@aegis-494004.iam.gserviceaccount.com`
+
+Workflow at `.github/workflows/deploy.yml`: on push to `main`, one `build`
+job pushes the image tagged with `${GITHUB_SHA}`, then a matrix `deploy`
+job updates both services in parallel (env/secrets stay sticky on the
+service — only the image changes).
+
+### Dockerfile changes
+
+The hand-curated runtime-modules copy list in the builder stage was missing
+deps that broke boot in the slim runtime image:
+
+- Added `@pinojs/redact` (pino dropped `fast-redact` for this; removed
+  `fast-redact` from the list).
+- Added `bufferutil`, `utf-8-validate`, `node-gyp-build` — some transitive
+  caller in the bundle (`viem`/`telegram` ws stack) requires them
+  unconditionally rather than via try/catch, so the "ws falls back to JS"
+  comment was wishful thinking. Native binaries are already built in the
+  builder stage with `python3 make g++`, so this is just a copy.
+
+**Convention**: when bumping `pino` or any package whose runtime deps are
+hand-copied in the builder stage, check `node_modules/pino/package.json`
+deps and update the runtime copy list — bundling externals will hide the
+breakage until container start.
+
+### Migration fix
+
+`drizzle/0020_flippant_living_mummy.sql` seeded `loyalty_seasons.ends_at_epoch
+= 9999999999`, which overflows Postgres `int4` (max `2147483647`). On a
+fresh Postgres the whole migration batch rolled back, leaving an empty
+schema and the worker spamming `"relation 'token_registry' does not exist"`.
+Replaced with `2147483647` (year 2038 sentinel — re-issue Season N before
+then).
+
+**Convention**: when seeding "no end" / "infinity" timestamps into an `int4`
+column, use `2147483647`, not arbitrarily large numbers. Long-term, consider
+migrating epoch columns to `bigint` if any season is expected to outlast 2038.
+
+### Cost (monthly estimate)
+
+- Worker (always-on, 1 vCPU / 512Mi, no throttling): ~$13–18
+- HTTP (scales to zero, low traffic): ~$0–2
+- Artifact Registry storage: <$1
+- Neon, Upstash, Secret Manager: $0 (free tier)
+- **Total: ~$15–20/mo** — comfortably inside the $200 GCP credit.
+
+### Observability — quick checks
+
+```bash
+# service ready
+gcloud run services describe aegis-http   --region=us-east1 --project=aegis-494004 --format='value(status.conditions[0].type,status.conditions[0].status)'
+gcloud run services describe aegis-worker --region=us-east1 --project=aegis-494004 --format='value(status.conditions[0].type,status.conditions[0].status)'
+
+# recent errors
+gcloud logging read 'resource.type="cloud_run_revision" AND severity>=ERROR' \
+  --project=aegis-494004 --limit=10 --freshness=30m
+
+# tail worker
+gcloud beta run services logs tail aegis-worker --region=us-east1 --project=aegis-494004
+```
+
+No `/health` endpoint exists — Cloud Run's default TCP probe on `:8080` is
+sufficient. End-to-end smoke test: send any message to the Telegram bot.
+
+### Known follow-ups
+
+- `MINI_APP_URL` is still the ngrok URL; update before shipping the FE.
+- `worker.exposedPort` is reachable at the worker's Cloud Run URL but
+  IAM-protected. If Telegram or any external service ever needs to call
+  the signing-callback HTTP directly, change to `--allow-unauthenticated`
+  or front it via the `aegis-http` service.
+- If load grows past current sizing, split crons out of the worker into
+  Cloud Run **Jobs** triggered by **Cloud Scheduler** so the worker stays
+  lean (just the Telegram socket + signing callbacks).

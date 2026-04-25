@@ -55,7 +55,7 @@ ON CONFLICT ("id") DO NOTHING;
 
 -- Seed: Season 0 (closed alpha, 3.0x global multiplier)
 INSERT INTO "loyalty_seasons" ("id", "name", "starts_at_epoch", "ends_at_epoch", "status", "formula_version", "config_json", "created_at_epoch", "updated_at_epoch") VALUES
-  ('season-0', 'Season 0', EXTRACT(EPOCH FROM NOW())::int, 9999999999, 'active', 'v1',
+  ('season-0', 'Season 0', EXTRACT(EPOCH FROM NOW())::int, 2147483647, 'active', 'v1',
    '{"globalMultiplier":3.0,"perActionCap":50000,"dailyUserCap":null,"actionBase":{"swap_same_chain":100,"swap_cross_chain":200,"send_erc20":50,"yield_deposit":300,"yield_hold_day":10,"referral":500,"manual_adjust":0},"actionMultiplier":{"swap_same_chain":1,"swap_cross_chain":1.5,"send_erc20":1,"yield_deposit":2,"yield_hold_day":1,"referral":1,"manual_adjust":1},"actionMinUsd":{"swap_same_chain":1,"swap_cross_chain":1},"volume":{"formula":"sqrt","divisor":100}}'::jsonb,
    EXTRACT(EPOCH FROM NOW())::int, EXTRACT(EPOCH FROM NOW())::int)
 ON CONFLICT ("id") DO NOTHING;
