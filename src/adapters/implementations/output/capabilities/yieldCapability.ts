@@ -133,6 +133,12 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
         }
       : undefined;
 
+    await ctx.emit({
+      kind: "chat",
+      parseMode: "Markdown",
+      text: buildDepositQuoteSummary(plan, displayMeta, plan.txSteps.length),
+    });
+
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.txSteps,
@@ -142,6 +148,11 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       protocolId: plan.protocolId,
       tokenAddress: plan.tokenAddress,
       displayMeta,
+      buttonText: "Execute Deposit",
+      promptText:
+        plan.txSteps.length === 1
+          ? "Tap the button below to execute the deposit automatically."
+          : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
     });
 
     if (result.aborted) return result.artifact;
@@ -185,6 +196,12 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
         }
       : undefined;
 
+    await ctx.emit({
+      kind: "chat",
+      parseMode: "Markdown",
+      text: buildWithdrawQuoteSummary(displayMeta, plan.txSteps.length),
+    });
+
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.txSteps,
@@ -194,6 +211,11 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       protocolId: first?.protocolId,
       tokenAddress: first?.tokenAddress,
       displayMeta,
+      buttonText: "Execute Withdrawal",
+      promptText:
+        plan.txSteps.length === 1
+          ? "Tap the button below to execute the withdrawal automatically."
+          : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
     });
 
     if (result.aborted) return result.artifact;
@@ -224,11 +246,24 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
     protocolId?: string;
     tokenAddress?: string;
     displayMeta?: YieldDisplayMeta;
+    buttonText: string;
+    promptText: string;
   }): Promise<
     | { aborted: true; artifact: Artifact }
     | { aborted: false; txHashes: string[] }
   > {
-    const { ctx, steps, labelPrefix, kind, chainId, protocolId, tokenAddress, displayMeta } = opts;
+    const {
+      ctx,
+      steps,
+      labelPrefix,
+      kind,
+      chainId,
+      protocolId,
+      tokenAddress,
+      displayMeta,
+      buttonText,
+      promptText,
+    } = opts;
     const signingUseCase = this.deps.signingRequestUseCase!;
     const chatId = Number(ctx.channelId);
     const txHashes: string[] = [];
@@ -237,7 +272,8 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       const step = steps[i]!;
       const requestId = newUuid();
       const now = newCurrentUTCEpoch();
-      const label = `${labelPrefix} step ${i + 1}/${steps.length}`;
+      const label =
+        steps.length === 1 ? labelPrefix : `${labelPrefix} step ${i + 1}/${steps.length}`;
 
       const record: SigningRequestRecord = {
         id: requestId,
@@ -274,16 +310,23 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
         displayMeta: i === 0 ? displayMeta : undefined,
       };
 
-      if (this.deps.miniAppRequestCache) {
-        await this.deps.miniAppRequestCache.store(miniAppRequest);
+      if (i === 0) {
+        // First step: emit the mini-app button. The renderer also stores the
+        // request in miniAppRequestCache as part of `mini_app` handling.
+        await ctx.emit({
+          kind: "mini_app",
+          request: miniAppRequest,
+          promptText,
+          buttonText,
+        });
+      } else {
+        // Subsequent steps: queue silently. The FE picks them up via
+        // `fetchNextRequest` after the previous step succeeds, so the user
+        // opens the mini app exactly once per yield operation.
+        if (this.deps.miniAppRequestCache) {
+          await this.deps.miniAppRequestCache.store(miniAppRequest);
+        }
       }
-
-      await ctx.emit({
-        kind: "mini_app",
-        request: miniAppRequest,
-        promptText: `${label} — tap to execute automatically.`,
-        buttonText: `Execute step ${i + 1}/${steps.length}`,
-      });
 
       const resolution = await signingUseCase.waitFor(requestId, SIGN_WAIT_TIMEOUT_MS);
 
@@ -354,6 +397,50 @@ export function buildNudgeKeyboard(): InlineKeyboard {
     .row()
     .text("Custom amount", "yield:custom")
     .text("Skip", "yield:skip");
+}
+
+function buildDepositQuoteSummary(
+  plan: { protocolId: string; chainId: number },
+  meta: YieldDisplayMeta | undefined,
+  stepCount: number,
+): string {
+  const lines = ["*Yield deposit quote*", ""];
+  if (meta) {
+    lines.push(`Deposit: ${meta.amountHuman} ${meta.tokenSymbol}`);
+    lines.push(`Protocol: ${meta.protocolName} (chain ${plan.chainId})`);
+    if (meta.expectedApy != null) {
+      lines.push(`APY: ~${(meta.expectedApy * 100).toFixed(2)}%`);
+    }
+  } else {
+    lines.push(`Protocol: ${plan.protocolId} (chain ${plan.chainId})`);
+  }
+  lines.push(`Steps: ${stepCount}`);
+  lines.push("");
+  lines.push(
+    stepCount === 1
+      ? "Tap the button below to execute the deposit automatically."
+      : "Tap the button below — all steps will be signed in one mini-app session.",
+  );
+  return lines.join("\n");
+}
+
+function buildWithdrawQuoteSummary(
+  meta: YieldDisplayMeta | undefined,
+  stepCount: number,
+): string {
+  const lines = ["*Yield withdrawal quote*", ""];
+  if (meta) {
+    lines.push(`Withdraw: ${meta.amountHuman} ${meta.tokenSymbol}`);
+    lines.push(`Protocol: ${meta.protocolName}`);
+  }
+  lines.push(`Steps: ${stepCount}`);
+  lines.push("");
+  lines.push(
+    stepCount === 1
+      ? "Tap the button below to execute the withdrawal automatically."
+      : "Tap the button below — all steps will be signed in one mini-app session.",
+  );
+  return lines.join("\n");
 }
 
 function buildDepositSuccessMessage(pct: number, txHashes: string[]): string {

@@ -7,9 +7,10 @@ const RAY = BigInt("1000000000000000000000000000"); // 1e27
 const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
 
 function rayToApy(rayRate: bigint): number {
-  // linearise: APY ≈ rate_per_second * seconds_per_year  (accurate for small rates)
-  const ratePerSecond = Number(rayRate) / Number(RAY);
-  return ratePerSecond * SECONDS_PER_YEAR;
+  // Aave V3 liquidityRate is APR-in-ray (1e27), not a per-second rate.
+  // Convert to APY via continuous compounding: (1 + APR/n)^n - 1.
+  const apr = Number(rayRate) / Number(RAY);
+  return Math.pow(1 + apr / SECONDS_PER_YEAR, SECONDS_PER_YEAR) - 1;
 }
 
 const DATA_PROVIDER_ABI = [

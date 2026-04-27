@@ -1,5 +1,20 @@
 # Capabilities Status
 
+## /yield one-click UX parity with /swap — 2026-04-27
+
+**What was done:**
+- `yieldCapability.runDeposit` / `runWithdraw`: emit a single Markdown quote summary (`buildDepositQuoteSummary` / `buildWithdrawQuoteSummary`) before sequencing the steps, mirroring `swapCapability.buildQuoteSummary`.
+- `yieldCapability.executeSignSteps`: only step 1 emits the `mini_app` button. Subsequent steps are stored via `miniAppRequestCache.store(...)` and chained by the FE's `YieldDepositHandler` (which already calls `fetchNextRequest`). The user opens the mini app exactly once per deposit/withdrawal — no more "Yield deposit step 2/2 — tap to execute automatically." follow-up button.
+- Caller passes `buttonText` and `promptText` so the deposit and withdrawal flows can use distinct copy.
+- `YIELD_REPORT_INTERVAL_MS` env added (`yieldEnv.reportIntervalMs`). When > 0, `YieldReportJob` runs at that interval and skips the daily UTC-hour gate + `report_done:{date}` redis dedupe; when 0/unset, behavior matches the previous daily report.
+
+**Why:**
+- The yield flow already had `autoSign: true` and `fetchNextRequest` support on the FE, but the BE was emitting a per-step Telegram button. That broke the "one tap, all steps signed in a single mini-app session" UX that `/swap` and `/send` already deliver.
+- The interval-based report knob is a debug/QA convenience requested for the current iteration (set to 120000 in `be/.env`). Daily reports remain the production default.
+
+**Conventions reinforced:**
+- Same as the swap convention below: capabilities producing N>1 signing steps emit `mini_app` for step 1 only, store steps 2..N via `miniAppRequestCache.store(...)`, and rely on the FE's `fetchNextRequest` chaining.
+
 ## /swap UX parity with /send — 2026-04-27
 
 **What was done:**

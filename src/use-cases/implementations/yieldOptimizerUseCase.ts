@@ -222,7 +222,10 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     await this.deps.sendNudge(userId, profile.telegramChatId, best.apy, best.protocolId);
 
     await this.deps.redis.set(cooldownKey, "1", "EX", this.deps.nudgeCooldownSec);
-    await this.deps.redis.set(pendingKey, "1", "EX", 48 * 60 * 60);
+    // Pending TTL tracks the same cadence as the cooldown — a longer pending lock
+    // would suppress nudges across multiple scan cycles even after the cooldown
+    // expires. Capability clears this key on deposit start (see buildDepositPlan).
+    await this.deps.redis.set(pendingKey, "1", "EX", this.deps.nudgeCooldownSec);
 
     return { skipped: false };
   }

@@ -5,28 +5,38 @@ import type { IYieldRepository } from "../../../../use-cases/interface/yield/IYi
 import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("yieldReportJob");
-const TICK_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const REPORT_DONE_TTL_SEC = 25 * 60 * 60;
 
 export class YieldReportJob {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private readonly intervalMode: boolean;
+  private readonly tickIntervalMs: number;
 
   constructor(
     private readonly optimizer: IYieldOptimizerUseCase,
     private readonly yieldRepo: IYieldRepository,
     private readonly redis: Redis,
     private readonly reportUtcHour: number,
+    reportIntervalMs: number,
     private readonly sendReport: (userId: string, chatId: string, report: DailyReport) => Promise<void>,
     private readonly getChatId: (userId: string) => Promise<string | null>,
-  ) {}
+  ) {
+    this.intervalMode = reportIntervalMs > 0;
+    this.tickIntervalMs = this.intervalMode ? reportIntervalMs : DEFAULT_TICK_INTERVAL_MS;
+  }
 
   start(): void {
     if (!isWorker()) {
       log.info("not a worker role — not starting.");
       return;
     }
+    log.info(
+      { mode: this.intervalMode ? "interval" : "daily", tickIntervalMs: this.tickIntervalMs },
+      "yield report job starting",
+    );
     this.tick();
-    this.timer = setInterval(() => this.tick(), TICK_INTERVAL_MS);
+    this.timer = setInterval(() => this.tick(), this.tickIntervalMs);
   }
 
   stop(): void {
@@ -43,16 +53,22 @@ export class YieldReportJob {
   }
 
   private async maybeRunReports(): Promise<void> {
-    const nowUtcHour = new Date().getUTCHours();
-    if (nowUtcHour !== this.reportUtcHour) return;
+    if (!this.intervalMode) {
+      const nowUtcHour = new Date().getUTCHours();
+      if (nowUtcHour !== this.reportUtcHour) return;
+
+      const today = new Date().toISOString().slice(0, 10);
+      const doneKey = this.optimizer.reportDoneRedisKey(today);
+      const alreadyDone = await this.redis.exists(doneKey);
+      if (alreadyDone) return;
+    }
 
     const today = new Date().toISOString().slice(0, 10);
-    const doneKey = this.optimizer.reportDoneRedisKey(today);
-    const alreadyDone = await this.redis.exists(doneKey);
-    if (alreadyDone) return;
-
     const start = Date.now();
-    log.info({ step: "tick-start", date: today }, "sending daily reports");
+    log.info(
+      { step: "tick-start", date: today, mode: this.intervalMode ? "interval" : "daily" },
+      "sending yield reports",
+    );
 
     const userIds = await this.yieldRepo.listUsersWithPositions();
     for (const userId of userIds) {
@@ -69,7 +85,10 @@ export class YieldReportJob {
       }
     }
 
-    await this.redis.set(doneKey, "1", "EX", REPORT_DONE_TTL_SEC);
-    log.info({ step: "tick-end", durationMs: Date.now() - start, userCount: userIds.length }, "daily reports sent");
+    if (!this.intervalMode) {
+      const doneKey = this.optimizer.reportDoneRedisKey(today);
+      await this.redis.set(doneKey, "1", "EX", REPORT_DONE_TTL_SEC);
+    }
+    log.info({ step: "tick-end", durationMs: Date.now() - start, userCount: userIds.length }, "yield reports sent");
   }
 }

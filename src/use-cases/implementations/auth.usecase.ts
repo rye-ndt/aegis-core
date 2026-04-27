@@ -12,6 +12,7 @@ import type { IUser } from "../interface/output/repository/user.repo";
 import type { ITelegramSessionDB } from "../interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../interface/output/telegramNotifier.interface";
 import type { IUserProfileCache } from "../interface/output/cache/userProfile.cache";
+import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
 import { createLogger } from "../../helpers/observability/logger";
 
 const log = createLogger("authUseCase");
@@ -27,6 +28,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     private readonly telegramSessionDB?: ITelegramSessionDB,
     private readonly telegramNotifier?: ITelegramNotifier,
     private readonly userProfileCache?: IUserProfileCache,
+    private readonly userProfileDB?: IUserProfileDB,
   ) {}
 
   async loginWithPrivy(input: IPrivyLoginInput): Promise<{ expiresAtEpoch: number; userId: string }> {
@@ -88,6 +90,17 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         userId: user.id,
         expiresAtEpoch,
       });
+    }
+
+    // Persist chat id on the profile so background jobs (e.g. yield idle-scan
+    // nudges) can reach the user. Without this, profile.telegram_chat_id stays
+    // NULL until the smart-account approval path round-trips it.
+    if (input.telegramChatId && this.userProfileDB) {
+      await this.userProfileDB
+        .setTelegramChatId(user.id, input.telegramChatId, newCurrentUTCEpoch())
+        .catch((err) => {
+          log.error({ err, userId: user!.id }, "failed to persist telegramChatId on user profile");
+        });
     }
 
     if (this.userProfileCache) {

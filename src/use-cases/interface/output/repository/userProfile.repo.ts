@@ -42,4 +42,11 @@ export interface IUserProfileDB {
   upsert(profile: UserProfileInit): Promise<void>;
   update(profile: UserProfileUpdate): Promise<void>;
   findByUserId(userId: string): Promise<IUserProfile | undefined>;
+  /**
+   * Partial-update path: writes the telegram chat id without touching any
+   * other column. Inserts a stub profile when one doesn't exist yet so login
+   * from the Telegram bot is never lost even if the smart-account hasn't been
+   * provisioned. See yieldOptimizerUseCase.scanIdleForUser for the read side.
+   */
+  setTelegramChatId(userId: string, telegramChatId: string, nowEpoch: number): Promise<void>;
 }

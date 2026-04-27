@@ -58,6 +58,24 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       .where(eq(userProfiles.userId, profile.userId));
   }
 
+  async setTelegramChatId(userId: string, telegramChatId: string, nowEpoch: number): Promise<void> {
+    await this.db
+      .insert(userProfiles)
+      .values({
+        userId,
+        telegramChatId,
+        createdAtEpoch: nowEpoch,
+        updatedAtEpoch: nowEpoch,
+      })
+      .onConflictDoUpdate({
+        target: userProfiles.userId,
+        set: {
+          telegramChatId,
+          updatedAtEpoch: nowEpoch,
+        },
+      });
+  }
+
   async findByUserId(userId: string): Promise<IUserProfile | undefined> {
     const rows = await this.db
       .select()

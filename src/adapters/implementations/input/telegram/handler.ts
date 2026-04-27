@@ -178,7 +178,10 @@ export class TelegramAssistantHandler {
       return;
     }
     try {
-      const { userId, expiresAtEpoch } = await this.authUseCase.loginWithPrivy({ privyToken });
+      const { userId, expiresAtEpoch } = await this.authUseCase.loginWithPrivy({
+        privyToken,
+        telegramChatId: String(ctx.chat.id),
+      });
       await this.telegramSessions.upsert({
         telegramChatId: String(ctx.chat.id),
         userId,

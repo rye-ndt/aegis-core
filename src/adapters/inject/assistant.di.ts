@@ -401,6 +401,7 @@ export class AssistantInject {
         db.telegramSessions,
         this.getTelegramNotifier(),
         this.getUserProfileCache(),
+        db.userProfiles,
       );
     }
     return this._authUseCase;
@@ -831,6 +832,7 @@ export class AssistantInject {
         this.getYieldRepo(),
         redis,
         YIELD_ENV.reportUtcHour,
+        YIELD_ENV.reportIntervalMs,
         sendReport,
         async (userId) => {
           const session = await sqlDB.telegramSessions.findByUserId(userId);

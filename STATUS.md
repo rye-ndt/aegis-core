@@ -244,7 +244,7 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `yield:best:{chainId}:{token}` | `{protocolId,score,apy,ts}` | 3h |
 | `yield:apy_series:{chainId}:{protocolId}:{token}` | list (84 samples) | none |
 | `yield:nudge_cooldown:{userId}` | `"1"` | `YIELD_NUDGE_COOLDOWN_SEC` |
-| `yield:nudge_pending:{userId}` | `"1"` | 48h |
+| `yield:nudge_pending:{userId}` | `"1"` | `YIELD_NUDGE_COOLDOWN_SEC` (cleared on deposit start) |
 | `yield:report_done:{YYYY-MM-DD}` | `"1"` | 25h |
 | `loyalty:season:active` | active season JSON | 60s |
 | `loyalty:leaderboard:{seasonId}:{limit}` | leaderboard JSON | 30s |
@@ -278,10 +278,10 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `LOG_LEVEL`, `LOG_PRETTY` | `info` (prod) / `debug` else; `false` | pino config |
 | `SERVICE_VERSION` | `unknown` | Surfaced by `/health` |
 | `YIELD_IDLE_USDC_THRESHOLD_USD` | `10` | Min idle to nudge |
-| `YIELD_POOL_SCAN_INTERVAL_MS` | `7200000` | Pool scan |
-| `YIELD_USER_SCAN_INTERVAL_MS` | `86400000` | Idle scan |
+| `YIELD_POOL_SCAN_INTERVAL_MS` | `1800000` (30 min) | Pool scan |
+| `YIELD_USER_SCAN_INTERVAL_MS` | `1800000` (30 min) | Idle scan — also gates pending-nudge TTL |
 | `YIELD_REPORT_UTC_HOUR` | `9` | Daily report hour UTC |
-| `YIELD_NUDGE_COOLDOWN_SEC` | `86400` | Cooldown between nudges |
+| `YIELD_NUDGE_COOLDOWN_SEC` | `1800` (30 min) | Cooldown between nudges; also TTL on `yield:nudge_pending` |
 | `YIELD_ENABLED_CHAIN_IDS` | `43114` | Comma-separated |
 | `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS` | `60000` | |
 | `LOYALTY_LEADERBOARD_CACHE_TTL_MS` | `30000` | |

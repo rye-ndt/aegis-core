@@ -13,9 +13,10 @@ function list(key: string, def: number[]): number[] {
 
 export const YIELD_ENV = {
   idleUsdcThresholdUsd: num("YIELD_IDLE_USDC_THRESHOLD_USD", 10),
-  poolScanIntervalMs: num("YIELD_POOL_SCAN_INTERVAL_MS", 2 * 60 * 60 * 1000),
-  userScanIntervalMs: num("YIELD_USER_SCAN_INTERVAL_MS", 24 * 60 * 60 * 1000),
+  poolScanIntervalMs: num("YIELD_POOL_SCAN_INTERVAL_MS", 30 * 60 * 1000),
+  userScanIntervalMs: num("YIELD_USER_SCAN_INTERVAL_MS", 30 * 60 * 1000),
   reportUtcHour: num("YIELD_REPORT_UTC_HOUR", 9),
-  nudgeCooldownSec: num("YIELD_NUDGE_COOLDOWN_SEC", 86_400),
+  reportIntervalMs: num("YIELD_REPORT_INTERVAL_MS", 0),
+  nudgeCooldownSec: num("YIELD_NUDGE_COOLDOWN_SEC", 1_800),
   enabledChainIds: list("YIELD_ENABLED_CHAIN_IDS", [43114]),
 } as const;
