@@ -222,14 +222,31 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
   }
 
   private buildOrchestratorHistory(messages: Message[]): IOrchestratorMessage[] {
+    // createdAtEpoch is second-precision and tool-round messages are persisted
+    // in parallel, so rows in the same round tie on timestamp. Apply a stable
+    // role-priority tiebreaker so ASSISTANT_TOOL_CALL always precedes its
+    // TOOL responses, which precede the following ASSISTANT/USER turn —
+    // otherwise OpenAI rejects the request with "tool must follow tool_calls".
+    const rolePriority: Record<string, number> = {
+      [MESSAGE_ROLE.USER]: 0,
+      [MESSAGE_ROLE.ASSISTANT_TOOL_CALL]: 1,
+      [MESSAGE_ROLE.TOOL]: 2,
+      [MESSAGE_ROLE.ASSISTANT]: 3,
+    };
+    const ordered = [...messages].sort((a, b) => {
+      if (a.createdAtEpoch !== b.createdAtEpoch)
+        return a.createdAtEpoch - b.createdAtEpoch;
+      return (rolePriority[a.role] ?? 99) - (rolePriority[b.role] ?? 99);
+    });
+
     const resolvedIds = new Set<string>(
-      messages
+      ordered
         .filter((m) => m.role === MESSAGE_ROLE.TOOL && m.toolCallId)
         .map((m) => m.toolCallId!),
     );
 
     const keptToolCallIds = new Set<string>();
-    const sanitized = messages.filter((m) => {
+    const sanitized = ordered.filter((m) => {
       if (m.role !== MESSAGE_ROLE.ASSISTANT_TOOL_CALL || !m.toolCallsJson)
         return true;
       const calls: IToolCall[] = JSON.parse(m.toolCallsJson);

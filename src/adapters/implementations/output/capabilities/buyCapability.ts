@@ -1,4 +1,8 @@
 import { InlineKeyboard } from "grammy";
+import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
+import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { newUuid } from "../../../../helpers/uuid";
 import type {
   Artifact,
   Capability,
@@ -6,16 +10,10 @@ import type {
   CollectResult,
   TriggerSpec,
 } from "../../../../use-cases/interface/input/capability.interface";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { OnrampRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
-import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
-import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
-import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
-import { newUuid } from "../../../../helpers/uuid";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 
-type BuyParams =
-  | { choice: "deposit" | "card"; amount: number }
-  | { choice: "copy"; address: string };
+type BuyParams = { choice: "deposit" | "card"; amount: number };
 
 type BuyState =
   | { stage: "awaiting_amount" }
@@ -49,14 +47,11 @@ export class BuyCapability implements Capability<BuyParams> {
     // ── Callback (yes/no/copy) ─────────────────────────────────────────
     if (ctx.input.kind === "callback") {
       const data = ctx.input.data;
-      const match = data.match(/^buy:(y|n|copy):(.+)$/);
+      const match = data.match(/^buy:(y|n):(.+)$/);
       if (!match) return this.restart();
       const kind = match[1]!;
       const payload = match[2]!;
 
-      if (kind === "copy") {
-        return { kind: "ok", params: { choice: "copy", address: payload } };
-      }
       const amount = parseBuyAmount(payload);
       if (amount === null) return this.restart();
       return {
@@ -87,7 +82,8 @@ export class BuyCapability implements Capability<BuyParams> {
     if (rest.length === 0) {
       return {
         kind: "ask",
-        question: "How much USDC would you like to buy? Reply with a number, e.g. `50`.",
+        question:
+          "How much USDC would you like to buy? Reply with a number, e.g. `50`.",
         parseMode: "Markdown",
         state: { stage: "awaiting_amount" },
       };
@@ -105,10 +101,6 @@ export class BuyCapability implements Capability<BuyParams> {
   }
 
   async run(params: BuyParams, ctx: CapabilityCtx): Promise<Artifact> {
-    if (params.choice === "copy") {
-      return { kind: "chat", text: `\`${params.address}\``, parseMode: "Markdown" };
-    }
-
     const profile = await this.userProfileRepo.findByUserId(ctx.userId);
     const address = profile?.smartAccountAddress;
     if (!address) {
@@ -121,15 +113,12 @@ export class BuyCapability implements Capability<BuyParams> {
     const amountStr = formatBuyAmount(params.amount);
 
     if (params.choice === "deposit") {
-      const keyboard = new InlineKeyboard().text("Copy address", `buy:copy:${address}`);
       return {
         kind: "chat",
         parseMode: "Markdown",
-        keyboard,
         text:
           `Deposit *${amountStr} USDC* on *${CHAIN_CONFIG.name}* to:\n` +
-          `\`${address}\`\n\n` +
-          `Send only USDC on ${CHAIN_CONFIG.name} — other networks or tokens will be lost.`,
+          `\`${address}\`\n\n`,
       };
     }
 

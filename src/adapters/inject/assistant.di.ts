@@ -601,7 +601,19 @@ export class AssistantInject {
     const pending: IPendingCollectionStore = redisForPending
       ? new RedisPendingCollectionStore(redisForPending)
       : new InMemoryPendingCollectionStore();
-    const renderer = new TelegramArtifactRenderer(bot, this.getMiniAppRequestCache());
+    // Renderer needs signingRequestUseCase so that `sign_calldata` artifacts
+    // (emitted by sendCapability and other one-shot tx flows) persist BOTH
+    // the miniAppRequest and the signingRequest record. Without the latter,
+    // POST /response 404s on signingRequestCache miss, the miniAppRequest is
+    // never cleaned up, and the FE polls forever.
+    // Use the already-initialized instance (created by *Cli.ts at startup
+    // with the real onResolved callback). Fall back to undefined only when
+    // Redis isn't configured — same policy as the swap capability above.
+    const renderer = new TelegramArtifactRenderer(
+      bot,
+      this.getMiniAppRequestCache(),
+      this._signingRequestUseCase ?? undefined,
+    );
     const sqlDB = this.getSqlDB();
 
     // Register capabilities here. Order does not matter.
@@ -610,6 +622,7 @@ export class AssistantInject {
     const sendDeps = {
       intentUseCase: this.getIntentUseCase(),
       resolverEngine: this.getResolverEngine(),
+      tokenRegistryService: this.getTokenRegistryService(),
       tokenDelegationDB: this.getTokenDelegationRepo(),
       executionEstimator: this.getExecutionEstimator(),
       telegramHandleResolver: this.getTelegramHandleResolver(),
