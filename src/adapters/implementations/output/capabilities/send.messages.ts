@@ -8,21 +8,26 @@ interface ConfirmationTarget {
   partialParams: Record<string, unknown>;
 }
 
-export function buildDelegationPrompt(msg: ZerodevMessage): string {
+export function buildDelegationPrompt(
+  msg: ZerodevMessage,
+  display?: { tokenSymbol?: string; amountHuman?: string },
+): string {
   if (msg.type === ZERODEV_MESSAGE_TYPE.ERC20_SPEND) {
     const expiresDate = new Date(msg.validUntil * 1000).toISOString().split("T")[0];
+    const symbol = display?.tokenSymbol ?? "tokens";
+    const amount = display?.amountHuman
+      ? `${display.amountHuman} ${symbol}`
+      : `${msg.valueLimit} ${symbol} (raw)`;
     return [
-      "🔐 *Delegation Request*",
+      "✨ *Enable instant auto-send*",
       "",
-      "The bot is requesting permission to spend tokens on your behalf.",
-      `Token: \`${msg.target}\``,
-      `Max amount: ${msg.valueLimit} (raw)`,
-      `Expires: ${expiresDate}`,
+      `Allow Aegis to send up to *${amount}* on your behalf, valid through ${expiresDate}.`,
+      "Approve once — future sends of this token won't ask again.",
       "",
-      "Open the Aegis app to approve or dismiss this request.",
+      "Tap the Aegis app to approve.",
     ].join("\n");
   }
-  return "🔐 Delegation request pending. Open the Aegis app to review.";
+  return "✨ Approval pending. Open the Aegis app to review.";
 }
 
 export function buildConfirmationMessage(

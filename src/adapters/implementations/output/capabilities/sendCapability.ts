@@ -23,10 +23,12 @@ import type { IUserProfileDB } from "../../../../use-cases/interface/output/repo
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
 import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { getUsdcAddress } from "../../../../helpers/chainConfig";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import {
   buildConfirmationMessage,
@@ -84,6 +86,7 @@ interface SendParams {
 export interface SendCapabilityDeps {
   intentUseCase: IIntentUseCase;
   resolverEngine?: IResolverEngine;
+  tokenRegistryService?: ITokenRegistryService;
   tokenDelegationDB?: ITokenDelegationDB;
   executionEstimator?: IExecutionEstimator;
   telegramHandleResolver?: ITelegramHandleResolver;
@@ -285,14 +288,20 @@ export class SendCapability implements Capability<SendParams> {
       partialParams: {},
     });
 
-    if (
-      detectStablecoinIntent(text) &&
-      !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
-      !compileResult.tokenSymbols?.from
-    ) {
+    if (detectStablecoinIntent(text)) {
+      const usdc = getUsdcAddress(this.deps.chainId);
+      if (!usdc) {
+        return this.abort(
+          "no usdc found for this chain, please try again with another token",
+        );
+      }
+      // "$" / "5 dollars" / "5 usd" → resolve to chain-specific USDC. Address
+      // goes into resolverFields (dual-schema path bypasses substring search);
+      // "USDC" symbol covers the legacy single-schema path. Defensive overrides
+      // in runResolutionPhase / resolveTokensAndFinish reapply this on resume.
       compileResult.resolverFields = {
         ...compileResult.resolverFields,
-        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
+        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: usdc,
       };
       compileResult.tokenSymbols = { ...compileResult.tokenSymbols, from: "USDC" };
     }
@@ -345,14 +354,17 @@ export class SendCapability implements Capability<SendParams> {
     const anyFiatMessage = state.messages.some(detectStablecoinIntent);
     if (
       anyFiatMessage &&
-      !compileResult.resolverFields?.[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
-      !state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] &&
-      !compileResult.tokenSymbols?.from &&
-      !state.tokenSymbols.from
+      !state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL]
     ) {
+      const usdc = getUsdcAddress(this.deps.chainId);
+      if (!usdc) {
+        return this.abort(
+          "no usdc found for this chain, please try again with another token",
+        );
+      }
       compileResult.resolverFields = {
         ...compileResult.resolverFields,
-        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: "USDC",
+        [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: usdc,
       };
       compileResult.tokenSymbols = { ...compileResult.tokenSymbols, from: "USDC" };
     }
@@ -403,6 +415,27 @@ export class SendCapability implements Capability<SendParams> {
     ctx: CapabilityCtx,
     state: SessionState,
   ): Promise<CollectResult<SendParams>> {
+    // Defensive USDC override — last line of defence right before the resolver.
+    // The compile loop merge `state.resolverFields = {...state.resolverFields,
+    // ...compileResult.resolverFields}` would clobber any earlier address
+    // injection if the LLM re-extracts "USD" on a later turn; this re-applies
+    // the canonical USDC address so the resolver always sees a 0x… and skips
+    // disambiguation.
+    if (state.messages.some(detectStablecoinIntent)) {
+      const current = state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL];
+      const isAddress = typeof current === "string" && /^0x[0-9a-fA-F]{40}$/.test(current);
+      if (!isAddress) {
+        const usdc = getUsdcAddress(this.deps.chainId);
+        if (!usdc) {
+          return this.abort(
+            "no usdc found for this chain, please try again with another token",
+          );
+        }
+        state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] = usdc;
+        state.tokenSymbols.from = "USDC";
+      }
+    }
+
     try {
       const resolved = await this.deps.resolverEngine!.resolve({
         resolverFields: state.resolverFields,
@@ -521,10 +554,37 @@ export class SendCapability implements Capability<SendParams> {
     state: SessionState,
   ): Promise<CollectResult<SendParams>> {
     const chainId = this.deps.chainId;
+
+    // Defensive USDC short-circuit for the legacy single-schema path. The
+    // generic searchTokens does ilike '%symbol%' which would still split
+    // "USDC" into USDC + USDC.E. When we know the canonical USDC address
+    // for this chain, look it up directly and treat it as a single resolved
+    // candidate so the user is never asked to disambiguate.
     let fromCandidates: ITokenRecord[] = [];
     let toCandidates: ITokenRecord[] = [];
 
-    if (state.tokenSymbols.from) {
+    if (state.messages.some(detectStablecoinIntent)) {
+      const usdc = getUsdcAddress(chainId);
+      if (!usdc) {
+        return this.abort(
+          "no usdc found for this chain, please try again with another token",
+        );
+      }
+      const usdcRecord = this.deps.tokenRegistryService
+        ? await this.deps.tokenRegistryService.findByAddressAndChain(usdc, chainId)
+        : undefined;
+      if (!usdcRecord) {
+        log.warn(
+          { chainId, usdc },
+          "USDC address configured but token not found in registry — falling back to symbol search",
+        );
+      } else {
+        fromCandidates = [usdcRecord];
+        state.tokenSymbols.from = usdcRecord.symbol;
+      }
+    }
+
+    if (fromCandidates.length === 0 && state.tokenSymbols.from) {
       fromCandidates = await this.deps.intentUseCase.searchTokens(state.tokenSymbols.from, chainId);
       if (fromCandidates.length === 0) {
         return this.abort(
@@ -612,47 +672,35 @@ export class SendCapability implements Capability<SendParams> {
       return false;
     }
 
-    await ctx.emit({ kind: "chat", text: `Resolving @${handle}...` });
-    let telegramUserId: string;
-    try {
-      telegramUserId = await this.deps.telegramHandleResolver.resolveHandle(handle);
-      await ctx.emit({
-        kind: "chat",
-        text: `@${handle} → Telegram ID: \`${telegramUserId}\``,
-        parseMode: "Markdown",
-      });
-    } catch (err) {
-      const isNotFound = err instanceof TelegramHandleNotFoundError;
-      const msg = isNotFound
-        ? `Sorry, I couldn't find a Telegram user for @${handle}. Double-check the handle and try again.`
-        : `Sorry, something went wrong resolving @${handle}. Please try again.`;
-      if (!isNotFound) log.error({ err, handle }, "resolveHandle error");
-      await ctx.emit({ kind: "chat", text: msg });
-      return false;
-    }
+    // Single animated "find your receiver…" message for the whole resolution.
+    // The renderer animates dots; we never edit it after the fact — the final
+    // dot frame stays in chat. Errors are emitted as a separate message after.
+    const statusId = `resolve_recipient_${handle}_${Date.now()}`;
+    await ctx.emit({ kind: "chat_status_start", id: statusId, text: "Finding your receiver" });
 
-    await ctx.emit({
-      kind: "chat",
-      text: `Finding wallet for Telegram user \`${telegramUserId}\`...`,
-      parseMode: "Markdown",
-    });
+    let telegramUserId: string;
     let recipientAddress: string;
     try {
+      telegramUserId = await this.deps.telegramHandleResolver.resolveHandle(handle);
       recipientAddress = await this.deps.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
-      await ctx.emit({
-        kind: "chat",
-        text: `Recipient wallet: \`${recipientAddress}\``,
-        parseMode: "Markdown",
-      });
     } catch (err) {
-      log.error({ err, telegramUserId }, "Privy wallet resolution failed");
-      await ctx.emit({
-        kind: "chat",
-        text: `Sorry, I couldn't set up a wallet for @${handle}. Please try again later.`,
-      });
+      await ctx.emit({ kind: "chat_status_stop", id: statusId });
+      if (err instanceof TelegramHandleNotFoundError) {
+        await ctx.emit({
+          kind: "chat",
+          text: `Sorry, I couldn't find a Telegram user for @${handle}. Double-check the handle and try again.`,
+        });
+      } else {
+        log.error({ err, handle }, "recipient resolution failed");
+        await ctx.emit({
+          kind: "chat",
+          text: `Sorry, something went wrong resolving @${handle}. Please try again.`,
+        });
+      }
       return false;
     }
 
+    await ctx.emit({ kind: "chat_status_stop", id: statusId });
     state.partialParams.recipient = recipientAddress;
     state.recipientTelegramUserId = telegramUserId;
     return true;
@@ -686,7 +734,10 @@ export class SendCapability implements Capability<SendParams> {
       await this.deps.pendingDelegationRepo.create({ userId: ctx.userId, zerodevMessage: delegationMsg });
       await ctx.emit({
         kind: "chat",
-        text: buildDelegationPrompt(delegationMsg),
+        text: buildDelegationPrompt(delegationMsg, {
+          tokenSymbol: resolvedFrom.symbol,
+          amountHuman: params.partialParams.amountHuman as string,
+        }),
         parseMode: "Markdown",
       });
     } catch (err) {

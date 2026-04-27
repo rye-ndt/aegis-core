@@ -433,6 +433,10 @@ export class HttpApiServer {
       if (!userId) return this.sendJson(res, 401, { error: 'Unauthorized' });
       const next = await this.miniAppRequestCache.findNextPendingSignForUser(userId);
       if (!next) return this.sendJson(res, 404, { error: 'No next request' });
+      // `after` means "give me the request *after* this one". If the queue
+      // still has the same id (cleanup race), do NOT return it — that would
+      // make the FE treat it as a follow-up step and loop on it.
+      if (next.requestId === after) return this.sendJson(res, 404, { error: 'No next request' });
       if (next.expiresAt <= newCurrentUTCEpoch()) {
         return this.sendJson(res, 410, { error: 'Expired' });
       }
@@ -571,6 +575,18 @@ export class HttpApiServer {
       });
     } catch (err) {
       const message = toErrorMessage(err);
+      // Drop the mini-app entry on any terminal resolution outcome so the
+      // FE's `?after=<id>` poll stops returning the same stale request and
+      // looping. Without this, a NOT_FOUND/EXPIRED leaves the queue entry
+      // alive until TTL — and the FE keeps re-acking + re-fetching at
+      // hundreds of req/s, hammering the BE.
+      if (
+        message === 'SIGNING_REQUEST_NOT_FOUND' ||
+        message === 'SIGNING_REQUEST_EXPIRED' ||
+        message === 'SIGNING_REQUEST_FORBIDDEN'
+      ) {
+        await this.miniAppRequestCache!.delete(body.requestId).catch(() => undefined);
+      }
       if (message === 'SIGNING_REQUEST_NOT_FOUND') return this.sendJson(res, 404, { error: 'Request not found' });
       if (message === 'SIGNING_REQUEST_EXPIRED') return this.sendJson(res, 410, { error: 'Request expired' });
       if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });

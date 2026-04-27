@@ -89,6 +89,15 @@ export type Artifact =
     }
   | { kind: "mini_app"; request: MiniAppRequest; promptText: string; buttonText: string; fallbackText?: string }
   | { kind: "llm_data"; data: unknown }
+  /**
+   * Begin an in-place "loading" message keyed by `id`. The renderer sends
+   * the initial text and animates it (e.g. cycling dots in Telegram) until
+   * a matching `chat_status_stop` is emitted. The final frame is left in
+   * the chat — the renderer never deletes or rewrites it.
+   */
+  | { kind: "chat_status_start"; id: string; text: string }
+  /** Stop animating the message identified by `id`. Idempotent. */
+  | { kind: "chat_status_stop"; id: string }
   | { kind: "noop" };
 
 /**

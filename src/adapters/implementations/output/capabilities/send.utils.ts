@@ -1,7 +1,12 @@
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import type { ITokenRecord, ToolManifest } from "../../../../use-cases/interface/input/intent.interface";
 
-const FIAT_PATTERN = /\$\s*\d+(\.\d+)|(\d+(\.\d+)?)\s*(dollars?|bucks?|usdc?)\b/i;
+// Matches:
+//   "$5", "$5.00", "$ 5", "$ 5.5"     — dollar-sign prefix, decimals optional
+//   "5 dollars", "5.5 bucks", "10 usd", "3.50 usdc"
+// Previously the dollar-sign branch required a decimal portion (`(\.\d+)`),
+// which silently broke the most common case `/send $5 to …`.
+const FIAT_PATTERN = /\$\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*(?:dollars?|bucks?|usdc?|usd)\b/i;
 
 /**
  * Returns true when the message clearly expresses a fiat/stablecoin amount,

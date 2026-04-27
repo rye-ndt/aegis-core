@@ -29,6 +29,13 @@ interface ChainEntry {
   aliases: string[];
   /** Relay.link supports this chain for quotes/executions. */
   relayEnabled: boolean;
+  /**
+   * Env var name that holds the chain's canonical USDC contract address.
+   * Looked up at runtime via process.env so deployments can rotate addresses
+   * without code changes. Used by `getUsdcAddress(chainId)` for fiat-amount
+   * shortcuts ("$5" → USDC) so the resolver can skip token disambiguation.
+   */
+  usdcEnvKey?: string;
   yield?: YieldChainConfig;
 }
 
@@ -45,6 +52,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "avalanche-fuji",
     aliases: ["fuji", "avalanche-fuji"],
     relayEnabled: false,
+    usdcEnvKey: "FUJI_USDC",
   },
   43114: {
     chain: avalanche,
@@ -58,6 +66,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "avalanche",
     aliases: ["avalanche", "avax"],
     relayEnabled: true,
+    usdcEnvKey: "AVAX_USDC",
     yield: {
       stablecoins: [
         {
@@ -85,6 +94,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "ethereum",
     aliases: ["ethereum", "eth", "mainnet"],
     relayEnabled: true,
+    usdcEnvKey: "ETH_USDC",
   },
   8453: {
     chain: base,
@@ -98,6 +108,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "base",
     aliases: ["base"],
     relayEnabled: true,
+    usdcEnvKey: "BASE_USDC",
   },
   137: {
     chain: polygon,
@@ -111,6 +122,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "polygon",
     aliases: ["polygon", "matic"],
     relayEnabled: true,
+    usdcEnvKey: "POLYGON_USDC",
   },
   42161: {
     chain: arbitrum,
@@ -124,6 +136,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "arbitrum",
     aliases: ["arbitrum", "arb", "arbitrum-one"],
     relayEnabled: true,
+    usdcEnvKey: "ARB_USDC",
   },
   10: {
     chain: optimism,
@@ -137,6 +150,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     privyNetwork: "optimism",
     aliases: ["optimism", "op"],
     relayEnabled: true,
+    usdcEnvKey: "OP_USDC",
   },
 };
 
@@ -159,6 +173,22 @@ export function getChainRpcUrl(chainId: number): string {
 
 export function getChainObject(chainId: number): Chain | null {
   return CHAIN_REGISTRY[chainId]?.chain ?? null;
+}
+
+/**
+ * Returns the canonical USDC contract address for the given chain, read from
+ * the env var declared in the chain's `usdcEnvKey`. Returns null if either
+ * the chain is unknown, the chain has no `usdcEnvKey`, or the env var is
+ * unset/empty. Callers (e.g. /send fiat shortcut) decide whether a missing
+ * USDC is a hard error.
+ */
+export function getUsdcAddress(chainId: number): Address | null {
+  const entry = CHAIN_REGISTRY[chainId];
+  if (!entry?.usdcEnvKey) return null;
+  const raw = process.env[entry.usdcEnvKey]?.trim();
+  if (!raw) return null;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) return null;
+  return raw as Address;
 }
 
 export const CAIP2_BY_PRIVY_NETWORK: Record<string, string> = Object.fromEntries(
