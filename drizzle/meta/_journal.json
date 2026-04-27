@@ -176,6 +176,13 @@
       "when": 1777257200000,
       "tag": "0024_seed_send_tool_fix",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1777281509892,
+      "tag": "0025_oval_shaman",
+      "breakpoints": true
     }
   ]
 }

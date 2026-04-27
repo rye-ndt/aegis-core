@@ -3,7 +3,7 @@ import { CHAIN_CONFIG, getUsdcAddress } from "./chainConfig";
 const TRANSFER_SELECTOR = "a9059cbb"; // keccak("transfer(address,uint256)")[0:4]
 const USDC_DECIMALS = 6;
 
-export type DecodedFailedTransfer = {
+export type DecodedErc20Transfer = {
   tokenAddress: `0x${string}`;
   recipient: `0x${string}`;
   amountRaw: bigint;
@@ -13,21 +13,24 @@ export type DecodedFailedTransfer = {
 
 /**
  * Best-effort decode of an inner ERC20 `transfer(address,uint256)` from the
- * calldata of a failed userOp. Account-abstraction wrappers (Kernel
- * `executeBatch`, Safe `execTransaction`, etc.) ABI-encode the inner call,
- * which means the transfer selector + 64-byte payload appear contiguously
- * inside the wrapper's calldata. Scanning for the selector is fragile in
- * theory but holds for every wrapper we ship today and is the simplest way
- * to recover the failed amount without plumbing structured metadata through
- * every signing-request creation site.
+ * calldata of a userOp. Used by `notifyResolved` for both branches:
+ * - success → render "you sent X TOKEN to 0x…" + explorer button
+ * - failure (insufficient balance) → render /buy nudge with the amount
  *
- * Returns null when no transfer selector is present (e.g. swap, approve)
- * or the payload is malformed.
+ * Account-abstraction wrappers (Kernel `executeBatch`, Safe `execTransaction`,
+ * etc.) ABI-encode the inner call, which means the transfer selector + 64-byte
+ * payload appear contiguously inside the wrapper's calldata. Scanning for the
+ * selector is fragile in theory but holds for every wrapper we ship today and
+ * is the simplest way to recover the amount without plumbing structured
+ * metadata through every signing-request creation site.
+ *
+ * Returns null when no transfer selector is present (e.g. swap, approve, yield
+ * deposit) or the payload is malformed.
  */
-export function decodeFailedTransfer(
+export function decodeErc20Transfer(
   data: string | undefined,
   chainId: number = CHAIN_CONFIG.chainId,
-): DecodedFailedTransfer | null {
+): DecodedErc20Transfer | null {
   if (!data) return null;
   const hex = data.toLowerCase().replace(/^0x/, "");
   // Token address is the 32 bytes immediately preceding the inner calldata

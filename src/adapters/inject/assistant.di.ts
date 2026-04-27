@@ -101,6 +101,7 @@ import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum
 import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCase";
 import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
 import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
+import { RecipientNotificationUseCase } from "../../use-cases/implementations/recipientNotification.useCase";
 
 const log = createLogger("assistantDI");
 
@@ -147,6 +148,7 @@ export class AssistantInject {
   private _userIdleScanJob: UserIdleScanJob | null = null;
   private _yieldReportJob: YieldReportJob | null = null;
   private _loyaltyUseCase: ILoyaltyUseCase | null = null;
+  private _recipientNotificationUseCase: RecipientNotificationUseCase | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -659,6 +661,7 @@ export class AssistantInject {
           resolverEngine: this.getResolverEngine(),
           relaySwapTool: this.getRelaySwapTool(),
           signingRequestUseCase: this._signingRequestUseCase,
+          miniAppRequestCache: this.getMiniAppRequestCache(),
           tokenDelegationDB: this.getTokenDelegationRepo(),
           executionEstimator: this.getExecutionEstimator(),
           userProfileRepo: sqlDB.userProfiles,
@@ -848,6 +851,19 @@ export class AssistantInject {
       });
     }
     return this._loyaltyUseCase;
+  }
+
+  getRecipientNotificationUseCase(
+    send: (chatId: number, text: string, opts?: object) => Promise<void>,
+  ): RecipientNotificationUseCase {
+    if (!this._recipientNotificationUseCase) {
+      this._recipientNotificationUseCase = new RecipientNotificationUseCase(
+        this.getSqlDB().recipientNotifications,
+        this.getSqlDB().telegramSessions,
+        send,
+      );
+    }
+    return this._recipientNotificationUseCase;
   }
 
   getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {

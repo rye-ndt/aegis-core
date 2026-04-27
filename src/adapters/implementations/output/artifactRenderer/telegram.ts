@@ -119,6 +119,10 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
                 createdAt: now,
                 expiresAt,
                 autoSign: artifact.autoSign,
+                recipientTelegramUserId: artifact.recipientTelegramUserId,
+                recipientHandle: artifact.recipientHandle,
+                amountFormatted: artifact.amountFormatted,
+                tokenSymbol: artifact.tokenSymbol,
               };
               await this.signingRequestUseCase.create(record);
             }

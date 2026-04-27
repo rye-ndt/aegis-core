@@ -182,6 +182,33 @@ export function getChainObject(chainId: number): Chain | null {
  * unset/empty. Callers (e.g. /send fiat shortcut) decide whether a missing
  * USDC is a hard error.
  */
+/**
+ * Returns the chain's default block explorer base URL (without trailing slash)
+ * sourced from viem's `Chain.blockExplorers.default.url`. Returns null when the
+ * chain is unknown or has no default explorer registered.
+ */
+export function getChainName(chainId: number): string {
+  return CHAIN_REGISTRY[chainId]?.name ?? "Unknown";
+}
+
+export function getExplorerBaseUrl(chainId: number): string | null {
+  const entry = CHAIN_REGISTRY[chainId];
+  const url = entry?.chain?.blockExplorers?.default?.url;
+  if (!url) return null;
+  return url.replace(/\/+$/, "");
+}
+
+/**
+ * Returns the canonical "view tx on explorer" link for a tx hash on the given
+ * chain, or null when no explorer is configured. Centralised here so callers
+ * (notifyResolved, future swap/yield UI) never hand-build chain-specific URLs.
+ */
+export function getExplorerTxUrl(chainId: number, txHash: string): string | null {
+  const base = getExplorerBaseUrl(chainId);
+  if (!base) return null;
+  return `${base}/tx/${txHash}`;
+}
+
 export function getUsdcAddress(chainId: number): Address | null {
   const entry = CHAIN_REGISTRY[chainId];
   if (!entry?.usdcEnvKey) return null;

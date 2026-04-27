@@ -18,6 +18,7 @@ import { DrizzleUserPreferencesRepo } from "./repositories/userPreference.repo";
 import { DrizzleTokenDelegationRepo } from "./repositories/tokenDelegation.repo";
 import { DrizzleYieldRepository } from "../yield/yieldRepository";
 import { DrizzleLoyaltyRepo } from "./repositories/loyalty.repo";
+import { DrizzleRecipientNotificationRepo } from "./repositories/recipientNotification.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -37,6 +38,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly tokenDelegations: DrizzleTokenDelegationRepo;
   readonly yieldRepo: DrizzleYieldRepository;
   readonly loyaltyRepo: DrizzleLoyaltyRepo;
+  readonly recipientNotifications: DrizzleRecipientNotificationRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -57,6 +59,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.tokenDelegations = new DrizzleTokenDelegationRepo(this.db);
     this.yieldRepo = new DrizzleYieldRepository(this.db);
     this.loyaltyRepo = new DrizzleLoyaltyRepo(this.db);
+    this.recipientNotifications = new DrizzleRecipientNotificationRepo(this.db);
   }
 
 }

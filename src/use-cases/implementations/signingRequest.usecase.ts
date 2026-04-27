@@ -73,6 +73,10 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       errorMessage: params.errorMessage,
       data: record.data,
       to: record.to,
+      recipientTelegramUserId: record.recipientTelegramUserId,
+      recipientHandle: record.recipientHandle,
+      amountFormatted: record.amountFormatted,
+      tokenSymbol: record.tokenSymbol,
     });
   }
 

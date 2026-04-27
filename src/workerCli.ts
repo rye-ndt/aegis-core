@@ -21,10 +21,14 @@ const log = createLogger("workerCli");
   const sqlDB = inject.getSqlDB();
 
   const tgApi = new Api(token);
-  const notifyResolved = buildNotifyResolved(tgApi);
 
   const rawBot = new Bot(token);
   inject.setBot(rawBot);
+
+  const recipientNotificationUseCase = inject.getRecipientNotificationUseCase(
+    async (chatId, text, opts) => { await tgApi.sendMessage(chatId, text, opts as Parameters<typeof tgApi.sendMessage>[2]); },
+  );
+  const notifyResolved = buildNotifyResolved(tgApi, undefined, recipientNotificationUseCase);
 
   const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved);
   const httpServer = inject.getHttpApiServer(signingRequestUseCase);
@@ -53,6 +57,7 @@ const log = createLogger("workerCli");
     sqlDB.telegramSessions,
     dispatcher,
     inject.getMiniAppRequestCache(),
+    recipientNotificationUseCase,
   );
 
   const bot = new TelegramBot(rawBot, handler);

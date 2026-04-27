@@ -6,6 +6,7 @@ import type { ISchemaCompiler, CompileResult } from "../../../../use-cases/inter
 import type { ToolManifest } from "../../../../use-cases/interface/output/toolManifest.types";
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { normalizeFiatAmount } from "../capabilities/send.utils";
 import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("schemaCompiler");
@@ -85,6 +86,7 @@ ${JSON.stringify(partialParams, null, 2)}
 Instructions:
 - Scan the conversation and extract as many inputSchema fields as possible.
 - If the user mentions a token symbol (e.g. "USDC", "${CHAIN_CONFIG.nativeSymbol}", "MOON"), extract it as fromTokenSymbol or toTokenSymbol.
+- Dollar amounts ("$5", "5 USDC", "5 usd") always refer to USDC. Extract "USDC" as the token symbol and the number as the amount.
 - If any required field (from inputSchema.required) is still missing, set missingQuestion to a short, natural question to ask the user.
 - If all required fields are filled, set missingQuestion to null.
 - Do not include auto-filled fields in params output.
@@ -105,7 +107,12 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
     autoFilled: Record<string, unknown>;
     partialParams: Record<string, unknown>;
   }): Promise<CompileResult> {
-    const { manifest, messages, autoFilled, partialParams } = opts;
+    const { manifest, autoFilled, partialParams } = opts;
+
+    // Normalize fiat shorthand before the LLM sees the text so all capabilities
+    // get consistent token-symbol extraction without capability-specific code.
+    // "$5" → "5 USDC", "10 usd" → "10 USDC", etc.
+    const messages = opts.messages.map(normalizeFiatAmount);
 
     const userContent =
       messages.length === 1

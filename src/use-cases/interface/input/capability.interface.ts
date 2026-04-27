@@ -86,6 +86,10 @@ export type Artifact =
       value: string;
       description: string;
       autoSign: boolean;
+      recipientTelegramUserId?: string;
+      recipientHandle?: string;
+      amountFormatted?: string;
+      tokenSymbol?: string;
     }
   | { kind: "mini_app"; request: MiniAppRequest; promptText: string; buttonText: string; fallbackText?: string }
   | { kind: "llm_data"; data: unknown }

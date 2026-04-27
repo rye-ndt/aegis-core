@@ -19,6 +19,10 @@ export type SigningResolutionEvent = {
    * token + amount when nudging the user into /buy. */
   data?: string;
   to?: string;
+  recipientTelegramUserId?: string;
+  recipientHandle?: string;
+  amountFormatted?: string;
+  tokenSymbol?: string;
 };
 
 export interface ISigningRequestUseCase {

@@ -26,6 +26,8 @@ export interface ResolvedPayload {
   recipientAddress: string | null;
   /** Telegram user ID of the recipient (stored for post-confirm notification). Null if N/A. */
   recipientTelegramUserId: string | null;
+  /** Telegram handle of the recipient without @, e.g. "bob". Null if N/A. */
+  recipientHandle: string | null;
   /** Current user's SCA / EOA address, injected from session. */
   senderAddress: string | null;
 }

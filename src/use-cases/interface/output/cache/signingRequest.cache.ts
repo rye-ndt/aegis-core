@@ -11,6 +11,10 @@ export type SigningRequestRecord = {
   createdAt: number;
   expiresAt: number;
   autoSign?: boolean;
+  recipientTelegramUserId?: string;
+  recipientHandle?: string;
+  amountFormatted?: string;
+  tokenSymbol?: string;
 };
 
 export interface ISigningRequestCache {

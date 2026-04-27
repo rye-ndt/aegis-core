@@ -1,12 +1,18 @@
+import { InlineKeyboard } from "grammy";
+import { toRaw } from "../../../../helpers/bigint";
+import {
+  RELAY_SUPPORTED_CHAIN_IDS,
+  getExplorerTxUrl,
+  getUsdcAddress,
+  resolveChainSymbol,
+} from "../../../../helpers/chainConfig";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
-import {
-  RELAY_SUPPORTED_CHAIN_IDS,
-  resolveChainSymbol,
-} from "../../../../helpers/chainConfig";
+import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
+import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import type {
   Artifact,
   Capability,
@@ -20,18 +26,23 @@ import {
   type ToolManifest,
   DisambiguationRequiredError,
 } from "../../../../use-cases/interface/input/intent.interface";
+import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
-import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
+import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
+import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
 import type { IExecutionEstimator } from "../../../../use-cases/interface/output/executionEstimator.interface";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
-import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
-import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
-import type { RelaySwapTool, RelaySwapToolOutputData } from "../tools/system/relaySwap.tool";
-import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
+import type {
+  RelaySwapTool,
+  RelaySwapToolOutputData,
+} from "../tools/system/relaySwap.tool";
 import { buildDisambiguationPrompt } from "./send.messages";
 import { getMissingRequiredFields, pickCandidateByInput } from "./send.utils";
+
+const log = createLogger("swapCapability");
 
 const DEFAULT_MAX_COMPILE_TURNS = 10;
 const MAX_COMPILE_TURNS = parseInt(
@@ -78,6 +89,7 @@ export interface SwapCapabilityDeps {
   resolverEngine: IResolverEngine;
   relaySwapTool: RelaySwapTool;
   signingRequestUseCase: ISigningRequestUseCase;
+  miniAppRequestCache?: IMiniAppRequestCache;
   tokenDelegationDB?: ITokenDelegationDB;
   executionEstimator?: IExecutionEstimator;
   userProfileRepo: IUserProfileDB;
@@ -121,6 +133,20 @@ export class SwapCapability implements Capability<SwapParams> {
   }
 
   async run(params: SwapParams, ctx: CapabilityCtx): Promise<Artifact> {
+    log.info(
+      {
+        step: "started",
+        userId: ctx.userId,
+        fromToken: params.fromToken.symbol,
+        toToken: params.toToken.symbol,
+        amountHuman: params.amountHuman,
+        fromChainId: params.fromChainId,
+        toChainId: params.toChainId,
+        userAddress: params.userAddress,
+      },
+      "swap run started",
+    );
+
     // Aegis-Guard delegation check on the origin token.
     if (
       !params.fromToken.isNative &&
@@ -157,10 +183,26 @@ export class SwapCapability implements Capability<SwapParams> {
     });
 
     if (!toolResult.success) {
-      return { kind: "chat", text: `Swap failed: ${toolResult.error ?? "unknown error"}` };
+      log.warn(
+        { userId: ctx.userId, err: toolResult.error },
+        "relay quote failed",
+      );
+      return {
+        kind: "chat",
+        text: `Swap failed: ${toolResult.error ?? "unknown error"}`,
+      };
     }
     const data = toolResult.data as RelaySwapToolOutputData;
     const txs = data.txs;
+    log.info(
+      {
+        step: "submitted",
+        userId: ctx.userId,
+        txCount: txs.length,
+        outputAmount: data.outputAmountFormatted ?? data.outputAmount,
+      },
+      "relay quote received",
+    );
 
     await ctx.emit({
       kind: "chat",
@@ -168,14 +210,32 @@ export class SwapCapability implements Capability<SwapParams> {
       text: this.buildQuoteSummary(params, data, txs.length),
     });
 
-    // Sequence each transaction through the mini-app session-key flow.
+    // Sequence each transaction through the mini-app session-key flow. Only
+    // the first step gets a Telegram button; subsequent steps are queued in
+    // the mini-app cache and chained by the FE via `fetchNextRequest`, so the
+    // user opens the mini app exactly once for the whole swap.
     const txHashes: string[] = [];
     for (let i = 0; i < txs.length; i++) {
       const tx = txs[i]!;
-      const stepLabel = `Relay swap step ${i + 1}/${txs.length}`;
+      const stepLabel =
+        txs.length === 1
+          ? `Relay swap`
+          : `Relay swap step ${i + 1}/${txs.length}`;
       const requestId = newUuid();
       const now = newCurrentUTCEpoch();
       const chatId = Number(ctx.channelId);
+
+      log.debug(
+        {
+          step: "sign-step",
+          userId: ctx.userId,
+          stepIndex: i,
+          totalSteps: txs.length,
+          requestId,
+          chainId: params.fromChainId,
+        },
+        "awaiting step signature",
+      );
 
       // Persist to the signing-request cache so the mini-app's
       // `POST /response` → `resolveRequest` path can match by id.
@@ -194,7 +254,8 @@ export class SwapCapability implements Capability<SwapParams> {
       };
       await this.deps.signingRequestUseCase.create(record);
 
-      // Render a mini-app button whose requestId matches the signing record.
+      // chainId is always fromChainId — Relay steps are all on the origin chain;
+      // the solver handles the destination-chain delivery without a user signature.
       const miniAppRequest: SignRequest = {
         requestId,
         requestType: "sign",
@@ -204,15 +265,31 @@ export class SwapCapability implements Capability<SwapParams> {
         data: tx.data,
         description: stepLabel,
         autoSign: true,
+        chainId: params.fromChainId,
         createdAt: now,
         expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
       };
-      await ctx.emit({
-        kind: "mini_app",
-        request: miniAppRequest,
-        promptText: `${stepLabel} — tap to execute automatically.`,
-        buttonText: `Execute step ${i + 1}/${txs.length}`,
-      });
+
+      if (i === 0) {
+        // First step: emit the mini-app button. The renderer also stores the
+        // request in miniAppRequestCache as part of `mini_app` handling.
+        await ctx.emit({
+          kind: "mini_app",
+          request: miniAppRequest,
+          promptText:
+            txs.length === 1
+              ? `Tap below to execute the swap automatically.`
+              : `Tap below to execute the swap (${txs.length} steps will be signed in one session).`,
+          buttonText: "Execute Swap",
+        });
+      } else {
+        // Subsequent steps: queue in the cache only. The FE's SignHandler
+        // calls `GET /request/:id?after=<prevId>` after each successful step
+        // and picks up the next queued request without re-opening the app.
+        if (this.deps.miniAppRequestCache) {
+          await this.deps.miniAppRequestCache.store(miniAppRequest);
+        }
+      }
 
       const resolution = await this.deps.signingRequestUseCase.waitFor(
         requestId,
@@ -220,37 +297,99 @@ export class SwapCapability implements Capability<SwapParams> {
       );
 
       if (resolution.status === "rejected") {
+        log.warn(
+          {
+            step: "failed",
+            userId: ctx.userId,
+            stepIndex: i,
+            reason: "rejected",
+          },
+          "swap step rejected",
+        );
         return {
           kind: "chat",
           text: `❌ Swap aborted at step ${i + 1}/${txs.length}. Earlier steps: ${formatHashes(txHashes)}`,
         };
       }
       if (resolution.status === "expired") {
+        log.warn(
+          {
+            step: "failed",
+            userId: ctx.userId,
+            stepIndex: i,
+            reason: "expired",
+          },
+          "swap step timed out",
+        );
         return {
           kind: "chat",
           text: `⏱️ Swap timed out at step ${i + 1}/${txs.length}. Earlier steps: ${formatHashes(txHashes)}`,
         };
       }
       if (!resolution.txHash) {
+        log.warn(
+          {
+            step: "failed",
+            userId: ctx.userId,
+            stepIndex: i,
+            reason: "no_tx_hash",
+          },
+          "swap step approved but missing txHash",
+        );
         return {
           kind: "chat",
           text: `⚠️ Step ${i + 1} approved with no tx hash. Please check your wallet history.`,
         };
       }
+      log.info(
+        {
+          step: "submitted",
+          userId: ctx.userId,
+          stepIndex: i,
+          hash: resolution.txHash,
+        },
+        "swap step signed",
+      );
       txHashes.push(resolution.txHash);
     }
 
-    const actionType = params.fromChainId === params.toChainId ? "swap_same_chain" : "swap_cross_chain";
-    void this.deps.loyaltyUseCase?.awardPoints({
-      userId: ctx.userId,
-      actionType,
-      usdValue: undefined,
-    }).catch(() => undefined);
+    const actionType =
+      params.fromChainId === params.toChainId
+        ? "swap_same_chain"
+        : "swap_cross_chain";
+    void this.deps.loyaltyUseCase
+      ?.awardPoints({
+        userId: ctx.userId,
+        actionType,
+        usdValue: undefined,
+      })
+      .catch(() => undefined);
+
+    log.info(
+      {
+        step: "succeeded",
+        userId: ctx.userId,
+        actionType,
+        txCount: txHashes.length,
+      },
+      "swap complete",
+    );
+
+    // Build a "View on explorer" button for the final (settlement) tx, which
+    // is the last hash on the origin chain. Mirrors /send's notifyResolved UX.
+    const finalHash = txHashes[txHashes.length - 1];
+    const explorerUrl = finalHash
+      ? getExplorerTxUrl(params.fromChainId, finalHash)
+      : null;
+    const keyboard = explorerUrl
+      ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
+      : undefined;
 
     return {
       kind: "chat",
       parseMode: "Markdown",
       text: this.buildCompletionMessage(params, data, txHashes),
+      keyboard,
     };
   }
 
@@ -275,12 +414,18 @@ export class SwapCapability implements Capability<SwapParams> {
       resolverFields: compileResult.resolverFields ?? {},
       compileTurns: 1,
       disambigTurns: 0,
-      fromChainSymbol: compileResult.params.fromChainSymbol as string | undefined,
+      fromChainSymbol: compileResult.params.fromChainSymbol as
+        | string
+        | undefined,
       toChainSymbol: compileResult.params.toChainSymbol as string | undefined,
     };
 
     if (compileResult.missingQuestion) {
-      return { kind: "ask", question: compileResult.missingQuestion, state: toPlain(state) };
+      return {
+        kind: "ask",
+        question: compileResult.missingQuestion,
+        state: toPlain(state),
+      };
     }
     return this.finishCompileOrResolve(ctx, state);
   }
@@ -304,13 +449,25 @@ export class SwapCapability implements Capability<SwapParams> {
     });
 
     state.partialParams = { ...state.partialParams, ...compileResult.params };
-    state.tokenSymbols = { ...state.tokenSymbols, ...compileResult.tokenSymbols };
-    state.resolverFields = { ...state.resolverFields, ...(compileResult.resolverFields ?? {}) };
-    if (compileResult.params.fromChainSymbol) state.fromChainSymbol = compileResult.params.fromChainSymbol as string;
-    if (compileResult.params.toChainSymbol) state.toChainSymbol = compileResult.params.toChainSymbol as string;
+    state.tokenSymbols = {
+      ...state.tokenSymbols,
+      ...compileResult.tokenSymbols,
+    };
+    state.resolverFields = {
+      ...state.resolverFields,
+      ...(compileResult.resolverFields ?? {}),
+    };
+    if (compileResult.params.fromChainSymbol)
+      state.fromChainSymbol = compileResult.params.fromChainSymbol as string;
+    if (compileResult.params.toChainSymbol)
+      state.toChainSymbol = compileResult.params.toChainSymbol as string;
 
     if (compileResult.missingQuestion) {
-      return { kind: "ask", question: compileResult.missingQuestion, state: toPlain(state) };
+      return {
+        kind: "ask",
+        question: compileResult.missingQuestion,
+        state: toPlain(state),
+      };
     }
     return this.finishCompileOrResolve(ctx, state);
   }
@@ -321,12 +478,16 @@ export class SwapCapability implements Capability<SwapParams> {
     ctx: CapabilityCtx,
     state: SessionState,
   ): Promise<CollectResult<SwapParams>> {
-    const missing = getMissingRequiredFields(SWAP_MANIFEST, state.partialParams);
+    const missing = getMissingRequiredFields(
+      SWAP_MANIFEST,
+      state.partialParams,
+    );
     if (missing.length > 0) {
-      const question = await this.deps.intentUseCase.generateMissingParamQuestion(
-        SWAP_MANIFEST,
-        missing,
-      );
+      const question =
+        await this.deps.intentUseCase.generateMissingParamQuestion(
+          SWAP_MANIFEST,
+          missing,
+        );
       return { kind: "ask", question, state: toPlain(state) };
     }
 
@@ -341,10 +502,43 @@ export class SwapCapability implements Capability<SwapParams> {
       return this.abort(`Unknown destination chain: ${state.toChainSymbol}`);
     }
     if (!RELAY_SUPPORTED_CHAIN_IDS.includes(fromChainId)) {
-      return this.abort(`Relay does not support swaps from this chain (id ${fromChainId}).`);
+      return this.abort(
+        `Relay does not support swaps from this chain (id ${fromChainId}).`,
+      );
     }
     if (!RELAY_SUPPORTED_CHAIN_IDS.includes(toChainId)) {
-      return this.abort(`Relay does not support swaps to this chain (id ${toChainId}).`);
+      return this.abort(
+        `Relay does not support swaps to this chain (id ${toChainId}).`,
+      );
+    }
+
+    // USDC short-circuit — mirror /send. When the user said "USDC" (or fiat
+    // normalised to USDC by the schema compiler), replace the symbol-bearing
+    // resolver field with the chain-canonical USDC address so the resolver
+    // skips the USDC vs USDC.E disambiguation prompt entirely.
+    if (isUsdcSymbol(state.tokenSymbols.from)) {
+      const addr = getUsdcAddress(fromChainId);
+      if (!addr) {
+        return this.abort(
+          "no usdc found for this chain, please try again with another token",
+        );
+      }
+      const current = state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL];
+      if (typeof current !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(current)) {
+        state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] = addr;
+      }
+    }
+    if (isUsdcSymbol(state.tokenSymbols.to)) {
+      const addr = getUsdcAddress(toChainId);
+      if (!addr) {
+        return this.abort(
+          "no usdc found for this chain, please try again with another token",
+        );
+      }
+      const current = state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL];
+      if (typeof current !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(current)) {
+        state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL] = addr;
+      }
     }
 
     try {
@@ -352,12 +546,18 @@ export class SwapCapability implements Capability<SwapParams> {
       // has to be swappable from there, and a same-chain swap puts the to-token
       // on the same chain too. Cross-chain to-token uses `toChainId` directly.
       const fromResolved = await this.deps.resolverEngine.resolve({
-        resolverFields: { [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] },
+        resolverFields: {
+          [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]:
+            state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL],
+        },
         userId: ctx.userId,
         chainId: fromChainId,
       });
       const toResolved = await this.deps.resolverEngine.resolve({
-        resolverFields: { [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL] },
+        resolverFields: {
+          [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]:
+            state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL],
+        },
         userId: ctx.userId,
         chainId: toChainId,
       });
@@ -366,23 +566,54 @@ export class SwapCapability implements Capability<SwapParams> {
       const toToken = toResolved.fromToken; // resolver returned the "from" slot because we passed the symbol there
 
       if (!fromToken) {
-        return this.abort(`Origin token not found. Make sure it is supported on chain ${fromChainId}.`);
+        return this.abort(
+          `Origin token not found. Make sure it is supported on chain ${fromChainId}.`,
+        );
       }
       if (!toToken) {
-        return this.abort(`Destination token not found. Make sure it is supported on chain ${toChainId}.`);
+        return this.abort(
+          `Destination token not found. Make sure it is supported on chain ${toChainId}.`,
+        );
       }
 
       // Compute raw amount from humanAmount + origin token decimals.
       const humanAmount = state.resolverFields[RESOLVER_FIELD.READABLE_AMOUNT];
       if (!humanAmount) {
-        return this.abort("Missing amount. Please specify how much you want to swap.");
+        return this.abort(
+          "Missing amount. Please specify how much you want to swap.",
+        );
       }
-      const amountRaw = toRawAmount(humanAmount, fromToken.decimals);
+      const amountRaw = toRaw(humanAmount, fromToken.decimals);
 
-      const senderAddress = fromResolved.senderAddress;
-      if (!senderAddress) {
-        return this.abort("Could not load your wallet address. Please sign in again.");
+      // Relay needs the SCA address (the on-chain account that holds the tokens),
+      // not the EOA (the signer key). resolverEngine.senderAddress returns eoaAddress,
+      // so we fetch smartAccountAddress directly from the profile here.
+      const profile = await this.deps.userProfileRepo.findByUserId(ctx.userId);
+      const userAddress = profile?.smartAccountAddress ?? null;
+      if (!userAddress) {
+        log.warn(
+          { userId: ctx.userId },
+          "smartAccountAddress not set — user may not have completed auth",
+        );
+        return this.abort(
+          "Could not load your wallet address. Please sign in again.",
+        );
       }
+
+      log.info(
+        {
+          step: "resolved",
+          userId: ctx.userId,
+          fromToken: fromToken.symbol,
+          toToken: toToken.symbol,
+          amountHuman: humanAmount,
+          amountRaw,
+          fromChainId,
+          toChainId,
+          userAddress,
+        },
+        "swap params resolved",
+      );
 
       return {
         kind: "ok",
@@ -393,14 +624,21 @@ export class SwapCapability implements Capability<SwapParams> {
           amountRaw,
           fromChainId,
           toChainId,
-          userAddress: senderAddress,
+          userAddress,
         },
       };
     } catch (err) {
       if (err instanceof DisambiguationRequiredError) {
+        log.debug(
+          { symbol: err.symbol, candidates: err.candidates.length },
+          "token disambiguation required",
+        );
         return this.enterDisambiguation(state, err);
       }
-      return this.abort(`Could not resolve swap: ${err instanceof Error ? err.message : String(err)}`);
+      log.error({ err, userId: ctx.userId }, "swap resolve failed");
+      return this.abort(
+        `Could not resolve swap: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -417,12 +655,17 @@ export class SwapCapability implements Capability<SwapParams> {
       // the user-visible symbol to decide which side this disambiguation is
       // really about.
       awaitingSlot: err.symbol === state.tokenSymbols.to ? "to" : "from",
-      fromCandidates: err.symbol === state.tokenSymbols.to ? [] : err.candidates,
+      fromCandidates:
+        err.symbol === state.tokenSymbols.to ? [] : err.candidates,
       toCandidates: err.symbol === state.tokenSymbols.to ? err.candidates : [],
     };
     return {
       kind: "ask",
-      question: buildDisambiguationPrompt(state.disambiguation.awaitingSlot, err.symbol, err.candidates),
+      question: buildDisambiguationPrompt(
+        state.disambiguation.awaitingSlot,
+        err.symbol,
+        err.candidates,
+      ),
       state: toPlain(state),
     };
   }
@@ -437,13 +680,20 @@ export class SwapCapability implements Capability<SwapParams> {
 
     state.disambigTurns += 1;
     if (state.disambigTurns > MAX_DISAMBIG_TURNS) {
-      return this.abort("Too many disambiguation attempts — please start over.");
+      return this.abort(
+        "Too many disambiguation attempts — please start over.",
+      );
     }
 
     const candidates =
-      pending.awaitingSlot === "from" ? pending.fromCandidates : pending.toCandidates;
+      pending.awaitingSlot === "from"
+        ? pending.fromCandidates
+        : pending.toCandidates;
     const selected = pickCandidateByInput(text, candidates);
-    if (!selected) return this.abort("Disambiguation cancelled — please repeat your request.");
+    if (!selected)
+      return this.abort(
+        "Disambiguation cancelled — please repeat your request.",
+      );
 
     // Commit the selection back to resolverFields so the next resolve() sees
     // an exact address rather than a symbol.
@@ -477,7 +727,9 @@ export class SwapCapability implements Capability<SwapParams> {
       `To:   ~${out} ${params.toToken.symbol} (chain ${params.toChainId})`,
       `Steps: ${stepCount}`,
       "",
-      "Tap each step's button to execute it automatically.",
+      stepCount === 1
+        ? "Tap the button below to execute the swap automatically."
+        : "Tap the button below — all steps will be signed in one mini-app session.",
     ];
     return lines.join("\n");
   }
@@ -495,9 +747,6 @@ export class SwapCapability implements Capability<SwapParams> {
       "",
       `Sent:     ${params.amountHuman} ${params.fromToken.symbol}`,
       `Received: ~${out} ${params.toToken.symbol}`,
-      "",
-      "*Transaction hashes*",
-      ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
     ];
     return lines.join("\n");
   }
@@ -511,11 +760,9 @@ function toPlain(state: SessionState): Record<string, unknown> {
   return JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
 }
 
-function toRawAmount(human: string, decimals: number): string {
-  const [whole, frac = ""] = human.split(".");
-  const fracPadded = (frac + "0".repeat(decimals)).slice(0, decimals);
-  const combined = `${whole ?? "0"}${fracPadded}`.replace(/^0+(?=\d)/, "");
-  return combined === "" ? "0" : combined;
+function isUsdcSymbol(s?: string): boolean {
+  if (!s) return false;
+  return s.trim().toUpperCase() === "USDC";
 }
 
 function formatHashes(hashes: string[]): string {

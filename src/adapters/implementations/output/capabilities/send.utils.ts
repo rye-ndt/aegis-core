@@ -1,20 +1,35 @@
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import type { ITokenRecord, ToolManifest } from "../../../../use-cases/interface/input/intent.interface";
 
-// Matches:
-//   "$5", "$5.00", "$ 5", "$ 5.5"     — dollar-sign prefix, decimals optional
-//   "5 dollars", "5.5 bucks", "10 usd", "3.50 usdc"
-// Previously the dollar-sign branch required a decimal portion (`(\.\d+)`),
-// which silently broke the most common case `/send $5 to …`.
+// Detection pattern — used for the guard check only (address injection).
+// Matches: "$5", "$5.00", "$ 5", "5 dollars", "5.5 bucks", "10 usd", "3.50 usdc".
 const FIAT_PATTERN = /\$\s*\d+(?:\.\d+)?|\d+(?:\.\d+)?\s*(?:dollars?|bucks?|usdc?|usd)\b/i;
 
 /**
- * Returns true when the message clearly expresses a fiat/stablecoin amount,
- * e.g. "$5", "5 dollars", "5 bucks", "10 usd", "3.50 usdc".
- * Used to auto-inject USDC when no token symbol was specified.
+ * Returns true when the message clearly expresses a fiat/stablecoin amount.
+ * Used by sendCapability to decide whether to inject the chain USDC address
+ * into resolverFields (bypassing symbol disambiguation).
  */
 export function detectStablecoinIntent(text: string): boolean {
   return FIAT_PATTERN.test(text);
+}
+
+/**
+ * Rewrites fiat shorthand to explicit "N USDC" before the text reaches the
+ * LLM so the schema compiler can extract the correct token symbol regardless
+ * of which capability is running. Applied globally in OpenAISchemaCompiler.
+ *
+ * Rules (in order, to avoid double-substitution):
+ *   $N / $ N       → N USDC   (dollar-prefix)
+ *   N dollars/bucks/usd  → N USDC   (excludes "usdc" — already an explicit symbol)
+ *
+ * "N usdc" is left unchanged; it is already unambiguous and uppercasing it
+ * does not matter since the LLM normalises token symbols.
+ */
+export function normalizeFiatAmount(text: string): string {
+  return text
+    .replace(/\$\s*(\d+(?:\.\d+)?)/g, (_, n: string) => `${n} USDC`)
+    .replace(/\b(\d+(?:\.\d+)?)\s*(?:dollars?|bucks?|usd(?!c))\b/gi, (_, n: string) => `${n} USDC`);
 }
 
 /** Picks a token from a disambiguation list by 1-based index or symbol match. */

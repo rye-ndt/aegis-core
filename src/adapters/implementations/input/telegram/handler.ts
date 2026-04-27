@@ -7,6 +7,7 @@ import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { AuthRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
+import type { RecipientNotificationUseCase } from "../../../../use-cases/implementations/recipientNotification.useCase";
 import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("telegramHandler");
@@ -25,6 +26,7 @@ export class TelegramAssistantHandler {
     private readonly telegramSessions: ITelegramSessionDB,
     private readonly capabilityDispatcher: ICapabilityDispatcher,
     private readonly miniAppRequestCache?: IMiniAppRequestCache,
+    private readonly recipientNotificationUseCase?: RecipientNotificationUseCase,
   ) {}
 
   register(bot: Bot): void {
@@ -41,6 +43,17 @@ export class TelegramAssistantHandler {
         return;
       }
       await ctx.reply("Onchain Agent online. Describe what you'd like to do on-chain.");
+      if (ctx.from) {
+        try {
+          await this.recipientNotificationUseCase?.flushPendingForTelegramUser(
+            String(ctx.from.id),
+            ctx.chat.id,
+            session.userId,
+          );
+        } catch (err) {
+          log.error({ err }, "flush-pending-notifications-failed");
+        }
+      }
     });
 
     bot.callbackQuery("auth:login", async (ctx) => {
@@ -172,6 +185,15 @@ export class TelegramAssistantHandler {
         expiresAtEpoch,
       });
       await ctx.reply("Authenticated with Google. You can now use the Onchain Agent.");
+      try {
+        await this.recipientNotificationUseCase?.flushPendingForTelegramUser(
+          String(ctx.chat.id),
+          ctx.chat.id,
+          userId,
+        );
+      } catch (flushErr) {
+        log.error({ err: flushErr }, "flush-pending-notifications-failed");
+      }
     } catch (err) {
       log.error({ err }, "web_app_data loginWithPrivy failed");
       await ctx.reply("Authentication failed. Please try again from the mini app.");

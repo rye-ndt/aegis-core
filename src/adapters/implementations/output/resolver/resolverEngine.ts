@@ -56,6 +56,7 @@ export class ResolverEngineImpl implements IResolverEngine {
 
     let recipientAddress: string | null = null;
     let recipientTelegramUserId: string | null = null;
+    let recipientHandle: string | null = null;
 
     const handle = resolverFields[RESOLVER_FIELD.USER_HANDLE];
     if (handle) {
@@ -84,6 +85,7 @@ export class ResolverEngineImpl implements IResolverEngine {
           telegramUserId,
         );
       recipientTelegramUserId = telegramUserId;
+      recipientHandle = handle;
       log.info({ step: "wallet-resolved", telegramUserId, wallet: recipientAddress }, "wallet resolved from Telegram handle");
     }
 
@@ -93,6 +95,7 @@ export class ResolverEngineImpl implements IResolverEngine {
       rawAmount,
       recipientAddress,
       recipientTelegramUserId,
+      recipientHandle,
       senderAddress,
     };
   }

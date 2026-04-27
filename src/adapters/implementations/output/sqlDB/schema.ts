@@ -271,6 +271,31 @@ export const loyaltySeasons = pgTable("loyalty_seasons", {
   updatedAtEpoch:  integer("updated_at_epoch").notNull(),
 });
 
+export const recipientNotifications = pgTable("recipient_notifications", {
+  id: uuid("id").primaryKey(),
+  recipientTelegramUserId: text("recipient_telegram_user_id").notNull(),
+  recipientUserId: uuid("recipient_user_id"),
+  recipientChatId: text("recipient_chat_id"),
+  senderUserId: uuid("sender_user_id").notNull(),
+  senderChatId: text("sender_chat_id").notNull(),
+  senderDisplayName: text("sender_display_name"),
+  senderHandle: text("sender_handle"),
+  kind: text("kind").notNull(),
+  tokenSymbol: text("token_symbol").notNull(),
+  amountFormatted: text("amount_formatted").notNull(),
+  chainId: integer("chain_id").notNull(),
+  txHash: text("tx_hash"),
+  status: text("status").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  deliveredAtEpoch: integer("delivered_at_epoch"),
+}, (t) => ({
+  byTelegramUser: index("recipient_notif_by_tg_user_idx")
+    .on(t.recipientTelegramUserId, t.status),
+  byCreatedAt: index("recipient_notif_created_at_idx").on(t.createdAtEpoch),
+}));
+
 export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
   id:                  text("id").primaryKey(),
   userId:              uuid("user_id").notNull().references(() => users.id),

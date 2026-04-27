@@ -71,6 +71,7 @@ interface SessionState {
   resolved?: ResolvedPayload;
   disambiguation?: DisambiguationState;
   recipientTelegramUserId?: string;
+  recipientHandle?: string;
 }
 
 interface SendParams {
@@ -80,6 +81,7 @@ interface SendParams {
   resolvedFrom: ITokenRecord | null;
   resolvedTo: ITokenRecord | null;
   recipientTelegramUserId?: string;
+  recipientHandle?: string;
   usesDualSchema: boolean;
 }
 
@@ -213,6 +215,10 @@ export class SendCapability implements Capability<SendParams> {
           value: calldata.value,
           description: `Autonomous execution for ${params.manifest.name}`,
           autoSign: true,
+          recipientTelegramUserId: params.recipientTelegramUserId,
+          recipientHandle: params.recipientHandle,
+          amountFormatted: params.partialParams.amountHuman as string | undefined,
+          tokenSymbol: params.resolvedFrom?.symbol,
         });
         if (this.command === INTENT_COMMAND.SEND) {
           void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
@@ -265,6 +271,10 @@ export class SendCapability implements Capability<SendParams> {
       value: calldata.value,
       description: params.manifest.name,
       autoSign: false,
+      recipientTelegramUserId: params.recipientTelegramUserId,
+      recipientHandle: params.recipientHandle,
+      amountFormatted: params.partialParams.amountHuman as string | undefined,
+      tokenSymbol: params.resolvedFrom?.symbol,
     });
 
     if (this.command === INTENT_COMMAND.SEND) {
@@ -459,6 +469,7 @@ export class SendCapability implements Capability<SendParams> {
           resolvedFrom: resolved.fromToken,
           resolvedTo: resolved.toToken,
           recipientTelegramUserId: state.recipientTelegramUserId,
+          recipientHandle: state.recipientHandle,
           usesDualSchema: true,
         },
       };
@@ -542,6 +553,7 @@ export class SendCapability implements Capability<SendParams> {
         resolvedFrom: pending.resolvedFrom,
         resolvedTo: pending.resolvedTo,
         recipientTelegramUserId: state.recipientTelegramUserId,
+        recipientHandle: state.recipientHandle,
         usesDualSchema: false,
       },
     };
@@ -644,6 +656,7 @@ export class SendCapability implements Capability<SendParams> {
         resolvedFrom,
         resolvedTo,
         recipientTelegramUserId: state.recipientTelegramUserId,
+        recipientHandle: state.recipientHandle,
         usesDualSchema: false,
       },
     };
@@ -703,6 +716,7 @@ export class SendCapability implements Capability<SendParams> {
     await ctx.emit({ kind: "chat_status_stop", id: statusId });
     state.partialParams.recipient = recipientAddress;
     state.recipientTelegramUserId = telegramUserId;
+    state.recipientHandle = handle;
     return true;
   }
 

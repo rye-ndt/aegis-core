@@ -14,6 +14,9 @@ import {
   RELAY_SUPPORTED_CHAIN_IDS,
 } from "../../../../../helpers/chainConfig";
 import { toErrorMessage } from "../../../../../helpers/errors/toErrorMessage";
+import { createLogger } from "../../../../../helpers/observability/logger";
+
+const log = createLogger("relaySwapTool");
 
 const NATIVE_CURRENCY_SENTINEL = "0x0000000000000000000000000000000000000000";
 
@@ -51,16 +54,24 @@ export class RelaySwapTool implements ITool {
   async execute(input: IToolInput): Promise<IToolOutput> {
     const parsed = InputSchema.safeParse(input);
     if (!parsed.success) {
+      log.warn({ err: parsed.error.message }, "relay-swap invalid input");
       return { success: false, error: `INVALID_INPUT: ${parsed.error.message}` };
     }
     const p = parsed.data;
 
     if (!RELAY_SUPPORTED_CHAIN_IDS.includes(p.fromChainId)) {
+      log.warn({ fromChainId: p.fromChainId }, "unsupported origin chain");
       return { success: false, error: `UNSUPPORTED_ORIGIN_CHAIN: ${p.fromChainId}` };
     }
     if (!RELAY_SUPPORTED_CHAIN_IDS.includes(p.toChainId)) {
+      log.warn({ toChainId: p.toChainId }, "unsupported destination chain");
       return { success: false, error: `UNSUPPORTED_DEST_CHAIN: ${p.toChainId}` };
     }
+
+    log.debug(
+      { fromChainId: p.fromChainId, toChainId: p.toChainId, tokenIn: p.tokenIn, tokenOut: p.tokenOut, amountRaw: p.amountRaw },
+      "→ relay getQuote",
+    );
 
     try {
       const quote = await this.relayClient.getQuote({
@@ -76,8 +87,14 @@ export class RelaySwapTool implements ITool {
 
       const txs = quote.steps.flatMap((step) => step.items.map((item) => item.data));
       if (txs.length === 0) {
+        log.warn({ fromChainId: p.fromChainId, toChainId: p.toChainId }, "relay quote returned empty steps");
         return { success: false, error: "RELAY_QUOTE_EMPTY: no transactions returned" };
       }
+
+      log.debug(
+        { txCount: txs.length, outputAmount: quote.details?.currencyOut?.amountFormatted ?? quote.details?.currencyOut?.amount },
+        "← relay getQuote",
+      );
 
       const data: RelaySwapToolOutputData = {
         txs,
@@ -87,6 +104,7 @@ export class RelaySwapTool implements ITool {
       };
       return { success: true, data };
     } catch (err) {
+      log.warn({ err: toErrorMessage(err), fromChainId: p.fromChainId, toChainId: p.toChainId }, "relay getQuote failed");
       return { success: false, error: toErrorMessage(err) };
     }
   }
