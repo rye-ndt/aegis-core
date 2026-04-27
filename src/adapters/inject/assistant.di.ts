@@ -461,7 +461,7 @@ export class AssistantInject {
   }
 
   getSigningRequestUseCase(
-    onResolved: (chatId: number, txHash: string | undefined, rejected: boolean) => void,
+    onResolved: (event: import("../../use-cases/interface/input/signingRequest.interface").SigningResolutionEvent) => void,
   ): ISigningRequestUseCase | undefined {
     const redis = this.getRedis();
     if (!redis) return undefined;

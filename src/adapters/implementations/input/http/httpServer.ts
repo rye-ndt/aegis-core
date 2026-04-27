@@ -57,6 +57,8 @@ const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
     privyToken: z.string().min(1),
     txHash: z.string().optional(),
     rejected: z.boolean().optional(),
+    errorCode: z.string().max(64).optional(),
+    errorMessage: z.string().max(512).optional(),
   }),
   z.object({
     requestId: z.string().min(1),
@@ -572,6 +574,8 @@ export class HttpApiServer {
         userId,
         txHash: body.txHash,
         rejected: body.rejected,
+        errorCode: body.errorCode,
+        errorMessage: body.errorMessage,
       });
     } catch (err) {
       const message = toErrorMessage(err);

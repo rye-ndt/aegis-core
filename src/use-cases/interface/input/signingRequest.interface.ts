@@ -3,12 +3,32 @@ import type {
   SigningRequestRecord,
 } from '../output/cache/signingRequest.cache';
 
+/**
+ * Hook fired when a signing request reaches a terminal state. CLIs use this
+ * to push a Telegram message back to the user (success / rejection / failure
+ * with recovery nudges).
+ */
+export type SigningResolutionEvent = {
+  chatId: number;
+  userId: string;
+  txHash?: string;
+  rejected: boolean;
+  errorCode?: string;
+  errorMessage?: string;
+  /** Calldata of the failed userOp — used to decode the failed transfer's
+   * token + amount when nudging the user into /buy. */
+  data?: string;
+  to?: string;
+};
+
 export interface ISigningRequestUseCase {
   resolveRequest(params: {
     requestId: string;
     userId: string;
     txHash?: string;
     rejected?: boolean;
+    errorCode?: string;
+    errorMessage?: string;
   }): Promise<void>;
 
   /**

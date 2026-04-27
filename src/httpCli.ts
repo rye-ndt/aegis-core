@@ -4,6 +4,7 @@ process.env.PROCESS_ROLE = "http";
 import { Api } from "grammy";
 import { AssistantInject } from "./adapters/inject/assistant.di";
 import { createLogger } from "./helpers/observability/logger";
+import { buildNotifyResolved } from "./helpers/notifyResolved";
 
 const log = createLogger("httpCli");
 
@@ -17,13 +18,7 @@ const log = createLogger("httpCli");
   const inject = new AssistantInject();
 
   const tgApi = new Api(tgToken);
-  const notifyResolved = async (chatId: number, txHash: string | undefined, rejected: boolean): Promise<void> => {
-    if (rejected) {
-      await tgApi.sendMessage(chatId, "Transaction rejected in the app.");
-    } else {
-      await tgApi.sendMessage(chatId, `Transaction submitted.\nTx hash: \`${txHash ?? "unknown"}\``, { parse_mode: "Markdown" });
-    }
-  };
+  const notifyResolved = buildNotifyResolved(tgApi);
 
   const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved);
   const httpServer = inject.getHttpApiServer(signingRequestUseCase);

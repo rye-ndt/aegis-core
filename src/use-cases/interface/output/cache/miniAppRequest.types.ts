@@ -76,6 +76,11 @@ export interface SignResponse extends BaseResponse {
   requestType: 'sign';
   txHash?: string;
   rejected?: boolean;
+  // Stable classification produced by the FE's `interpretSignError`. The BE
+  // branches on this to drive recovery flows (insufficient_token_balance →
+  // /buy nudge). New codes must be added in lockstep on both sides.
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface DelegationRecord {

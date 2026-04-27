@@ -1,6 +1,9 @@
 import { createLogger } from "../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
-import type { ISigningRequestUseCase } from "../interface/input/signingRequest.interface";
+import type {
+  ISigningRequestUseCase,
+  SigningResolutionEvent,
+} from "../interface/input/signingRequest.interface";
 import type {
   ISigningRequestCache,
   ResolvedSigningRequest,
@@ -13,11 +16,7 @@ const POLL_INTERVAL_MS = 1500;
 export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
   constructor(
     private readonly cache: ISigningRequestCache,
-    private readonly onResolved: (
-      chatId: number,
-      txHash: string | undefined,
-      rejected: boolean,
-    ) => void,
+    private readonly onResolved: (event: SigningResolutionEvent) => void,
   ) {}
 
   async create(record: SigningRequestRecord): Promise<void> {
@@ -37,6 +36,8 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     userId: string;
     txHash?: string;
     rejected?: boolean;
+    errorCode?: string;
+    errorMessage?: string;
   }): Promise<void> {
     const record = await this.cache.findById(params.requestId);
     if (!record) throw new Error("SIGNING_REQUEST_NOT_FOUND");
@@ -58,11 +59,21 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
         requestId: params.requestId,
         rejected,
         hasTxHash: !!params.txHash,
+        errorCode: params.errorCode,
       },
       "signing request resolved",
     );
 
-    this.onResolved(record.chatId, params.txHash, rejected);
+    this.onResolved({
+      chatId: record.chatId,
+      userId: record.userId,
+      txHash: params.txHash,
+      rejected,
+      errorCode: params.errorCode,
+      errorMessage: params.errorMessage,
+      data: record.data,
+      to: record.to,
+    });
   }
 
   async waitFor(

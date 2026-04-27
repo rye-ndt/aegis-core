@@ -4,6 +4,7 @@ import { AssistantInject } from "./adapters/inject/assistant.di";
 import { TelegramBot } from "./adapters/implementations/input/telegram/bot";
 import { TelegramAssistantHandler } from "./adapters/implementations/input/telegram/handler";
 import { createLogger } from "./helpers/observability/logger";
+import { buildNotifyResolved } from "./helpers/notifyResolved";
 
 const log = createLogger("telegramCli");
 
@@ -18,13 +19,7 @@ const log = createLogger("telegramCli");
   const sqlDB = inject.getSqlDB();
 
   const tgApi = new Api(token);
-  const notifyResolved = async (chatId: number, txHash: string | undefined, rejected: boolean): Promise<void> => {
-    if (rejected) {
-      await tgApi.sendMessage(chatId, 'Transaction rejected in the app.');
-    } else {
-      await tgApi.sendMessage(chatId, `Transaction submitted.\nTx hash: \`${txHash ?? 'unknown'}\``, { parse_mode: 'Markdown' });
-    }
-  };
+  const notifyResolved = buildNotifyResolved(tgApi);
 
   const rawBot = new Bot(token);
   inject.setBot(rawBot);

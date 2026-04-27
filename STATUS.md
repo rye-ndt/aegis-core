@@ -489,6 +489,10 @@ All Telegram flows go through `ICapabilityDispatcher`. Legacy branching in `hand
 
 **Out of scope:** deposit-watcher, MoonPay webhooks, non-USDC.
 
+**Insufficient-balance recovery — 2026-04-27.** When the FE's `interpretSignError` classifies a sendTransaction failure (`SignErrorCode` enum), `SignHandler` posts `{ rejected: true, errorCode, errorMessage }` to `POST /response`. `signingRequest.usecase` propagates it via the new `SigningResolutionEvent` shape (`{ chatId, userId, txHash?, rejected, errorCode?, errorMessage?, data?, to? }`) into `onResolved`. All three CLIs (`telegramCli`/`httpCli`/`workerCli`) share `helpers/notifyResolved.ts`, which on `errorCode === 'insufficient_token_balance'` decodes the failed `transfer(address,uint256)` from the userOp calldata via `helpers/decodeFailedTransfer.ts` (selector-scan; works for Kernel `executeBatch` layout) and — when the token is the chain's USDC — sends a Telegram nudge with an inline keyboard reusing `BuyCapability`'s existing `buy:y:<amount>` / `buy:n:<amount>` callbacks. The user lands directly in the /buy confirm step. Non-USDC token or decode failure → plain friendly-message reply, no /buy nudge (onramp is USDC-only).
+
+**Convention:** new sign-error codes must be added in lockstep on FE (`SignErrorCode` in `fe/privy-auth/src/utils/interpretSignError.ts`) and BE (recovery branch in `helpers/notifyResolved.ts`). The string is the contract.
+
 ## Cleanup — 2026-04-23
 **Removed** (see `constructions/cleanup-plan.md`):
 - Unused use-case methods: `IAssistantUseCase.{listConversations,getConversation}`, `IIntentUseCase.{getHistory,parseFromHistory,previewCalldata}`, `ISolverRegistry.buildFromManifest`, `IIntentDB.listByUserId`.

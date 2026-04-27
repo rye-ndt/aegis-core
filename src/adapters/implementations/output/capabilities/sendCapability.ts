@@ -217,7 +217,7 @@ export class SendCapability implements Capability<SendParams> {
         if (this.command === INTENT_COMMAND.SEND) {
           void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
         }
-        await this.tryEmitDelegationRequest(ctx, params, fromToken);
+        log.debug({ userId: ctx.userId }, "skip delegation prompt — existing delegation covers spend");
         return { kind: "noop" };
       }
 
