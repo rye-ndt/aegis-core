@@ -162,6 +162,20 @@
       "when": 1777257178823,
       "tag": "0022_fix_schema_drift",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1745712000000,
+      "tag": "0023_seed_send_tool",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1777257200000,
+      "tag": "0024_seed_send_tool_fix",
+      "breakpoints": true
     }
   ]
 }
