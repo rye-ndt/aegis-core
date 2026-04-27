@@ -294,12 +294,28 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 - **Enums in `helpers/enums/`**: prefer enum value over inline string. `parseIntentCommand` is the only slash matcher.
 - **Hexagonal discipline**: see rule 1 above. `MiniAppRequest`/`DelegationRecord` live under `interface/output/cache/` so both sides reference without coupling.
 - **DB facade**: single `DrizzleSqlDB`; every repo hangs off as `db.users`, `db.toolManifests`, …. Use-cases receive the repo interface, never the facade.
-- **Migrations**: always `npm run db:generate && npm run db:migrate`. Never raw SQL.
+- **Migrations**: always `npm run db:generate && npm run db:migrate`. Never raw SQL. **See "Drizzle migrations — handle with extreme care" below before touching anything in `drizzle/` or `schema.ts`.**
 - **Validation at boundaries**: every HTTP body Zod-parsed. Shared validators in `helpers/schema/`.
 - **Lazy singletons** in `AssistantInject`: `if (!this._x) this._x = new X(...); return this._x`. Optional-env services return `undefined` when unconfigured.
 - **HTTP routing**: only `exactRoutes` (`"METHOD /path"`) or `paramRoutes` regex. Never if/else.
 - **Comments**: only where code can't explain itself.
 - **Encrypted secrets**: AES-256-GCM via `helpers/crypto/aes.ts`, stored as `iv:authTag:ciphertext` hex.
+
+### Drizzle migrations — handle with extreme care
+
+The `drizzle/` folder is **merge-hostile**. The `_journal.json` index, the per-migration `meta/*_snapshot.json` files, and the sequentially numbered `NNNN_*.sql` filenames all collide the moment two branches generate migrations independently. This repo has already been bitten by exactly that — there are dual `0016_*.sql` files, a missing `0019_*`, scrambled `idx` ordering in `meta/_journal.json`, and at least one merge silently dropped an `ALTER TABLE users ADD COLUMN privy_did` statement while leaving the snapshot intact. Login broke for everyone whose DB was on that branch because drizzle thought the schema was synced when it wasn't.
+
+**Rules — apply on every change that touches schema:**
+
+- **Always rebase onto the latest main before running `drizzle-kit generate`.** This guarantees the new migration slots cleanly after the current head and avoids number collisions.
+- **Never hand-resolve a merge conflict inside `drizzle/`.** If git reports conflicts in `_journal.json`, any `*_snapshot.json`, or any `NNNN_*.sql` file: abort the merge, drop the local migration file(s), rebase, then regenerate with `drizzle-kit generate`. Hand-edits will silently desync the journal from the SQL from the snapshots.
+- **Never delete or rename a migration that has been merged to main**, even if it looks redundant. Its hash lives in `drizzle.__drizzle_migrations` on every existing DB; removing it doesn't undo the applied SQL, and renaming it changes the hash so drizzle will try to re-apply the renamed file on the next run.
+- **Never run raw SQL against the DB to "fix" a schema drift.** If schema and DB diverge, the right path is a corrective migration via `npx drizzle-kit generate --custom --name <reason>` (which scaffolds an empty SQL file plus matching journal/snapshot entries), then write the corrective DDL into that file. Make corrective DDL idempotent (`IF NOT EXISTS`, conditional `DROP NOT NULL`) so it survives partially-patched environments.
+- **`db:generate` will silently miss a dropped migration if the snapshot already matches `schema.ts`.** Drizzle-kit diffs `schema.ts` against the latest snapshot, not against the live DB. If a previous merge dropped DDL but kept the snapshot, generate reports "no changes." When debugging schema drift, always inspect the DB directly (`\d <table>`) and compare against `schema.ts`, not against the snapshot.
+- **`migrate.ts` always prints `[migrate] all migrations applied.` at the end.** That message is unconditional — it does **not** mean new migrations ran. To verify, query `drizzle.__drizzle_migrations` and compare row count against journal entry count, then spot-check actual columns with `\d`.
+- **The `__drizzle_migrations` ledger is authoritative for "what drizzle thinks ran"; the live schema is authoritative for "what actually exists."** When they disagree, the ledger is the one that's wrong (inherited from a snapshot/dump or a bad merge). Fix it with a corrective migration — never `DELETE FROM __drizzle_migrations` to "force a rerun" without first verifying which DDL was already partially applied (you'll likely re-run statements that crash on already-existing tables/columns).
+- **If you need to add a column / change a constraint, never just edit `schema.ts` and ship.** Always run `drizzle-kit generate` and confirm the produced SQL file actually contains the DDL you expect. A common failure mode is generating, then later resolving a merge conflict that empties the SQL file while leaving the snapshot — the schema looks correct in code review but no DDL ever runs.
+- **If anything in `drizzle/` looks structurally weird** (duplicate number prefixes, gaps in the sequence, `idx` ordering not matching tag order), stop and surface it to the user before continuing. Do not attempt to "clean it up" silently — the journal hashes are what every existing DB matches against, and rewriting them retroactively breaks every other developer's local DB and every deployed environment.
 
 ### Logging (pino)
 - `import { createLogger } from '<rel>/helpers/observability/logger'`. `const log = createLogger('scope')`.
