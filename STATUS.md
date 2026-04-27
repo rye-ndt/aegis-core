@@ -140,9 +140,11 @@ src/
     └── time/dateTime.ts           # newCurrentUTCEpoch()
 ```
 
-## Contract Registry (Avalanche Fuji)
-- AegisToken (Proxy): `0x8839ecFB1BefD232d5Fcf55C223BDD78bc3A2f69`
-- RewardController (Proxy): `0x519092C2185E4209B43d3ea40cC34D39978073A7`
+## Contract Registry
+Default chain is Avalanche C-Chain mainnet (43114). Set `CHAIN_ID=43113` to target Fuji.
+Reward-controller address is per-deploy via `REWARD_CONTROLLER_ADDRESS` env. Legacy Fuji deployments:
+- AegisToken (Proxy, Fuji): `0x8839ecFB1BefD232d5Fcf55C223BDD78bc3A2f69`
+- RewardController (Proxy, Fuji): `0x519092C2185E4209B43d3ea40cC34D39978073A7`
 
 ## HTTP API
 Runs on `HTTP_API_PORT` (default 4000). Native `node:http`. CORS allows all origins. Reqid `[API xxxxxxxx] →` from `newUuid().slice(0,8)`. Routing via `exactRoutes` + `paramRoutes`.
@@ -257,9 +259,8 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `TELEGRAM_BOT_TOKEN`, `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` | — | Telegram + MTProto |
 | `HTTP_API_PORT` | `4000` | (Cloud Run `PORT` remapped in `entrypoint.ts`) |
 | `MINI_APP_URL` | — | Mini-app base URL |
-| `CHAIN_ID` | `43113` | Resolved against `CHAIN_REGISTRY` (Fuji, C-Chain, 1, 8453, 137, 42161, 10) |
+| `CHAIN_ID` | `43114` | Resolved against `CHAIN_REGISTRY` (C-Chain mainnet default; also Fuji, 1, 8453, 137, 42161, 10) |
 | `RPC_URL`, `RPC_URL_FALLBACKS` | from CHAIN_CONFIG / `""` | Primary + comma-separated fallbacks (viem `fallback([...])`, retryCount:1) |
-| `AVAX_BUNDLER_URL`, `AVAX_PAYMASTER_URL` | — | Bundler + paymaster (also on `CHAIN_CONFIG`) |
 | `REWARD_CONTROLLER_ADDRESS` | — | `ClaimRewardsSolver` target |
 | `PANGOLIN_TOKEN_LIST_URL`, `TOKEN_CRAWLER_INTERVAL_MS` | / `900000` | Token list source + cadence |
 | `DELEGATION_TTL_SECONDS` | `604800` | Default session-key lifetime |
