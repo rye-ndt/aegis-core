@@ -1,5 +1,6 @@
 /**
- * Seed script: injects an ERC-20 transfer tool manifest for Avalanche Fuji (chainId 43113)
+ * Seed script: injects an ERC-20 transfer tool manifest for the configured Avalanche chain.
+ * Driven by CHAIN_ID env (defaults to 43114 mainnet); 43113 (Fuji) also supported.
  * Run with: npx ts-node drizzle/seed/transferToken.ts
  */
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -8,7 +9,7 @@ import { toolManifests } from "../../src/adapters/implementations/output/sqlDB/s
 import { v4 as uuidv4 } from "uuid";
 import { TOOL_CATEGORY } from "../../src/helpers/enums/toolCategory.enum";
 
-const FUJI_CHAIN_ID = 43113;
+const CHAIN_ID = parseInt(process.env.CHAIN_ID ?? "43114", 10);
 
 const TRANSFER_TOOL = {
   toolId: "transfer",
@@ -16,7 +17,7 @@ const TRANSFER_TOOL = {
   name: "ERC-20 Token Transfer",
   description: "Transfer any ERC-20 token (or native AVAX) to a recipient address on Avalanche.",
   protocolName: "Native ERC-20",
-  tags: JSON.stringify(["transfer", "erc20", "send", "avax", "fuji"]),
+  tags: JSON.stringify(["transfer", "erc20", "send", "avax"]),
   priority: 10,
   isDefault: true,
   inputSchema: JSON.stringify({
@@ -50,7 +51,7 @@ const TRANSFER_TOOL = {
   revenueWallet: null,
   isVerified: true,
   isActive: true,
-  chainIds: JSON.stringify([FUJI_CHAIN_ID]),
+  chainIds: JSON.stringify([CHAIN_ID]),
 };
 
 async function seed() {

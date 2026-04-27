@@ -187,7 +187,7 @@ export function resolveChainSymbol(symbol?: string): number | null {
   return null;
 }
 
-const DEFAULT_CHAIN_ID = 43113;
+const DEFAULT_CHAIN_ID = 43114;
 
 const chainId = parseInt(process.env.CHAIN_ID ?? String(DEFAULT_CHAIN_ID), 10);
 const entry = CHAIN_REGISTRY[chainId] ?? CHAIN_REGISTRY[DEFAULT_CHAIN_ID]!;
@@ -207,6 +207,4 @@ export const CHAIN_CONFIG = {
   /** @deprecated Single URL retained for legacy callers. Use `rpcUrls`. */
   rpcUrl: rpcUrls[0]!,
   rpcUrls,
-  bundlerUrl: process.env.AVAX_BUNDLER_URL,
-  paymasterUrl: process.env.AVAX_PAYMASTER_URL,
 } as const;

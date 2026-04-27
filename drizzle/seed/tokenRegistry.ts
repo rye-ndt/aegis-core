@@ -1,5 +1,6 @@
 /**
- * Seed script: inserts verified tokens for Avalanche Fuji (chainId 43113)
+ * Seed script: inserts verified tokens for the configured Avalanche chain.
+ * Driven by CHAIN_ID env (defaults to 43114 mainnet); 43113 (Fuji) also supported.
  * Run with: npx ts-node drizzle/seed/tokenRegistry.ts
  */
 import { drizzle } from "drizzle-orm/node-postgres";
@@ -7,34 +8,32 @@ import { Pool } from "../../node_modules/@types/pg";
 import { tokenRegistry } from "../../src/adapters/implementations/output/sqlDB/schema";
 import { v4 as uuidv4 } from "uuid";
 
-const FUJI_CHAIN_ID = 43113;
+const CHAIN_ID = parseInt(process.env.CHAIN_ID ?? "43114", 10);
 
-const TOKENS = [
-  {
-    symbol: "AVAX",
-    name: "Avalanche",
-    address: "0x0000000000000000000000000000000000000000",
-    decimals: 18,
-    isNative: true,
-    isVerified: true,
-  },
-  {
-    symbol: "WAVAX",
-    name: "Wrapped AVAX",
-    address: "0xd00ae08403B9bbb9124bB305C09058E32C39A48c",
-    decimals: 18,
-    isNative: false,
-    isVerified: true,
-  },
-  {
-    symbol: "USDC",
-    name: "USD Coin",
-    address: "0x5425890298aed601595a70AB815c96711a31Bc65",
-    decimals: 6,
-    isNative: false,
-    isVerified: true,
-  },
-];
+type TokenSeed = {
+  symbol: string;
+  name: string;
+  address: string;
+  decimals: number;
+  isNative: boolean;
+  isVerified: boolean;
+};
+
+const TOKENS_BY_CHAIN: Record<number, TokenSeed[]> = {
+  43114: [
+    { symbol: "AVAX",  name: "Avalanche",    address: "0x0000000000000000000000000000000000000000", decimals: 18, isNative: true,  isVerified: true },
+    { symbol: "WAVAX", name: "Wrapped AVAX", address: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7", decimals: 18, isNative: false, isVerified: true },
+    { symbol: "USDC",  name: "USD Coin",     address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", decimals: 6,  isNative: false, isVerified: true },
+  ],
+  43113: [
+    { symbol: "AVAX",  name: "Avalanche",    address: "0x0000000000000000000000000000000000000000", decimals: 18, isNative: true,  isVerified: true },
+    { symbol: "WAVAX", name: "Wrapped AVAX", address: "0xd00ae08403B9bbb9124bB305C09058E32C39A48c", decimals: 18, isNative: false, isVerified: true },
+    { symbol: "USDC",  name: "USD Coin",     address: "0x5425890298aed601595a70AB815c96711a31Bc65", decimals: 6,  isNative: false, isVerified: true },
+  ],
+};
+
+const TOKENS = TOKENS_BY_CHAIN[CHAIN_ID];
+if (!TOKENS) throw new Error(`No token seed defined for CHAIN_ID=${CHAIN_ID}`);
 
 async function seed() {
   const pool = new Pool({
@@ -52,7 +51,7 @@ async function seed() {
         id: uuidv4(),
         symbol: token.symbol,
         name: token.name,
-        chainId: FUJI_CHAIN_ID,
+        chainId: CHAIN_ID,
         address: token.address,
         decimals: token.decimals,
         isNative: token.isNative,
