@@ -1,128 +1,138 @@
-This document is the Core Protocol Thesis and Technical Specification for Aegis. It is designed to be fed into the LLM's system prompt or "identity" layer so the agent understands its purpose, its constraints, and the modular ecosystem it inhabits.
+# Aegis — Investor Thesis
+
+## The one-line pitch
+
+Aegis is the AI-native crypto wallet for the 500 million people who want to participate in DeFi but can't navigate it — a Telegram-native agent that understands plain language, executes on-chain actions non-custodially, and proactively grows your money while you sleep.
 
 ---
 
-## The Protocol Thesis
+## The problem: DeFi is still for insiders
 
-**Project Name:** Aegis (Onchain Agent)
+**Crypto is a trillion-dollar asset class that most people can't actually use.**
 
-**Mission:** To dissolve the complexity of blockchain interaction by providing a secure, natural-language "Intent Layer" for the decentralized web.
+The gap isn't knowledge or desire. It's interface. Today's DeFi experience requires users to:
+- Copy-paste wallet addresses, juggle gas settings, and manually approve every transaction
+- Trust centralized bots that demand their private key — one breach away from losing everything
+- Actively monitor yield rates, manually move funds across protocols, and time the market themselves
+- Leave idle stablecoins sitting untouched while losing real value to inflation
 
-### The Problem
-
-- **UX Fragility:** Users struggle with complex DeFi UIs and manual transaction construction.
-- **The Security Paradox:** Current Telegram bots require users to export private keys, creating massive centralized honeypots.
-- **Monolithic Stagnation:** Existing bots are "closed shops"; they only support what their core team builds.
-- **Idle Capital:** Users' stablecoins sit uninvested while DeFi yield opportunities go untapped.
-
-### The Solution
-
-A modular, intent-based ecosystem on Avalanche (and beyond) where users interact via a Telegram agent and a Telegram Mini App. The agent uses ERC-4337 Account Abstraction and scoped session keys to execute actions without ever owning the user's master private key. A **Capability Dispatcher** routes every interaction to a typed Capability, making the agent extensible without touching the core handler. A **Yield Optimizer** proactively moves idle USDC into the best live pool (currently Aave v3 on Avalanche mainnet); a **Relay-backed Swap engine** handles same-chain and cross-chain swaps; a **Loyalty system** rewards on-chain activity with idempotent points awards.
+Meanwhile, 800+ million people use Telegram daily. Many already hold crypto. None of them want to be power users. They want results.
 
 ---
 
-## Architecture
+## The opportunity
 
-The system follows **Hexagonal Architecture** (Ports & Adapters): use-cases depend only on interfaces; all concrete implementations live in the adapter layer; assembly happens exclusively in `src/adapters/inject/assistant.di.ts`. The backend **never signs transactions** — all signing is performed by each user's delegated ZeroDev session key, stored in their Telegram Cloud (mini-app) and driven through `ISigningRequestUseCase.create` + `waitFor`.
+Three trends are converging right now:
 
-### 1. The Intelligence Layer (The Brain)
+1. **Account abstraction (ERC-4337) is live.** Smart Contract Accounts allow session-key delegation — users can authorize an agent to act on their behalf without ever handing over the master key.
 
-- **Intent Parser** (`openai.intentParser`): natural language → structured JSON Intent Package.
-- **Schema Compiler** (`openai.schemaCompiler`): iteratively asks the user for missing fields until the tool input schema is satisfied.
-- **Semantic Router** (`pinecone.toolIndex`): Tool Manifests in a Pinecone vector index; retrieves the top-N most relevant tools to prevent context bloat.
-- **Intent Classifier** (`openai.intentClassifier`): routes free text to the correct tool when no slash command is given.
-- **Resolver Engine** (`resolverEngine.ts`): per-field resolvers for `RESOLVER_FIELD` (token symbols, amounts, `@handle` recipients via MTProto + Privy).
-- **Token Registry** (`db.tokenRegistry`): verified symbol → address mapping per chain; guards against token spoofing.
+2. **LLMs are good enough to parse intent.** "Send $50 USDC to @mike" is now a fully resolvable instruction. The translation layer from natural language to on-chain calldata works.
 
-### 2. The Execution Layer (The Hands)
+3. **Telegram Mini Apps are mainstream.** Over 300 million users interact with Telegram Mini Apps monthly. The distribution channel already exists and has deep penetration in crypto-native markets.
 
-- **Capability Dispatcher** (`capabilityDispatcher.usecase.ts`): single entry point for all Telegram input. Priority: fresh slash-command/callback match → resume pending collection → default free-text fallback. Every user-facing feature is a `Capability` — never add flow logic to `handler.ts`.
-- **Capabilities:**
-  - `BuyCapability` — `/buy <amount>` onramp (on-chain deposit or MoonPay).
-  - `SendCapability` — one class, N instances per `INTENT_COMMAND` (`/send`, `/money`, `/sell`, `/convert`, `/topup`, `/dca`). Full compile → resolve → disambiguation → Aegis Guard → sign pipeline.
-  - `SwapCapability` — `/swap` via Relay. Aegis Guard check → `RelaySwapTool.execute` → per-step `SigningRequest` + mini-app polling. `?after=` continuation keeps mini-app open across multi-step flows.
-  - `YieldCapability` — `/yield` (nudge keyboard), `/withdraw` (full exit), `yield:opt:*` / `yield:custom` / `yield:skip` callbacks.
-  - `LoyaltyCapability` — `/points`, `/leaderboard`. Anonymised display (rank + truncated id; never wallets).
-  - `AssistantChatCapability` — default free-text fallback wrapping the OpenAI orchestrator tool-call loop.
-- **Solver Engine:**
-  - *Static solvers* — hardcoded for immutable actions (e.g. `ClaimRewardsSolver`).
-  - *Manifest-driven solver* — template engine + step executors for DB-registered tool manifests.
-- **Relay Swap** (`RelaySwapTool`): hits `RELAY_API_URL/quote`; returns ordered transaction list; not exposed to the LLM (command-path only).
-- **Yield Optimizer** (`YieldOptimizerUseCase`): `runPoolScan`, `scanIdleForUser`, `buildDepositPlan`, `finalizeDeposit`, `buildWithdrawAllPlan`, `buildDailyReport`, `getPositions`.
-- **Loyalty Use Case** (`LoyaltyUseCaseImpl`): deterministic `computePointsV1` formula; idempotent awards keyed on `intent_execution_id`; active-season + leaderboard Redis caches; `awardPoints` is fire-and-forget at every call site so host transactions never block on points.
-- **Aegis Guard** (`aegisGuardInterceptor.ts`): shared interceptor checking `token_delegations` before any spend; returns `ApproveRequest` if insufficient. Used by `SendCapability` and `SwapCapability`.
-- **Signing Request flow** (`ISigningRequestUseCase.create` + `waitFor`): creates a `SigningRequestRecord`, emits a `mini_app` artifact, polls `sign_req:{id}`. Multi-step flows chain through this pair; `user_pending_signs:<userId>` Redis ZSET indexes pending signs per user for the `?after=` continuation lookup.
-
-### 3. The On-Chain Layer (The Vault)
-
-- **Smart Contract Account** (ERC-4337 via ZeroDev SDK): provisioned automatically for every new user.
-- **Session Keys** — scoped delegations stored in Telegram Cloud (encrypted with `privyDid`-derived AES-GCM); the agent never holds the user's master key.
-- **Paymaster** (`paymasterUrl` on `CHAIN_CONFIG`): optional ZeroDev paymaster; when absent, the SCA pays its own gas.
-- **Aegis Guard on-chain enforcement** (backlog): pre-UserOp re-check `limitRaw − spentRaw` + `validUntil`; `incrementSpent` after confirmed execution.
-- **Fee records** (`fee_records` table): protocol fee audit trail per execution.
-
-### 4. The Background Jobs Layer (Proactive Agent)
-
-- **`YieldPoolScanJob`** — scans Aave pool every 2h; writes winner to `yield:best:{chainId}:{token}` (3h TTL); maintains 84-sample APY EMA series per protocol.
-- **`UserIdleScanJob`** — scans active users every 24h; checks idle USDC vs `YIELD_IDLE_USDC_THRESHOLD_USD`; sends Telegram nudge with inline keyboard.
-- **`YieldReportJob`** — ticks every 5 min; fires once per day at `YIELD_REPORT_UTC_HOUR`; sends per-user PnL report.
-- **`TokenCrawlerJob`** — re-fetches the Pangolin token list on `TOKEN_CRAWLER_INTERVAL_MS` cadence.
-
-### 5. The Interface Layer (The Portal)
-
-- **Telegram Agent UI** (`grammy` bot + `handler.ts`): auth gate + dispatcher forwarder (~200 LOC after the capability refactor).
-- **HTTP Mini-App API** (native `node:http`, port `HTTP_API_PORT`): polling-based; mini-app fetches pending auth/sign/approve via `GET /request/:requestId`. Continuation `?after=<prevId>` keeps the mini-app open across multi-step flows. `POST /health` exposes deployment metadata; `GET /metrics` (bearer-gated) exposes pgPool/OpenAI/LLM/Redis metrics.
-- **Loyalty endpoints** (`GET /loyalty/balance | history | leaderboard`): power the mini-app's Points tab.
-- **Yield endpoint** (`GET /yield/positions`): live on-chain positions + totals; powers the mini-app's HomeTab section.
-- **Artifact Renderer** (`telegram.artifactRenderer.ts`): single exhaustive switch rendering all `Artifact` discriminated-union variants to Telegram messages.
-- **Result Parser** (`TxResultParser`): translates raw event logs and tx hashes into human-readable success messages.
-
-### 6. The Operations Layer (Production)
-
-- **Single-image deployment** on Google Cloud Run (`us-east1`): `aegis-worker` (pinned 1 replica, no CPU throttling — owns the gramJS MTProto socket + cron timers) + `aegis-http` (0–3 replicas, scales to zero). `PROCESS_ROLE` env selects the role at boot; `entrypoint.ts` runs migrations then dispatches.
-- **External storage** — Neon Postgres + Upstash Redis, both region-pinned to `us-east-1`.
-- **CI/CD** — GitHub Actions + Workload Identity Federation (no JSON SA keys); single esbuild bundle (`dist/server.js`), per-deploy SHA tag, matrix deploy of both services in parallel.
-- **Observability** — pino structured logs (one child logger per module, `console.*` banned), `MetricsRegistry` singleton, request-scoped 8-char ids.
+The window to own the "AI-native DeFi wallet" category is open. It will not stay open long.
 
 ---
 
-## Tech Stack
+## Our solution: Aegis
 
-| Layer       | Choice |
-|-------------|--------|
-| Language    | TypeScript 5.3, Node.js, strict mode |
-| Interface   | Telegram (`grammy`) + HTTP API (native `node:http`) |
-| ORM         | Drizzle ORM + PostgreSQL (`pg` driver) |
-| LLM         | OpenAI (`gpt-4o` / configurable) via `openai` SDK |
-| Blockchain  | `viem` ^2 — any EVM chain, ERC-4337 |
-| Account Abs | ZeroDev SDK + `permissionless` ^0.2 |
-| Validation  | Zod 4.3.6 |
-| DI          | Manual container in `src/adapters/inject/assistant.di.ts` |
-| Web search  | Tavily (`@tavily/core`) |
-| Embeddings  | OpenAI embeddings + Pinecone vector index |
-| Cache       | Redis via `ioredis` |
-| Telegram    | `grammy` (bot) + `telegram` (gramjs / MTProto for @handle resolution) |
-| Auth        | Privy (`@privy-io/server-auth`) — no backend-issued JWTs |
-| Cross-chain | Relay (`RELAY_API_URL`) |
-| Yield       | Aave v3 (Avalanche mainnet) |
-| Bundling    | esbuild single-bundle (`dist/server.js`) for production |
-| Deployment  | Cloud Run + Neon + Upstash + GitHub Actions (WIF) |
+Aegis is a Telegram-native AI agent that lets anyone execute DeFi actions — sending, swapping, and earning yield — through a natural language conversation, with no private key exposure, no complex UI, and no manual monitoring.
 
----
+### What users actually experience
 
-## Non-Negotiable Rules
+- **"Send 50 USDC to @alice"** — Aegis resolves Alice's wallet from her Telegram handle, estimates gas, shows a plain-English preview, and executes via a one-tap approval in the mini-app.
+- **"Swap my ETH for AVAX"** — Aegis finds the best route across chains via Relay, sequences the transactions, and keeps the mini-app open until every step is signed.
+- **"Earn yield on my USDC"** — Aegis proactively detects idle USDC, suggests the highest-scoring Aave pool (ranked by a 7-day EMA algorithm), and moves funds with a single approval. A daily PnL report lands in Telegram every morning.
+- **"How much did I spend on gas last month?"** — The AI assistant answers from on-chain data via tool calls.
 
-1. **Hexagonal architecture.** Use-case layer imports only `use-cases/interface/`. No adapter-to-adapter cross-imports. Assembly only in `assistant.di.ts`.
-2. **No inline config literals.** Every `process.env.X` hoisted to a top-of-file `const`. Chain-specific values belong in `src/helpers/chainConfig.ts`.
-3. **No raw SQL.** Schema changes via `schema.ts` + `npm run db:generate && npm run db:migrate`.
-4. **Privy-token-only auth.** `authUseCase.resolveUserId(token)` — never issue or accept a backend JWT.
-5. **Time is seconds.** Always `newCurrentUTCEpoch()`. IDs are always `newUuid()` (v4).
-6. **New features = new Capabilities.** Do not add branches to `handler.ts`.
-7. **Backend never signs transactions.** All signing happens through the user's delegated session key in the mini-app. The legacy `BOT_PRIVATE_KEY` / `IUserOpExecutor` path was deleted — do not reintroduce.
-8. **Loyalty awards are fire-and-forget.** Host transactions must never depend on points succeeding.
+### Why it's defensible
+
+| What we do | What competitors do |
+|---|---|
+| Session key delegation — the backend never holds a private key | Most bots require key export |
+| Intent-based NL → calldata pipeline | Fixed command menus |
+| Proactive yield engine with daily nudges | Passive, user must act |
+| Modular Capability system — any DeFi action can be added as a plugin | Monolithic, centralized roadmap |
+| Loyalty points rewarding on-chain activity | No retention mechanics |
+
+**The core moat is trust.** Non-custodial execution is not a feature — it is the only architecture that can scale to mainstream users who've been burned by custodial failures (FTX, Binance, etc.). Our session-key model gives users full control without the UX burden.
 
 ---
 
-## Agent Self-Description
+## Business model
 
-"I am Aegis, an automated, intent-based on-chain agent. My purpose is to help users perform on-chain actions — swaps, transfers, and yield optimization — via a community-driven toolset on Avalanche and beyond. I do not own user keys; I act through delegated session keys on their Smart Contract Account. I proactively scan for idle USDC and move it into the highest-scoring yield pool. I reward on-chain activity through a deterministic, idempotent loyalty ledger. I prioritize safety through Aegis Guard spending limits, a verified Token Registry, and a deterministic pre-flight execution estimate before every confirmation. My architecture is hexagonal: every new capability plugs in through a typed `Capability` interface without touching the core handler."
+### Primary: Protocol fee on execution
+Every swap, send, and yield deposit settled through Aegis carries a small protocol fee baked into the transaction. This is invisible to the user — the gas abstraction layer absorbs the complexity.
+
+### Secondary: Premium features
+- **Aegis Guard** — customizable per-token spending limits; advanced controls for power users.
+- **Loyalty Season passes** — seasonal point multipliers and rewards for high-volume users.
+- **Developer tools** — custom HTTP tool registration (enterprises and protocols plug their products into the agent's capability layer).
+
+### Tertiary: Ecosystem partnerships
+Protocol integrations (lending, DEXs, liquid staking) pay for placement in the yield ranker and capability registry. This is similar to how aggregators charge protocols for priority routing.
+
+---
+
+## Traction & current state
+
+**The product is live and fully functional on Avalanche mainnet.**
+
+- Non-custodial send, swap, and yield deposit/withdraw are all production-ready.
+- Loyalty Season 0 is seeded and active — daily on-chain activity is already being rewarded.
+- A deployed Cloud Run backend handles real user sessions with structured observability (pino logs, Prometheus-compatible metrics).
+- The Telegram bot and Mini App are integrated end-to-end: auth, session key delegation, signing, confirmation, and failure recovery (including an insufficient-balance recovery flow that automatically prompts the user to top up via MoonPay).
+
+---
+
+## Why now
+
+- **Account abstraction reached production maturity in 2023–2024.** ZeroDev and Pimlico have hardened the infrastructure. Building on ERC-4337 today is like building on AWS in 2008.
+- **OpenAI's function-calling API makes intent parsing production-viable.** The NL → structured JSON pipeline is reliable enough to trust with real money.
+- **Telegram's mini-app ecosystem is at an inflection point.** The platform added payment rails and native TON wallet integration in 2024; DeFi mini-apps are the obvious next layer.
+- **Regulatory clarity is improving.** The shift in US regulatory posture creates a window to build consumer-facing on-chain products that were previously too risky to market.
+
+---
+
+## Roadmap
+
+### Now (Avalanche mainnet)
+- Send, swap (cross-chain via Relay), yield (Aave v3 USDC)
+- Loyalty Season 0 with 7 action types
+- Non-custodial execution via ZeroDev session keys
+- Proactive daily yield reports and idle-fund nudges
+- P2P notification — recipients get notified when they receive a transfer
+
+### Next (6 months)
+- Multi-chain expansion (Base, Arbitrum, Polygon, Optimism) — chain config is already abstracted
+- Additional yield protocols (Benqi, Yearn) — adapter interface is pluggable
+- Onramp via MoonPay webhook (buy → watch deposit → auto-invest)
+- Proactive market intelligence — daily sentiment → personalized position suggestions
+- Mobile push notifications via Telegram channel
+
+### Later (12 months)
+- Agent-to-agent marketplace — third-party protocols publish Capability plugins
+- Institutional Aegis Guard — treasury management for DAOs and funds
+- Referral program with on-chain reward distribution
+
+---
+
+## Team
+
+Built by founders who have shipped production DeFi infrastructure and understand both the technical depth (hexagonal architecture, ERC-4337, cross-chain execution) and the consumer product challenge (Telegram-native UX, non-technical user flows, trust-first design).
+
+---
+
+## Ask
+
+We are raising a **pre-seed round** to:
+1. Expand the team (2 engineers, 1 growth)
+2. Cover protocol integration costs and ecosystem partnership deals
+3. Fund user acquisition through crypto communities and Telegram growth channels
+4. Scale infrastructure to 10x current user capacity
+
+**The architecture is built to scale. The moat is the user relationship. The timing is now.**
+
+---
+
+*Aegis — own your keys, not your complexity.*
