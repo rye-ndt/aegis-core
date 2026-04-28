@@ -15,13 +15,13 @@ export function buildDelegationPrompt(
   if (msg.type === ZERODEV_MESSAGE_TYPE.ERC20_SPEND) {
     const expiresDate = new Date(msg.validUntil * 1000).toISOString().split("T")[0];
     const symbol = display?.tokenSymbol ?? "tokens";
-    const amount = display?.amountHuman
-      ? `${display.amountHuman} ${symbol}`
-      : `${msg.valueLimit} ${symbol} (raw)`;
+    const amountStr = display?.amountHuman
+      ? `${display.amountHuman} *${symbol}*`
+      : `${msg.valueLimit} *${symbol}* (raw)`;
     return [
       "✨ *Enable instant auto-send*",
       "",
-      `Allow Aegis to send up to *${amount}* on your behalf, valid through ${expiresDate}.`,
+      `Allow Aegis to send up to ${amountStr} on your behalf, valid through ${expiresDate}.`,
       "Approve once — future sends of this token won't ask again.",
       "",
       "Tap the Aegis app to approve.",
@@ -43,18 +43,18 @@ export function buildConfirmationMessage(
   lines.push(`Protocol: ${manifest.protocolName}`);
 
   if (fromToken) {
-    lines.push(`From: ${fromToken.symbol} (${fromToken.name})`);
+    lines.push(`From: *${fromToken.symbol}* (${fromToken.name})`);
     lines.push(`  Address: \`${fromToken.address}\``);
     lines.push(`  Decimals: ${fromToken.decimals}`);
     const amountHuman = partialParams.amountHuman as string | undefined;
     if (amountHuman) {
       const raw = toRaw(amountHuman, fromToken.decimals);
-      lines.push(`  Amount: ${amountHuman} ${fromToken.symbol} (${raw} raw)`);
+      lines.push(`  Amount: ${amountHuman} *${fromToken.symbol}* (${raw} raw)`);
     }
   }
 
   if (toToken) {
-    lines.push(`To: ${toToken.symbol} (${toToken.name})`);
+    lines.push(`To: *${toToken.symbol}* (${toToken.name})`);
     lines.push(`  Address: \`${toToken.address}\``);
     lines.push(`  Decimals: ${toToken.decimals}`);
   }
@@ -79,7 +79,7 @@ export function buildDisambiguationPrompt(
   for (let i = 0; i < candidates.length; i++) {
     const t = candidates[i]!;
     const addr = t.address.slice(0, 6) + "..." + t.address.slice(-4);
-    lines.push(`${i + 1}. ${t.symbol} — ${t.name} — ${addr} (${t.decimals} decimals)`);
+    lines.push(`${i + 1}. *${t.symbol}* — ${t.name} — \`${addr}\` (${t.decimals} decimals)`);
   }
   lines.push("", "Reply with the number.");
   return lines.join("\n");

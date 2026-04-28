@@ -138,16 +138,16 @@ async function sendSuccessMessage(
       : shortenAddress(decoded.tokenAddress);
     const recipient = shortenAddress(decoded.recipient);
     text = [
-      "✅ *Transaction confirmed.*",
+      "*Transaction confirmed.*",
       "",
-      `You sent *${decoded.amountHuman} ${symbol}* to \`${recipient}\`.`,
+      `You sent *${decoded.amountHuman}* *${symbol}* to \`${recipient}\`.`,
     ].join("\n");
   } else if (txHash) {
-    text = "✅ Transaction submitted.";
+    text = "Transaction submitted.";
   } else {
     // No txHash → likely a manual-path resolution that didn't carry one. Keep
     // the legacy fallback so we never go silent.
-    text = "✅ Transaction submitted.";
+    text = "Transaction submitted.";
   }
 
   try {

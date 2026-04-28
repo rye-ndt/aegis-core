@@ -1,5 +1,24 @@
 # Capabilities Status
 
+## Delegation spend bookkeeping — 2026-04-28
+
+**What was done:**
+- `SigningRequestRecord` (cache): added optional `tokenAddress` + `amountRaw`. When present on a non-rejected `resolveRequest`, `signingRequest.usecase` calls `tokenDelegationDB.addSpent(userId, tokenAddress, amountRaw)` in a try/catch (logs `addSpent failed` on error; never breaks user-facing resolution).
+- `SigningRequestUseCaseImpl` constructor now takes an optional `ITokenDelegationDB`; wired in `assistant.di.ts::getSigningRequestUseCase`.
+- `Artifact.sign_calldata`: added optional `tokenAddress` + `amountRaw` (passed through by `telegram.ts` into the `SigningRequestRecord`). `sendCapability` autosign branch sets them from `fromToken.address.toLowerCase()` + `partialParams.amountRaw`.
+- `swapCapability.run`: only the **last** step's record carries `tokenAddress`/`amountRaw` (and only when `!fromToken.isNative`) — avoids double-counting approve + swap.
+- `yieldCapability.executeSignSteps`: new `spendAmountRaw?` param. When set, the last step's record is tagged. Deposits pass `plan.amountRaw`; withdrawals omit it (a withdrawal burns the protocol receipt token, it does not consume the user's underlying-token delegation).
+- `tokenDelegation.repo.upsertMany`: `onConflictDoUpdate` now preserves `spent_raw` when `limit_raw` is unchanged via `CASE WHEN ... THEN spent_raw ELSE '0' END`. Previous behavior reset to `'0'` on every re-grant, which wiped the FE permissions bar after every session refresh.
+
+**Why:**
+- `addSpent` was defined on the repo and interface but had **zero call sites** anywhere in the codebase. Capabilities only called `checkTokenDelegation` (a pre-flight read). The on-chain delegation enforced the limit, but `token_delegations.spent_raw` stayed at `'0'`, so `ConfigsTab.PermissionsSection`'s progress bar never moved despite real autosigned spends.
+- Per-step attribution would double-count multi-tx flows (approve + swap, approve + deposit). `TxStep` has no role marker and Relay's tx list doesn't either, so attributing only on the final step is the cleanest heuristic that doesn't require selector inspection.
+- Withdrawals don't consume the underlying-token delegation, so they intentionally skip `addSpent`.
+
+**New conventions:**
+- Capabilities that emit autosign signing-requests for ERC20 spends MUST set `tokenAddress` + `amountRaw` on the `SigningRequestRecord` (or the `sign_calldata` artifact) of the **single tx that actually moves the user's funds** — typically the last step of the sequence. Native-token paths leave both undefined.
+- Spend metadata fields on `SigningRequestRecord`: `tokenAddress` (lowercased ERC20 address), `amountRaw` (decimal string of the raw spend, matching the delegation's `limit_raw` units).
+
 ## /yield one-click UX parity with /swap — 2026-04-27
 
 **What was done:**

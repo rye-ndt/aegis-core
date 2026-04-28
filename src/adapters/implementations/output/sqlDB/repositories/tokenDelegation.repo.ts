@@ -37,7 +37,10 @@ export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
         target: [tokenDelegations.userId, tokenDelegations.tokenAddress],
         set: {
           limitRaw: sql`excluded.limit_raw`,
-          spentRaw: '0',
+          // Preserve existing spent_raw when the limit is unchanged so the
+          // FE permissions bar doesn't reset to zero on every re-grant. Only
+          // reset when the user actually raises (or lowers) their limit.
+          spentRaw: sql`CASE WHEN ${tokenDelegations.limitRaw} = excluded.limit_raw THEN ${tokenDelegations.spentRaw} ELSE '0' END`,
           validUntil: sql`excluded.valid_until`,
           updatedAtEpoch: sql`excluded.updated_at_epoch`,
         },

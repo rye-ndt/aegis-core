@@ -15,6 +15,12 @@ export type SigningRequestRecord = {
   recipientHandle?: string;
   amountFormatted?: string;
   tokenSymbol?: string;
+  // When set on a non-rejected resolution, signingRequest.usecase bumps
+  // token_delegations.spent_raw so the FE permissions bar reflects autosigned
+  // spend. Only attribute on the FINAL step of multi-step flows to avoid
+  // double-counting (approve + swap, approve + deposit).
+  tokenAddress?: string;
+  amountRaw?: string;
 };
 
 export interface ISigningRequestCache {

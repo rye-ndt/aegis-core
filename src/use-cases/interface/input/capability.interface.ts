@@ -90,6 +90,11 @@ export type Artifact =
       recipientHandle?: string;
       amountFormatted?: string;
       tokenSymbol?: string;
+      // Set on autosign artifacts where this tx consumes the user's token
+      // delegation, so the resolver can bump spent_raw on success. Skip on
+      // native sends, swaps' approval steps, etc.
+      tokenAddress?: string;
+      amountRaw?: string;
     }
   | { kind: "mini_app"; request: MiniAppRequest; promptText: string; buttonText: string; fallbackText?: string }
   | { kind: "llm_data"; data: unknown }

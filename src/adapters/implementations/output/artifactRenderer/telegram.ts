@@ -123,6 +123,8 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
                 recipientHandle: artifact.recipientHandle,
                 amountFormatted: artifact.amountFormatted,
                 tokenSymbol: artifact.tokenSymbol,
+                tokenAddress: artifact.tokenAddress,
+                amountRaw: artifact.amountRaw,
               };
               await this.signingRequestUseCase.create(record);
             }

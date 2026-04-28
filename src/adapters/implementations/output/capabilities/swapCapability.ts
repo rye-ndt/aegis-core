@@ -239,6 +239,10 @@ export class SwapCapability implements Capability<SwapParams> {
 
       // Persist to the signing-request cache so the mini-app's
       // `POST /response` → `resolveRequest` path can match by id.
+      // Attribute spend only on the final step (typically the swap call after
+      // an approve) to avoid double-counting against the delegation row.
+      const isLastStep = i === txs.length - 1;
+      const attributesSpend = isLastStep && !params.fromToken.isNative;
       const record: SigningRequestRecord = {
         id: requestId,
         userId: ctx.userId,
@@ -251,6 +255,10 @@ export class SwapCapability implements Capability<SwapParams> {
         createdAt: now,
         expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
         autoSign: true,
+        tokenAddress: attributesSpend
+          ? params.fromToken.address.toLowerCase()
+          : undefined,
+        amountRaw: attributesSpend ? params.amountRaw : undefined,
       };
       await this.deps.signingRequestUseCase.create(record);
 
@@ -723,8 +731,8 @@ export class SwapCapability implements Capability<SwapParams> {
     const lines = [
       header,
       "",
-      `From: ${params.amountHuman} ${params.fromToken.symbol} (chain ${params.fromChainId})`,
-      `To:   ~${out} ${params.toToken.symbol} (chain ${params.toChainId})`,
+      `From: ${params.amountHuman} *${params.fromToken.symbol}* (chain ${params.fromChainId})`,
+      `To:   ~${out} *${params.toToken.symbol}* (chain ${params.toChainId})`,
       `Steps: ${stepCount}`,
       "",
       stepCount === 1
@@ -743,10 +751,10 @@ export class SwapCapability implements Capability<SwapParams> {
       data.outputAmountFormatted ??
       (data.outputAmount ? `${data.outputAmount} raw` : "—");
     const lines = [
-      "✅ *Swap complete*",
+      "*Swap complete*",
       "",
-      `Sent:     ${params.amountHuman} ${params.fromToken.symbol}`,
-      `Received: ~${out} ${params.toToken.symbol}`,
+      `Sent:     ${params.amountHuman} *${params.fromToken.symbol}*`,
+      `Received: ~${out} *${params.toToken.symbol}*`,
     ];
     return lines.join("\n");
   }

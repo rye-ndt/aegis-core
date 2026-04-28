@@ -9,6 +9,7 @@ import type {
   ResolvedSigningRequest,
   SigningRequestRecord,
 } from "../interface/output/cache/signingRequest.cache";
+import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
 
 const log = createLogger("signingRequest");
 const POLL_INTERVAL_MS = 1500;
@@ -17,6 +18,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
   constructor(
     private readonly cache: ISigningRequestCache,
     private readonly onResolved: (event: SigningResolutionEvent) => void,
+    private readonly tokenDelegationDB?: ITokenDelegationDB,
   ) {}
 
   async create(record: SigningRequestRecord): Promise<void> {
@@ -63,6 +65,34 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       },
       "signing request resolved",
     );
+
+    if (
+      !rejected &&
+      this.tokenDelegationDB &&
+      record.tokenAddress &&
+      record.amountRaw
+    ) {
+      try {
+        await this.tokenDelegationDB.addSpent(
+          record.userId,
+          record.tokenAddress,
+          record.amountRaw,
+        );
+        log.debug(
+          {
+            step: "spent-recorded",
+            requestId: params.requestId,
+            userId: record.userId,
+          },
+          "delegation spent_raw incremented",
+        );
+      } catch (err) {
+        log.error(
+          { err, requestId: params.requestId, userId: record.userId },
+          "addSpent failed",
+        );
+      }
+    }
 
     this.onResolved({
       chatId: record.chatId,

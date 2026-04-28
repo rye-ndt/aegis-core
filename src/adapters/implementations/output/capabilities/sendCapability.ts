@@ -205,9 +205,18 @@ export class SendCapability implements Capability<SendParams> {
         log.info({ step: "auto-sign", userId: ctx.userId }, "delegation sufficient — pushing auto-sign request");
         await ctx.emit({
           kind: "chat",
-          text: "✅ Check the Aegis mini app to complete the transaction automatically.",
+          text: "Check the Aegis mini app to complete the transaction automatically.",
           parseMode: "Markdown",
         });
+        // partialParams.amountRaw is only set when the resolver populated it;
+        // for /send the amount typically arrives only as amountHuman, so compute
+        // the raw value from token decimals so the resolution path can attribute
+        // the spend to token_delegations.spent_raw.
+        const amountHumanStr = params.partialParams.amountHuman as string | undefined;
+        const partialRaw = params.partialParams.amountRaw as string | undefined;
+        const computedAmountRaw =
+          partialRaw ??
+          (amountHumanStr ? toRaw(amountHumanStr, fromToken.decimals) : undefined);
         await ctx.emit({
           kind: "sign_calldata",
           to: calldata.to,
@@ -217,8 +226,10 @@ export class SendCapability implements Capability<SendParams> {
           autoSign: true,
           recipientTelegramUserId: params.recipientTelegramUserId,
           recipientHandle: params.recipientHandle,
-          amountFormatted: params.partialParams.amountHuman as string | undefined,
+          amountFormatted: amountHumanStr,
           tokenSymbol: params.resolvedFrom?.symbol,
+          tokenAddress: fromToken.address.toLowerCase(),
+          amountRaw: computedAmountRaw,
         });
         if (this.command === INTENT_COMMAND.SEND) {
           void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);

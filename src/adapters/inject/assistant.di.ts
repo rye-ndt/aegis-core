@@ -26,6 +26,7 @@ import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pan
 import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
 import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
+import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
 import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
@@ -481,6 +482,7 @@ export class AssistantInject {
       this._signingRequestUseCase = new SigningRequestUseCaseImpl(
         new RedisSigningRequestCache(redis),
         onResolved,
+        this.getTokenDelegationRepo(),
       );
     }
     return this._signingRequestUseCase;
@@ -843,9 +845,16 @@ export class AssistantInject {
       const sqlDB = this.getSqlDB();
       const bot = this.getBot();
 
+      const llm = new OpenAIOrchestrator(
+        process.env.OPENAI_API_KEY ?? "",
+        process.env.OPENAI_MODEL ?? "gpt-4o",
+      );
+
       const sendReport = async (_userId: string, chatId: string, report: DailyReport): Promise<void> => {
         if (!bot) return;
-        const lines = ["📊 *Daily Yield Report*", ""];
+
+        type PositionSummary = { protocol: string; symbol: string; balance: string; delta: string; deltaPrefix: string };
+        const summaries: PositionSummary[] = [];
         for (const pos of report.positions) {
           const yieldCfg = getYieldConfig(pos.chainId);
           const stable = yieldCfg?.stablecoins.find(
@@ -855,16 +864,49 @@ export class AssistantInject {
           const { decimals, symbol } = stable;
           const balance = (Number(pos.balanceRaw) / Math.pow(10, decimals)).toFixed(4);
           const delta = (Number(pos.delta24hRaw) / Math.pow(10, decimals)).toFixed(4);
-          const pnl = (Number(pos.lifetimePnlRaw) / Math.pow(10, decimals)).toFixed(4);
           const deltaPrefix = Number(pos.delta24hRaw) >= 0 ? "+" : "";
-          lines.push(
-            `*${pos.protocolId}* — ${balance} ${symbol}`,
-            `  24h: ${deltaPrefix}${delta} ${symbol}`,
-            `  Lifetime PnL: ${pnl} ${symbol}`,
-            "",
-          );
+          summaries.push({ protocol: pos.protocolId, symbol, balance, delta, deltaPrefix });
         }
-        await bot.api.sendMessage(Number(chatId), lines.join("\n"), { parse_mode: "Markdown" });
+
+        if (summaries.length === 0) return;
+
+        const dataBlurb = summaries
+          .map((s) => `${s.protocol}: ${s.deltaPrefix}${s.delta} ${s.symbol} earned today, ${s.balance} ${s.symbol} total`)
+          .join("; ");
+
+        let message: string;
+        try {
+          const result = await llm.chat({
+            systemPrompt: [
+              "You are Aegis, a friendly onchain AI agent. Write a short, warm, conversational yield update for the user.",
+              "Rules:",
+              "- 2–4 sentences max. No lists, no markdown tables, no bullet points.",
+              "- Bold token symbols and protocol names using *asterisks* (Telegram Markdown).",
+              "- Mention the amount earned today and the total balance naturally in the prose.",
+              "- Keep a positive, encouraging tone — like a friend sharing good news.",
+              "- Do NOT start with 'Hey' or 'Hi'. Do NOT use emojis.",
+              "- End with a one-line forward-looking note (e.g. what they can do next or when to expect more).",
+            ].join("\n"),
+            conversationHistory: [
+              {
+                role: MESSAGE_ROLE.USER,
+                content: `Yield data: ${dataBlurb}`,
+              },
+            ],
+            availableTools: [],
+          });
+          message = result.text?.trim() ?? "";
+        } catch {
+          message = "";
+        }
+
+        if (!message) {
+          message = summaries
+            .map((s) => `*${s.protocol}* — earned ${s.deltaPrefix}${s.delta} *${s.symbol}* today · ${s.balance} *${s.symbol}* total`)
+            .join("\n");
+        }
+
+        await bot.api.sendMessage(Number(chatId), `📊 ${message}`, { parse_mode: "Markdown" });
       };
 
       this._yieldReportJob = new YieldReportJob(

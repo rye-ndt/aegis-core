@@ -147,6 +147,7 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       chainId: plan.chainId,
       protocolId: plan.protocolId,
       tokenAddress: plan.tokenAddress,
+      spendAmountRaw: plan.amountRaw,
       displayMeta,
       buttonText: "Execute Deposit",
       promptText:
@@ -245,6 +246,11 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
     chainId?: number;
     protocolId?: string;
     tokenAddress?: string;
+    // When set, the LAST step's signing-request record is tagged with
+    // tokenAddress + this amount so the resolver bumps spent_raw on success.
+    // Deposits set this; withdrawals leave it undefined (they don't consume
+    // the user's underlying-token delegation).
+    spendAmountRaw?: string;
     displayMeta?: YieldDisplayMeta;
     buttonText: string;
     promptText: string;
@@ -260,6 +266,7 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       chainId,
       protocolId,
       tokenAddress,
+      spendAmountRaw,
       displayMeta,
       buttonText,
       promptText,
@@ -275,6 +282,8 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       const label =
         steps.length === 1 ? labelPrefix : `${labelPrefix} step ${i + 1}/${steps.length}`;
 
+      const isLastStep = i === steps.length - 1;
+      const attributesSpend = isLastStep && !!spendAmountRaw && !!tokenAddress;
       const record: SigningRequestRecord = {
         id: requestId,
         userId: ctx.userId,
@@ -287,6 +296,8 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
         createdAt: now,
         expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
         autoSign: true,
+        tokenAddress: attributesSpend ? tokenAddress!.toLowerCase() : undefined,
+        amountRaw: attributesSpend ? spendAmountRaw : undefined,
       };
       await signingUseCase.create(record);
 
@@ -406,7 +417,7 @@ function buildDepositQuoteSummary(
 ): string {
   const lines = ["*Yield deposit quote*", ""];
   if (meta) {
-    lines.push(`Deposit: ${meta.amountHuman} ${meta.tokenSymbol}`);
+    lines.push(`Deposit: ${meta.amountHuman} *${meta.tokenSymbol}*`);
     lines.push(`Protocol: ${meta.protocolName} (chain ${plan.chainId})`);
     if (meta.expectedApy != null) {
       lines.push(`APY: ~${(meta.expectedApy * 100).toFixed(2)}%`);
@@ -430,7 +441,7 @@ function buildWithdrawQuoteSummary(
 ): string {
   const lines = ["*Yield withdrawal quote*", ""];
   if (meta) {
-    lines.push(`Withdraw: ${meta.amountHuman} ${meta.tokenSymbol}`);
+    lines.push(`Withdraw: ${meta.amountHuman} *${meta.tokenSymbol}*`);
     lines.push(`Protocol: ${meta.protocolName}`);
   }
   lines.push(`Steps: ${stepCount}`);
@@ -445,7 +456,7 @@ function buildWithdrawQuoteSummary(
 
 function buildDepositSuccessMessage(pct: number, txHashes: string[]): string {
   const lines = [
-    `✅ *Yield deposit complete* (${pct}% of idle USDC)`,
+    `*Yield deposit complete* (${pct}% of idle USDC)`,
     "",
     "*Transaction hashes*",
     ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
@@ -457,7 +468,7 @@ function buildDepositSuccessMessage(pct: number, txHashes: string[]): string {
 
 function buildWithdrawSuccessMessage(txHashes: string[]): string {
   const lines = [
-    "✅ *Withdrawal complete*",
+    "*Withdrawal complete*",
     "",
     "*Transaction hashes*",
     ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
