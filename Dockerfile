@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json tsconfig.json ./
-RUN npm ci --no-audit --no-fund && \
+RUN npm install --no-audit --no-fund && \
     npm i --no-save --no-audit --no-fund esbuild@0.24.0
 
 COPY src ./src
