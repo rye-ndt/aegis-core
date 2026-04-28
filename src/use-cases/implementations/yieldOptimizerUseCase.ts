@@ -17,6 +17,8 @@ import type {
 } from "../interface/yield/IYieldOptimizerUseCase";
 import { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import type { IChainReader } from "../interface/output/blockchain/chainReader.interface";
+import type { IPrincipalProvider } from "../interface/output/yield/IPrincipalProvider";
+import type { IYieldPositionDiscovery } from "../interface/output/yield/IYieldPositionDiscovery";
 import { createLogger } from "../../helpers/observability/logger";
 
 const log = createLogger("yieldOptimizer");
@@ -73,6 +75,8 @@ export interface YieldOptimizerDeps {
   redis: Redis;
   nudgeCooldownSec: number;
   idleThresholdUsd: number;
+  principalProvider: IPrincipalProvider;
+  positionDiscovery: IYieldPositionDiscovery;
   /** Called by scanIdleForUser to emit the nudge Telegram message */
   sendNudge: (userId: string, chatId: string, apy: number, bestProtocolId: YIELD_PROTOCOL_ID) => Promise<void>;
 }
@@ -222,9 +226,6 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     await this.deps.sendNudge(userId, profile.telegramChatId, best.apy, best.protocolId);
 
     await this.deps.redis.set(cooldownKey, "1", "EX", this.deps.nudgeCooldownSec);
-    // Pending TTL tracks the same cadence as the cooldown — a longer pending lock
-    // would suppress nudges across multiple scan cycles even after the cooldown
-    // expires. Capability clears this key on deposit start (see buildDepositPlan).
     await this.deps.redis.set(pendingKey, "1", "EX", this.deps.nudgeCooldownSec);
 
     return { skipped: false };
@@ -262,20 +263,9 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
       amountRaw: depositAmount,
     });
 
-    const depositId = await this.deps.yieldRepo.recordDeposit({
-      userId,
-      chainId,
-      protocolId: best.protocolId,
-      tokenAddress: stablecoin.address,
-      amountRaw: depositAmount.toString(),
-      requestedPct: pct,
-      idleAtRequestRaw: balance.toString(),
-    });
-
     await this.deps.redis.del(redisKeyNudgePending(userId));
 
     return {
-      depositId,
       txSteps,
       protocolId: best.protocolId,
       tokenAddress: stablecoin.address,
@@ -285,32 +275,23 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     };
   }
 
-  async finalizeDeposit(userId: string, depositId: string, txHash: string): Promise<void> {
-    await this.deps.yieldRepo.updateDepositStatus(depositId, "confirmed", txHash);
+  async finalizeDeposit(userId: string, txHash: string): Promise<void> {
+    const profile = await this.deps.userProfileRepo.findByUserId(userId);
+    if (!profile?.smartAccountAddress) return;
+    const userAddress = profile.smartAccountAddress as Address;
 
-    const positions = await this.deps.yieldRepo.listActiveProtocols(userId);
-    for (const pos of positions) {
-      const adapter = this.deps.protocolRegistry.get(
-        pos.protocolId as YIELD_PROTOCOL_ID,
-        pos.chainId,
-      );
-      if (!adapter) continue;
+    const chainId = getEnabledYieldChains()[0];
+    if (!chainId) return;
 
-      const profile = await this.deps.userProfileRepo.findByUserId(userId);
-      if (!profile?.smartAccountAddress) continue;
-
-      const position = await adapter.getUserPosition(
-        profile.smartAccountAddress as Address,
-        pos.tokenAddress as Address,
-      );
-      if (!position) continue;
-
-      const principalRaw = await this.deps.yieldRepo.getPrincipalRaw(
-        userId,
-        pos.chainId,
-        pos.protocolId,
-        pos.tokenAddress,
-      );
+    const discovered = await this.deps.positionDiscovery.discover(chainId, userAddress);
+    for (const pos of discovered) {
+      const principalFromProvider = await this.deps.principalProvider.getPrincipalRaw({
+        userAddress,
+        chainId,
+        protocolId: pos.protocolId,
+        tokenAddress: pos.tokenAddress,
+      });
+      const principalRaw = (principalFromProvider ?? pos.balanceRaw).toString();
 
       await this.deps.yieldRepo.upsertSnapshot({
         userId,
@@ -318,11 +299,13 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
         protocolId: pos.protocolId,
         tokenAddress: pos.tokenAddress,
         snapshotDateUtc: todayUtc(),
-        balanceRaw: position.balanceRaw.toString(),
+        balanceRaw: pos.balanceRaw.toString(),
         principalRaw,
         snapshotAtEpoch: newCurrentUTCEpoch(),
       });
     }
+
+    log.info({ step: "finalize-deposit-snapshot-written", userId, txHash }, "deposit snapshot updated");
   }
 
   async buildWithdrawAllPlan(userId: string): Promise<WithdrawPlan | null> {
@@ -330,35 +313,29 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     if (!profile?.smartAccountAddress) return null;
     const userAddress = profile.smartAccountAddress as Address;
 
-    const positions = await this.deps.yieldRepo.listActiveProtocols(userId);
+    const chainId = getEnabledYieldChains()[0];
+    if (!chainId) return null;
+
+    const positions = await this.deps.positionDiscovery.discover(chainId, userAddress);
     if (positions.length === 0) return null;
 
     const allSteps = [];
     const withdrawals: WithdrawPlan["withdrawals"] = [];
 
     for (const pos of positions) {
-      const adapter = this.deps.protocolRegistry.get(
-        pos.protocolId as YIELD_PROTOCOL_ID,
-        pos.chainId,
-      );
+      const adapter = this.deps.protocolRegistry.get(pos.protocolId, pos.chainId);
       if (!adapter) continue;
-
-      const position = await adapter.getUserPosition(
-        userAddress,
-        pos.tokenAddress as Address,
-      );
-      if (!position || position.balanceRaw === 0n) continue;
 
       const steps = await adapter.buildWithdrawAllTx({
         user: userAddress,
-        token: pos.tokenAddress as Address,
+        token: pos.tokenAddress,
       });
       allSteps.push(...steps);
       withdrawals.push({
-        protocolId: pos.protocolId as YIELD_PROTOCOL_ID,
+        protocolId: pos.protocolId,
         tokenAddress: pos.tokenAddress,
         chainId: pos.chainId,
-        balanceRaw: position.balanceRaw.toString(),
+        balanceRaw: pos.balanceRaw.toString(),
       });
     }
 
@@ -368,23 +345,16 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
   }
 
   async finalizeWithdrawal(
-    userId: string,
-    withdrawals: Array<{
+    _userId: string,
+    _withdrawals: Array<{
       chainId: number;
       protocolId: YIELD_PROTOCOL_ID;
       tokenAddress: string;
       amountRaw: string;
     }>,
   ): Promise<void> {
-    for (const w of withdrawals) {
-      await this.deps.yieldRepo.recordWithdrawal({
-        userId,
-        chainId: w.chainId,
-        protocolId: w.protocolId,
-        tokenAddress: w.tokenAddress,
-        amountRaw: w.amountRaw,
-      });
-    }
+    // On-chain probe + subgraph reflect the new state on the next read.
+    // No DB bookkeeping required.
   }
 
   async getPositions(userId: string): Promise<PositionsView> {
@@ -400,89 +370,75 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     }
     const userAddress = profile.smartAccountAddress as Address;
 
-    const activeProtocols = await this.deps.yieldRepo.listActiveProtocols(userId);
-    if (activeProtocols.length === 0) {
-      return { positions: [], totals: emptyTotals };
-    }
+    const chainId = getEnabledYieldChains()[0];
+    if (!chainId) return { positions: [], totals: emptyTotals };
+
+    const discovered = await this.deps.positionDiscovery.discover(chainId, userAddress);
+    if (discovered.length === 0) return { positions: [], totals: emptyTotals };
 
     const yesterday = yesterdayUtc();
     const yesterdayEpoch = Math.floor(new Date(`${yesterday}T00:00:00Z`).getTime() / 1000);
     const snapshots = await this.deps.yieldRepo.listSnapshots(userId, yesterdayEpoch - 1);
 
+    const cfg = getYieldConfig(chainId)!;
     const views: PositionView[] = [];
     let totalPrincipalRaw = 0n;
     let totalCurrentRaw = 0n;
-    // Assume a single stablecoin (USDC, 6 decimals) — matches current multi-stablecoin
-    // scope. If multi-stablecoin lands, totals need per-symbol grouping or USD-normalisation.
     let totalsDecimals = 6;
 
-    for (const pos of activeProtocols) {
-      const adapter = this.deps.protocolRegistry.get(
-        pos.protocolId as YIELD_PROTOCOL_ID,
-        pos.chainId,
-      );
-      if (!adapter) continue;
-
-      const yieldCfg = getYieldConfig(pos.chainId);
-      const stable = yieldCfg?.stablecoins.find(
+    for (const pos of discovered) {
+      const stable = cfg.stablecoins.find(
         (s) => s.address.toLowerCase() === pos.tokenAddress.toLowerCase(),
       );
       if (!stable) continue;
       totalsDecimals = stable.decimals;
 
-      let balanceRaw = 0n;
-      try {
-        const position = await adapter.getUserPosition(userAddress, pos.tokenAddress as Address);
-        balanceRaw = position?.balanceRaw ?? 0n;
-      } catch (err) {
-        log.error({ err, protocolId: pos.protocolId }, "getUserPosition failed");
-        continue;
-      }
+      const balanceRaw = pos.balanceRaw;
 
-      const principalStr = await this.deps.yieldRepo.getPrincipalRaw(
-        userId,
-        pos.chainId,
-        pos.protocolId,
-        pos.tokenAddress,
-      );
-      const principalRaw = BigInt(principalStr);
+      const principalFromProvider = await this.deps.principalProvider.getPrincipalRaw({
+        userAddress,
+        chainId,
+        protocolId: pos.protocolId,
+        tokenAddress: pos.tokenAddress,
+      });
+      const principalRaw = principalFromProvider ?? balanceRaw;
 
-      const yesterdaySnapshot = snapshots.find(
+      const ySnap = snapshots.find(
         (s) =>
           s.protocolId === pos.protocolId &&
-          s.chainId === pos.chainId &&
           s.tokenAddress === pos.tokenAddress &&
           s.snapshotDateUtc === yesterday,
       );
-      // Skip fully-exited positions: deposit rows stay "confirmed" after /withdraw,
-      // so listActiveProtocols keeps returning them with balance=0, principal=0.
-      if (balanceRaw === 0n && principalRaw === 0n) continue;
+      if (!ySnap) {
+        log.warn(
+          { step: "snapshot-missing", userId, protocolId: pos.protocolId, chainId, tokenAddress: pos.tokenAddress },
+          "falling-back-to-zero-24h-delta",
+        );
+      }
+      const prevBalance = ySnap ? BigInt(ySnap.balanceRaw) : balanceRaw;
 
-      const prevBalance = yesterdaySnapshot ? BigInt(yesterdaySnapshot.balanceRaw) : balanceRaw;
-      const delta24h = balanceRaw - prevBalance;
-      const lifetimePnl = balanceRaw - principalRaw;
-
+      const adapter = this.deps.protocolRegistry.get(pos.protocolId, chainId);
       let apy = 0;
-      try {
-        const status = await adapter.getPoolStatus(pos.tokenAddress as Address);
-        apy = status.supplyApy;
-      } catch (err) {
-        log.error({ err, protocolId: pos.protocolId }, "getPoolStatus failed");
+      if (adapter) {
+        try {
+          apy = (await adapter.getPoolStatus(pos.tokenAddress)).supplyApy;
+        } catch (err) {
+          log.error({ err, protocolId: pos.protocolId }, "getPoolStatus failed");
+        }
       }
 
       totalPrincipalRaw += principalRaw;
       totalCurrentRaw += balanceRaw;
 
       views.push({
-        protocolId: pos.protocolId as YIELD_PROTOCOL_ID,
-        protocolName:
-          PROTOCOL_DISPLAY_NAMES[pos.protocolId as YIELD_PROTOCOL_ID] ?? pos.protocolId,
-        chainId: pos.chainId,
+        protocolId: pos.protocolId,
+        protocolName: PROTOCOL_DISPLAY_NAMES[pos.protocolId] ?? pos.protocolId,
+        chainId,
         tokenSymbol: stable.symbol,
         principalHuman: formatUnsigned(principalRaw, stable.decimals),
         currentValueHuman: formatUnsigned(balanceRaw, stable.decimals),
-        pnlHuman: formatSigned(lifetimePnl, stable.decimals),
-        pnl24hHuman: formatSigned(delta24h, stable.decimals),
+        pnlHuman: formatSigned(balanceRaw - principalRaw, stable.decimals),
+        pnl24hHuman: formatSigned(balanceRaw - prevBalance, stable.decimals),
         apy,
       });
     }
@@ -502,12 +458,15 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
   }
 
   async buildDailyReport(userId: string): Promise<DailyReport | null> {
-    const positions = await this.deps.yieldRepo.listActiveProtocols(userId);
-    if (positions.length === 0) return null;
-
     const profile = await this.deps.userProfileRepo.findByUserId(userId);
     if (!profile?.smartAccountAddress) return null;
     const userAddress = profile.smartAccountAddress as Address;
+
+    const chainId = getEnabledYieldChains()[0];
+    if (!chainId) return null;
+
+    const positions = await this.deps.positionDiscovery.discover(chainId, userAddress);
+    if (positions.length === 0) return null;
 
     const yesterday = yesterdayUtc();
     const yesterdayEpoch = Math.floor(new Date(`${yesterday}T00:00:00Z`).getTime() / 1000);
@@ -516,16 +475,7 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
     const reportPositions: DailyReport["positions"] = [];
 
     for (const pos of positions) {
-      const adapter = this.deps.protocolRegistry.get(
-        pos.protocolId as YIELD_PROTOCOL_ID,
-        pos.chainId,
-      );
-      if (!adapter) continue;
-
-      const position = await adapter.getUserPosition(userAddress, pos.tokenAddress as Address);
-      if (!position) continue;
-
-      const currentBalance = position.balanceRaw;
+      const currentBalance = pos.balanceRaw;
 
       const yesterdaySnapshot = snapshots.find(
         (s) =>
@@ -535,19 +485,27 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
           s.snapshotDateUtc === yesterday,
       );
 
+      if (!yesterdaySnapshot) {
+        log.warn(
+          { step: "snapshot-missing", userId, protocolId: pos.protocolId, chainId, tokenAddress: pos.tokenAddress },
+          "falling-back-to-zero-24h-delta",
+        );
+      }
+
       const prevBalance = yesterdaySnapshot ? BigInt(yesterdaySnapshot.balanceRaw) : 0n;
       const delta24h = currentBalance - prevBalance;
 
-      const principalRaw = await this.deps.yieldRepo.getPrincipalRaw(
-        userId,
-        pos.chainId,
-        pos.protocolId,
-        pos.tokenAddress,
-      );
+      const principalFromProvider = await this.deps.principalProvider.getPrincipalRaw({
+        userAddress,
+        chainId,
+        protocolId: pos.protocolId,
+        tokenAddress: pos.tokenAddress,
+      });
+      const principalRaw = (principalFromProvider ?? currentBalance).toString();
       const lifetimePnl = currentBalance - BigInt(principalRaw);
 
       reportPositions.push({
-        protocolId: pos.protocolId as YIELD_PROTOCOL_ID,
+        protocolId: pos.protocolId,
         tokenAddress: pos.tokenAddress,
         chainId: pos.chainId,
         balanceRaw: currentBalance.toString(),

@@ -7,7 +7,6 @@ export interface ScanResult {
 }
 
 export interface DepositPlan {
-  depositId: string;
   txSteps: TxStep[];
   protocolId: YIELD_PROTOCOL_ID;
   tokenAddress: string;
@@ -65,7 +64,7 @@ export interface IYieldOptimizerUseCase {
   runPoolScan(): Promise<void>;
   scanIdleForUser(userId: string): Promise<ScanResult>;
   buildDepositPlan(userId: string, pct: number): Promise<DepositPlan | null>;
-  finalizeDeposit(userId: string, depositId: string, txHash: string): Promise<void>;
+  finalizeDeposit(userId: string, txHash: string): Promise<void>;
   buildWithdrawAllPlan(userId: string): Promise<WithdrawPlan | null>;
   finalizeWithdrawal(
     userId: string,

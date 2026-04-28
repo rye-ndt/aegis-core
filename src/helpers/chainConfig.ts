@@ -13,7 +13,13 @@ import { YIELD_ENV } from "./env/yieldEnv";
 import { YIELD_PROTOCOL_ID } from "./enums/yieldProtocolId.enum";
 
 interface YieldChainConfig {
-  stablecoins: Array<{ symbol: string; address: Address; decimals: number }>;
+  stablecoins: Array<{
+    symbol: string;
+    address: Address;
+    decimals: number;
+    /** Aave V3 aToken address for this reserve — used as the Messari subgraph `market` id. */
+    aTokenAddress?: Address;
+  }>;
   protocols: YIELD_PROTOCOL_ID[];
   aave?: { poolAddress: Address; dataProviderAddress: Address };
 }
@@ -36,6 +42,8 @@ interface ChainEntry {
    * shortcuts ("$5" → USDC) so the resolver can skip token disambiguation.
    */
   usdcEnvKey?: string;
+  /** Ankr Advanced API blockchain slug for `ankr_getAccountBalance`. Absent means unsupported. */
+  ankrBlockchain?: string;
   yield?: YieldChainConfig;
 }
 
@@ -53,6 +61,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["fuji", "avalanche-fuji"],
     relayEnabled: false,
     usdcEnvKey: "FUJI_USDC",
+    // ankrBlockchain intentionally absent — Fuji not supported by Ankr balance API
   },
   43114: {
     chain: avalanche,
@@ -67,12 +76,15 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["avalanche", "avax"],
     relayEnabled: true,
     usdcEnvKey: "AVAX_USDC",
+    ankrBlockchain: "avalanche",
     yield: {
       stablecoins: [
         {
           symbol: "USDC",
           address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E" as Address,
           decimals: 6,
+          // aUSDC v3 on Avalanche — Aave V3 Messari subgraph market id
+          aTokenAddress: "0x625E7708f30cA75bfd92586e17077590C60eb4cD" as Address,
         },
       ],
       protocols: [YIELD_PROTOCOL_ID.AAVE_V3],
@@ -95,6 +107,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["ethereum", "eth", "mainnet"],
     relayEnabled: true,
     usdcEnvKey: "ETH_USDC",
+    ankrBlockchain: "eth",
   },
   8453: {
     chain: base,
@@ -109,6 +122,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["base"],
     relayEnabled: true,
     usdcEnvKey: "BASE_USDC",
+    ankrBlockchain: "base",
   },
   137: {
     chain: polygon,
@@ -123,6 +137,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["polygon", "matic"],
     relayEnabled: true,
     usdcEnvKey: "POLYGON_USDC",
+    ankrBlockchain: "polygon",
   },
   42161: {
     chain: arbitrum,
@@ -137,6 +152,7 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["arbitrum", "arb", "arbitrum-one"],
     relayEnabled: true,
     usdcEnvKey: "ARB_USDC",
+    ankrBlockchain: "arbitrum",
   },
   10: {
     chain: optimism,
@@ -151,8 +167,28 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     aliases: ["optimism", "op"],
     relayEnabled: true,
     usdcEnvKey: "OP_USDC",
+    ankrBlockchain: "optimism",
   },
 };
+
+/**
+ * Returns the Messari Aave V3 subgraph `market` id for a given reserve token.
+ * For Aave V3, the market id is the aToken address (lowercased).
+ * Returns null if the chain/token combination is not configured.
+ */
+export function getAaveMarketId(chainId: number, tokenAddress: Address): string | null {
+  const yieldCfg = CHAIN_REGISTRY[chainId]?.yield;
+  if (!yieldCfg) return null;
+  const stable = yieldCfg.stablecoins.find(
+    (s) => s.address.toLowerCase() === tokenAddress.toLowerCase(),
+  );
+  return stable?.aTokenAddress?.toLowerCase() ?? null;
+}
+
+/** Returns the Ankr `blockchain` slug for `ankr_getAccountBalance`, or null if unsupported. */
+export function getAnkrBlockchain(chainId: number): string | null {
+  return CHAIN_REGISTRY[chainId]?.ankrBlockchain ?? null;
+}
 
 export function getYieldConfig(chainId: number): YieldChainConfig | null {
   return CHAIN_REGISTRY[chainId]?.yield ?? null;

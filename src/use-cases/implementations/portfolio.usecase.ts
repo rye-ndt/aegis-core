@@ -1,14 +1,18 @@
+import { createLogger } from '../../helpers/observability/logger';
 import type { IPortfolioUseCase, PortfolioResult, WalletInfo } from '../interface/input/portfolio.interface';
 import type { ITokenRecord } from '../interface/output/repository/tokenRegistry.repo';
 import type { IUserProfileDB } from '../interface/output/repository/userProfile.repo';
 import type { ITokenRegistryService } from '../interface/output/tokenRegistry.interface';
-import type { IChainReader } from '../interface/output/blockchain/chainReader.interface';
+import type { IBalanceProvider } from '../interface/output/blockchain/balanceProvider.interface';
+
+const log = createLogger("portfolioUseCase");
 
 export class PortfolioUseCaseImpl implements IPortfolioUseCase {
   constructor(
     private readonly userProfileDB: IUserProfileDB,
     private readonly tokenRegistryService: ITokenRegistryService,
-    private readonly chainReader: IChainReader,
+    private readonly balanceProvider: IBalanceProvider,
+    private readonly fallbackProvider: IBalanceProvider,
     private readonly chainId: number,
   ) {}
 
@@ -16,25 +20,26 @@ export class PortfolioUseCaseImpl implements IPortfolioUseCase {
     const profile = await this.userProfileDB.findByUserId(userId);
     if (!profile?.smartAccountAddress) return null;
 
-    const scaAddress = profile.smartAccountAddress as `0x${string}`;
-    const tokens = await this.tokenRegistryService.listByChain(this.chainId);
+    const sca = profile.smartAccountAddress as `0x${string}`;
 
-    const balances = await Promise.all(
-      tokens.map(async (token) => {
-        const rawBalance = await (token.isNative
-          ? this.chainReader.getNativeBalance(scaAddress)
-          : this.chainReader.getErc20Balance(token.address as `0x${string}`, scaAddress)
-        ).catch(() => 0n);
-        return {
-          symbol: token.symbol,
-          address: token.address,
-          decimals: token.decimals,
-          balance: (Number(rawBalance) / 10 ** token.decimals).toFixed(6),
-        };
-      }),
-    );
+    let balances;
+    try {
+      balances = await this.balanceProvider.getBalances(this.chainId, sca);
+    } catch (err) {
+      log.warn({ err, chainId: this.chainId, step: "fallback" }, "primary-provider-failed");
+      balances = await this.fallbackProvider.getBalances(this.chainId, sca);
+    }
 
-    return { smartAccountAddress: profile.smartAccountAddress, balances };
+    return {
+      smartAccountAddress: profile.smartAccountAddress,
+      balances: balances.map((b) => ({
+        symbol: b.symbol,
+        address: b.address,
+        decimals: b.decimals,
+        balance: b.balance,
+        usdValue: b.usdValue,
+      })),
+    };
   }
 
   async getWalletInfo(userId: string): Promise<WalletInfo | null> {

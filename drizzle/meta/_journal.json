@@ -183,6 +183,13 @@
       "when": 1777281509892,
       "tag": "0025_oval_shaman",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1777341939281,
+      "tag": "0026_stale_mandrill",
+      "breakpoints": true
     }
   ]
 }

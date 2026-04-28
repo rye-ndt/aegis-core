@@ -7,6 +7,8 @@ import { createLogger } from "../../../../helpers/observability/logger";
 const log = createLogger("yieldReportJob");
 const DEFAULT_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const REPORT_DONE_TTL_SEC = 25 * 60 * 60;
+// 30 days — users with no snapshot in the last 30 days are excluded from daily reports
+const RECENT_SNAPSHOT_WINDOW_SEC = 30 * 24 * 60 * 60;
 
 export class YieldReportJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -70,7 +72,9 @@ export class YieldReportJob {
       "sending yield reports",
     );
 
-    const userIds = await this.yieldRepo.listUsersWithPositions();
+    const sinceEpoch = Math.floor(Date.now() / 1000) - RECENT_SNAPSHOT_WINDOW_SEC;
+    const userIds = await this.yieldRepo.listUsersWithRecentSnapshots(sinceEpoch);
+
     for (const userId of userIds) {
       try {
         const report: DailyReport | null = await this.optimizer.buildDailyReport(userId);

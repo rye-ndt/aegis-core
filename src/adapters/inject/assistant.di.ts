@@ -87,6 +87,8 @@ import { AaveV3Adapter } from "../implementations/output/yield/aaveV3Adapter";
 import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
 import { YieldPoolRanker } from "../../use-cases/implementations/yieldPoolRanker";
 import { YieldOptimizerUseCase } from "../../use-cases/implementations/yieldOptimizerUseCase";
+import { OnChainPositionDiscovery } from "../implementations/output/yield/onChainPositionDiscovery";
+import { SubgraphPrincipalProvider } from "../implementations/output/yield/subgraphPrincipalProvider";
 import type { IYieldOptimizerUseCase } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { IYieldRepository } from "../../use-cases/interface/yield/IYieldRepository";
 import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
@@ -102,6 +104,11 @@ import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCa
 import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
 import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
 import { RecipientNotificationUseCase } from "../../use-cases/implementations/recipientNotification.useCase";
+import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
+import { RpcBalanceProvider } from "../implementations/output/balance/rpcBalanceProvider";
+import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
+import type { IBalanceProvider } from "../../use-cases/interface/output/blockchain/balanceProvider.interface";
+import { getAnkrBlockchain } from "../../helpers/chainConfig";
 
 const log = createLogger("assistantDI");
 
@@ -149,6 +156,8 @@ export class AssistantInject {
   private _yieldReportJob: YieldReportJob | null = null;
   private _loyaltyUseCase: ILoyaltyUseCase | null = null;
   private _recipientNotificationUseCase: RecipientNotificationUseCase | null = null;
+  private _balanceProvider: IBalanceProvider | null = null;
+  private _fallbackProvider: IBalanceProvider | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -327,17 +336,17 @@ export class AssistantInject {
 
       const chainId = this.getChainId();
       const intentUseCase = this.getIntentUseCase();
-      const tokenRegistryService = this.getTokenRegistryService();
-      const viemClient = this.getViemClient();
       const userProfileDB = sqlDB.userProfiles;
       const userProfileCache = this.getUserProfileCache();
+      const balanceProvider = this.getBalanceProvider();
+      const fallbackProvider = this.getFallbackProvider();
 
       const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
 
         r.register(new WebSearchTool(webSearchService));
         r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
-        r.register(new GetPortfolioTool(userId, userProfileDB, tokenRegistryService, viemClient, chainId, userProfileCache));
+        r.register(new GetPortfolioTool(userId, userProfileDB, balanceProvider, fallbackProvider, chainId, userProfileCache));
 
         for (const tool of this.getSystemToolProvider().getTools(userId, conversationId)) {
           r.register(tool);
@@ -489,12 +498,40 @@ export class AssistantInject {
     return this._resolverEngine;
   }
 
+  getFallbackProvider(): IBalanceProvider {
+    if (!this._fallbackProvider) {
+      this._fallbackProvider = new RpcBalanceProvider(
+        this.getViemClient(),
+        this.getTokenRegistryService(),
+      );
+    }
+    return this._fallbackProvider;
+  }
+
+  getBalanceProvider(): IBalanceProvider {
+    if (!this._balanceProvider) {
+      const ankrApiKey = process.env.ANKR_API_KEY;
+      const portfolioProvider = process.env.PORTFOLIO_PROVIDER ?? "rpc";
+      const chainId = this.getChainId();
+      const hasAnkrChain = getAnkrBlockchain(chainId) != null;
+
+      if (portfolioProvider === "ankr" && hasAnkrChain) {
+        const ankr = new AnkrBalanceProvider({ apiKey: ankrApiKey });
+        this._balanceProvider = new CachedBalanceProvider(ankr, 30_000);
+      } else {
+        this._balanceProvider = this.getFallbackProvider();
+      }
+    }
+    return this._balanceProvider;
+  }
+
   getPortfolioUseCase(): IPortfolioUseCase {
     if (!this._portfolioUseCase) {
       this._portfolioUseCase = new PortfolioUseCaseImpl(
         this.getSqlDB().userProfiles,
         this.getTokenRegistryService(),
-        this.getViemClient(),
+        this.getBalanceProvider(),
+        this.getFallbackProvider(),
         this.getChainId(),
       );
     }
@@ -758,8 +795,9 @@ export class AssistantInject {
         );
       };
 
+      const protocolRegistry = this.getYieldProtocolRegistry();
       this._yieldOptimizerUseCase = new YieldOptimizerUseCase({
-        protocolRegistry: this.getYieldProtocolRegistry(),
+        protocolRegistry,
         ranker: new YieldPoolRanker(),
         yieldRepo: this.getYieldRepo(),
         userProfileRepo: sqlDB.userProfiles,
@@ -767,6 +805,8 @@ export class AssistantInject {
         redis,
         nudgeCooldownSec: YIELD_ENV.nudgeCooldownSec,
         idleThresholdUsd: YIELD_ENV.idleUsdcThresholdUsd,
+        principalProvider: new SubgraphPrincipalProvider(YIELD_ENV.theGraphApiKey),
+        positionDiscovery: new OnChainPositionDiscovery({ protocolRegistry }),
         sendNudge,
       });
     }

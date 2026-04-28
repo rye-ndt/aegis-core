@@ -159,7 +159,7 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
 
     const txHash = result.txHashes[result.txHashes.length - 1];
     if (txHash) {
-      await this.deps.optimizer.finalizeDeposit(ctx.userId, plan.depositId, txHash);
+      await this.deps.optimizer.finalizeDeposit(ctx.userId, txHash);
       const usdValue = stablecoin
         ? Number(BigInt(plan.amountRaw)) / Math.pow(10, stablecoin.decimals)
         : undefined;

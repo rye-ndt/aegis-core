@@ -227,7 +227,7 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `http_query_tools` + `http_query_tool_headers` | Developer HTTP tools (encrypted headers) |
 | `user_preferences` | `aegisGuardEnabled` |
 | `token_delegations` | `limitRaw`, `spentRaw`, `validUntil` per token |
-| `yield_deposits`, `yield_withdrawals`, `yield_position_snapshots` | Yield positions |
+| `yield_position_snapshots` | Yield positions (snapshots only — deposits/withdrawals tables dropped 2026-04-28) |
 | `loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger` | Loyalty (DESC index on `points_raw`) |
 
 ## Redis key schema
@@ -283,6 +283,7 @@ Auth gate first; fiat shortcuts (`$5`, `N usdc`) auto-inject USDC if no `fromTok
 | `YIELD_REPORT_UTC_HOUR` | `9` | Daily report hour UTC |
 | `YIELD_NUDGE_COOLDOWN_SEC` | `1800` (30 min) | Cooldown between nudges; also TTL on `yield:nudge_pending` |
 | `YIELD_ENABLED_CHAIN_IDS` | `43114` | Comma-separated |
+| `THEGRAPH_API_KEY` | — | The Graph API key for Messari Aave V3 subgraph principal queries (deployment `72Cez54APnySAn6h8MswzYkwaL9KjvuuKnKArnPJ8yxb`). Absent → `principalProvider.getPrincipalRaw` returns `null` → PnL shows 0 until subgraph resolves. |
 | `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS` | `60000` | |
 | `LOYALTY_LEADERBOARD_CACHE_TTL_MS` | `30000` | |
 | `LOYALTY_LEADERBOARD_DEFAULT_LIMIT`, `_MAX_LIMIT` | `100` / `1000` | |
@@ -571,6 +572,60 @@ End-to-end smoke: send any message to the Telegram bot.
 - `GET /permissions?public_key=` — require Privy; 403 if caller's `smartAccountAddress` ≠ queried `public_key`.
 - `GET /request/:requestId` (no `?after=`) — `auth`-type requests remain public (bootstrap); all other types (`sign`, `approve`, `onramp`) require Privy + ownership (`request.userId === caller`).
 - Approach: `requireAdmin(req, res)` helper injected with `IUserDB` (new optional constructor param on `HttpApiServer`). No schema change, no new ports.
+
+## Ankr-backed portfolio balance provider — 2026-04-28
+
+**What:** Replaced the per-token RPC loop in `PortfolioUseCaseImpl.getPortfolio` and `GetPortfolioTool` with a swappable `IBalanceProvider` port. Two adapters: `AnkrBalanceProvider` (single HTTP call, returns only non-zero balances + USD values) and `RpcBalanceProvider` (wraps existing `tokenRegistry` + `chainReader` loop, zero-balance filtered). A `CachedBalanceProvider` decorator wraps the Ankr adapter with a 30s in-memory TTL. Feature-flagged via `PORTFOLIO_PROVIDER=ankr|rpc` (default `ankr`; falls back to `rpc` automatically on Ankr failure or for chains without an `ankrBlockchain` mapping).
+
+**Why:** The registry-driven RPC loop returns every registered token regardless of balance — the portfolio panel showed zero-balance dust tokens and never surfaced actual holdings. Ankr's `ankr_getAccountBalance` returns only assets the wallet holds, with USD values in one HTTP call.
+
+**New files:**
+- `use-cases/interface/output/blockchain/balanceProvider.interface.ts` — `IBalanceProvider` port + `ProviderBalance` type
+- `adapters/implementations/output/balance/ankrBalanceProvider.ts`
+- `adapters/implementations/output/balance/rpcBalanceProvider.ts`
+- `adapters/implementations/output/balance/cachedBalanceProvider.ts`
+
+**Conventions introduced:**
+- `IBalanceProvider.getBalances(chainId, address)` is the canonical port for portfolio balances. New chains should set `ankrBlockchain` in `CHAIN_REGISTRY`; absent means Ankr unsupported (falls back to RPC automatically).
+- `PORTFOLIO_PROVIDER=ankr` (default) routes through Ankr; set to `rpc` to force the registry-loop path.
+- Zero-balance filtering is now provider-side, not consumer-side — `IBalanceProvider` implementations MUST omit zero-balance entries.
+- `usdValue?: number | null` is additive on `PortfolioBalance`; FE response schema is backward-compatible.
+- `ANKR_API_KEY` env var — optional; missing → public endpoint (rate-limited), logged as `warn` at startup.
+- Fuji (43113) has no `ankrBlockchain` entry and will always use RPC. Any new chain unsupported by Ankr should also omit the field.
+
+**Plan deviations:** none.
+
+## Yield positions revamp — 2026-04-28
+
+**What changed:**
+- Active-protocol discovery replaced: was DB-only (`yieldRepo.listActiveProtocols`); now **on-chain probe** via `OnChainPositionDiscovery` which fans out across every `(protocol × stablecoin)` pair in `getYieldConfig(chainId)`. Positions opened outside Aegis are now visible.
+- Principal source replaced: was bookkeeping from `yield_deposits`/`yield_withdrawals`; now **The Graph Messari Aave V3 subgraph** (`SubgraphPrincipalProvider`). When subgraph returns null, falls back to `balanceRaw` (zero PnL shown until subgraph resolves — per user confirmation on Q5 of the plan).
+- Snapshot-missing path logged at `warn` (was silent 0-delta). Field: `{ step: 'snapshot-missing', userId, protocolId, chainId, tokenAddress }`.
+- `yield_deposits` + `yield_withdrawals` tables **dropped** (`0026_stale_mandrill.sql`). All repo methods reading/writing those tables removed from `IYieldRepository` and `DrizzleYieldRepository`.
+- `yieldReportJob` user enumeration: was `listUsersWithPositions` (from `yield_deposits`); now `listUsersWithRecentSnapshots(sinceEpoch)` (from `yield_position_snapshots`, 30-day window).
+- `buildDepositPlan` no longer writes a DB row. `DepositPlan.depositId` removed. `finalizeDeposit` signature changed to `(userId, txHash)` — writes snapshot via `positionDiscovery.discover` + `principalProvider`.
+- `buildWithdrawAllPlan` uses `positionDiscovery.discover` instead of `listActiveProtocols`.
+- `finalizeWithdrawal` is a no-op (on-chain read path reflects new state on next poll).
+
+**New ports:**
+- `use-cases/interface/output/yield/IPrincipalProvider.ts` — `getPrincipalRaw(PrincipalQuery): Promise<bigint | null>`
+- `use-cases/interface/output/yield/IYieldPositionDiscovery.ts` — `discover(chainId, userAddress): Promise<DiscoveredPosition[]>`
+
+**New adapters:**
+- `adapters/implementations/output/yield/subgraphPrincipalProvider.ts` — fetches Messari Aave V3 subgraph; market id = aToken address (lowercased). Only handles `AAVE_V3`; returns `null` for others.
+- `adapters/implementations/output/yield/onChainPositionDiscovery.ts` — probes every `(protocol × stablecoin)` via `adapter.getUserPosition`; returns non-zero positions only.
+
+**New chainConfig helpers:**
+- `getAaveMarketId(chainId, tokenAddress)` — returns the Messari subgraph `market` id (aToken address lowercased) for a reserve. aToken addresses declared per stablecoin in `CHAIN_REGISTRY[chainId].yield.stablecoins[].aTokenAddress`.
+- Avalanche USDC aToken: `0x625E7708f30cA75bfd92586e17077590C60eb4cD` (aUSDC v3).
+
+**Conventions introduced:**
+- `market` metadata field: Aave reserve's aToken address (lowercased), used as Messari subgraph key. Always log it at `debug` on subgraph responses.
+- Principal is subgraph-derived. Do not add a DB fallback; the fallback is `balanceRaw` (zero PnL).
+- `snapshot-missing` warn step is mandatory in any flow that uses a yesterday-snapshot for 24h delta.
+- Subgraph deployment ID: `72Cez54APnySAn6h8MswzYkwaL9KjvuuKnKArnPJ8yxb`. Env: `THEGRAPH_API_KEY`.
+
+**DB migration:** `0026_stale_mandrill.sql` — `DROP TABLE yield_deposits CASCADE; DROP TABLE yield_withdrawals CASCADE;`. **Deploy sequence:** ensure use-case stop writing to those tables (this change) ships first; then run migration.
 
 ## Backlog
 - Proactive agent: daily market sentiment → investment verdict.
