@@ -13,13 +13,14 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
   constructor(private readonly db: NodePgDatabase) {}
 
   async upsert(profile: UserProfileInit): Promise<void> {
+    const eoaAddress = profile.eoaAddress ? profile.eoaAddress.toLowerCase() : null;
     await this.db
       .insert(userProfiles)
       .values({
         userId: profile.userId,
         telegramChatId: profile.telegramChatId ?? null,
         smartAccountAddress: profile.smartAccountAddress ?? null,
-        eoaAddress: profile.eoaAddress ?? null,
+        eoaAddress,
         sessionKeyAddress: profile.sessionKeyAddress ?? null,
         sessionKeyScope: profile.sessionKeyScope ?? null,
         sessionKeyStatus: profile.sessionKeyStatus ?? null,
@@ -32,7 +33,7 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
         set: {
           telegramChatId: profile.telegramChatId ?? null,
           smartAccountAddress: profile.smartAccountAddress ?? null,
-          eoaAddress: profile.eoaAddress ?? null,
+          eoaAddress,
           sessionKeyAddress: profile.sessionKeyAddress ?? null,
           sessionKeyScope: profile.sessionKeyScope ?? null,
           sessionKeyStatus: profile.sessionKeyStatus ?? null,
@@ -43,12 +44,13 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
   }
 
   async update(profile: UserProfileUpdate): Promise<void> {
+    const eoaAddress = profile.eoaAddress ? profile.eoaAddress.toLowerCase() : null;
     await this.db
       .update(userProfiles)
       .set({
         telegramChatId: profile.telegramChatId ?? null,
         smartAccountAddress: profile.smartAccountAddress ?? null,
-        eoaAddress: profile.eoaAddress ?? null,
+        eoaAddress,
         sessionKeyAddress: profile.sessionKeyAddress ?? null,
         sessionKeyScope: profile.sessionKeyScope ?? null,
         sessionKeyStatus: profile.sessionKeyStatus ?? null,
@@ -81,6 +83,16 @@ export class DrizzleUserProfileRepo implements IUserProfileDB {
       .select()
       .from(userProfiles)
       .where(eq(userProfiles.userId, userId))
+      .limit(1);
+    if (!rows[0]) return undefined;
+    return this.toIUserProfile(rows[0]);
+  }
+
+  async findByEoaAddress(eoa: string): Promise<IUserProfile | undefined> {
+    const rows = await this.db
+      .select()
+      .from(userProfiles)
+      .where(eq(userProfiles.eoaAddress, eoa.toLowerCase()))
       .limit(1);
     if (!rows[0]) return undefined;
     return this.toIUserProfile(rows[0]);

@@ -29,6 +29,7 @@ import type { IPrivyAuthService } from "../../../../use-cases/interface/output/p
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { getUsdcAddress } from "../../../../helpers/chainConfig";
+import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import {
   buildConfirmationMessage,
@@ -706,7 +707,21 @@ export class SendCapability implements Capability<SendParams> {
     let recipientAddress: string;
     try {
       telegramUserId = await this.deps.telegramHandleResolver.resolveHandle(handle);
-      recipientAddress = await this.deps.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
+      const recipientEoa = await this.deps.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
+      const existingProfile = await this.deps.userProfileRepo?.findByEoaAddress(recipientEoa);
+      if (existingProfile?.smartAccountAddress) {
+        recipientAddress = existingProfile.smartAccountAddress;
+        log.info(
+          { step: "wallet-resolved", source: "db", telegramUserId, wallet: recipientAddress },
+          "recipient SCA from DB",
+        );
+      } else {
+        recipientAddress = await deriveScaAddress(recipientEoa as `0x${string}`, this.deps.chainId);
+        log.info(
+          { step: "wallet-resolved", source: "derived", telegramUserId, eoa: recipientEoa, wallet: recipientAddress },
+          "recipient SCA derived",
+        );
+      }
     } catch (err) {
       await ctx.emit({ kind: "chat_status_stop", id: statusId });
       if (err instanceof TelegramHandleNotFoundError) {
