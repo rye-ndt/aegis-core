@@ -211,6 +211,17 @@ export function getChainObject(chainId: number): Chain | null {
   return CHAIN_REGISTRY[chainId]?.chain ?? null;
 }
 
+/** Alias of getChainObject — used by AA-derivation helpers that expect the viem Chain object. */
+export function getViemChain(chainId: number): Chain | null {
+  return getChainObject(chainId);
+}
+
+/** Returns the primary RPC URL for the given chain. Empty string if unknown. */
+export function getRpcUrlForChain(chainId: number): string {
+  if (chainId === CHAIN_CONFIG.chainId) return CHAIN_CONFIG.rpcUrl;
+  return getChainRpcUrls(chainId)[0] ?? "";
+}
+
 /**
  * Returns the canonical USDC contract address for the given chain, read from
  * the env var declared in the chain's `usdcEnvKey`. Returns null if either

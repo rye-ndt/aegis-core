@@ -12,6 +12,7 @@ import type { ITokenRecord } from "../../../../use-cases/interface/output/reposi
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { toRaw } from "../../../../helpers/bigint";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
 
 const log = createLogger("resolverEngine");
 
@@ -80,13 +81,28 @@ export class ResolverEngineImpl implements IResolverEngine {
         throw err;
       }
 
-      recipientAddress =
+      const recipientEoa =
         await this.privyAuthService.getOrCreateWalletByTelegramId(
           telegramUserId,
         );
+      const existingProfile = await this.userProfileDB.findByEoaAddress(recipientEoa);
+
+      if (existingProfile?.smartAccountAddress) {
+        recipientAddress = existingProfile.smartAccountAddress;
+        log.info(
+          { step: "wallet-resolved", source: "db", telegramUserId, wallet: recipientAddress },
+          "recipient SCA from DB",
+        );
+      } else {
+        recipientAddress = await deriveScaAddress(recipientEoa as `0x${string}`, chainId);
+        log.info(
+          { step: "wallet-resolved", source: "derived", telegramUserId, eoa: recipientEoa, wallet: recipientAddress },
+          "recipient SCA derived",
+        );
+      }
+
       recipientTelegramUserId = telegramUserId;
       recipientHandle = handle;
-      log.info({ step: "wallet-resolved", telegramUserId, wallet: recipientAddress }, "wallet resolved from Telegram handle");
     }
 
     return {

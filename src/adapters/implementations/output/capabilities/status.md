@@ -1,5 +1,24 @@
 # Capabilities Status
 
+## Self-derived recipient SCA — 2026-05-03
+
+**What was done:**
+- New `helpers/aaConfig.ts` and `helpers/deriveScaAddress.ts` — single source of truth for the AA stack (entry point 0.7, Kernel V3.1, `index = 0n`) and a counterfactual SCA derivation helper with a 1h LRU.
+- `chainConfig.ts`: added `getViemChain` and `getRpcUrlForChain` wrappers used by AA derivation.
+- `userProfile.repo` (interface + Drizzle impl): added `findByEoaAddress(eoa)`. `upsert`/`update` now lowercase `eoaAddress` on write so `findByEoaAddress` can match deterministically.
+- `resolverEngine.resolve` (handle path) and `sendCapability.resolveRecipientHandle`: recipient resolution is now `eoa → DB profile.smartAccountAddress` if onboarded, otherwise `deriveScaAddress(eoa, chainId)`. Previously both paths returned the recipient's EOA verbatim — fund recipients silently saw an EOA instead of the SCA they would later own.
+- New script `scripts/verify-sca-derivation.ts` (one-off): proves `AA_CONFIG.index = 0n` matches Privy's hosted-smart-wallets default by deriving every onboarded user's SCA and diffing against the stored value. Required to pass with 100% match before this change is enabled.
+
+**Why:**
+- Privy's hosted smart-wallets product owned both the Kernel constants and the address-derivation logic; SDK or dashboard changes could silently change a user's SCA out from under us. Pinning the AA constants in our own config and deriving the address ourselves removes that dependency.
+- Recipient resolution was the user-visible bug: handles for un-onboarded recipients resolved to an EOA address that the recipient would never own once they onboard, so funds were effectively unrecoverable. Self-derivation produces the counterfactual SCA which the recipient *will* own when they onboard with the same Privy EOA.
+
+**New conventions:**
+- AA stack constants live exclusively in `helpers/aaConfig.ts`. Never inline `entryPoint`, `kernelVersion`, or `index` elsewhere.
+- `eoa_address` is canonicalized to lowercase on write. Lookups by EOA must lowercase the search term.
+- DB row is canonical when present; derivation is fallback-only. Existing onboarded users' stored SCA always wins over a fresh derivation, protecting them from any future change to `AA_CONFIG`.
+- New log metadata field: `source: "db" | "derived"` on the `step: "wallet-resolved"` event so we can track recipient resolution origin.
+
 ## Delegation spend bookkeeping — 2026-04-28
 
 **What was done:**
