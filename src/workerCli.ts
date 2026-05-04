@@ -20,6 +20,9 @@ const log = createLogger("workerCli");
   const inject = new AssistantInject();
   const sqlDB = inject.getSqlDB();
 
+  // Soft-fail stock-capability verification (fix #9).
+  await inject.verifyStockCapability();
+
   const tgApi = new Api(token);
 
   const rawBot = new Bot(token);
@@ -28,7 +31,7 @@ const log = createLogger("workerCli");
   const recipientNotificationUseCase = inject.getRecipientNotificationUseCase(
     async (chatId, text, opts) => { await tgApi.sendMessage(chatId, text, opts as Parameters<typeof tgApi.sendMessage>[2]); },
   );
-  const notifyResolved = buildNotifyResolved(tgApi, undefined, recipientNotificationUseCase);
+  const notifyResolved = buildNotifyResolved(tgApi, undefined, recipientNotificationUseCase, sqlDB.users);
 
   const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved);
   const httpServer = inject.getHttpApiServer(signingRequestUseCase);
@@ -46,7 +49,7 @@ const log = createLogger("workerCli");
   const yieldReportJob = inject.getYieldReportJob();
   yieldReportJob?.start();
 
-  const dispatcher = inject.getCapabilityDispatcher();
+  const dispatcher = await inject.getCapabilityDispatcher();
   if (!dispatcher) {
     log.error("Capability dispatcher unavailable — bot cannot start.");
     process.exit(1);

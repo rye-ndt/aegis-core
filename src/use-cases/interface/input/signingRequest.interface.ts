@@ -23,6 +23,9 @@ export type SigningResolutionEvent = {
   recipientHandle?: string;
   amountFormatted?: string;
   tokenSymbol?: string;
+  /** Forwarded from `SigningRequestRecord.planKind` so the resolved-side
+   * UX (notifyResolved) can branch on stock-recovery completions. */
+  planKind?: 'recovery';
 };
 
 export interface ISigningRequestUseCase {

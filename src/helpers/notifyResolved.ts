@@ -1,6 +1,7 @@
 import { Api, InlineKeyboard } from "grammy";
 import type { SigningResolutionEvent } from "../use-cases/interface/input/signingRequest.interface";
 import type { RecipientNotificationUseCase } from "../use-cases/implementations/recipientNotification.useCase";
+import type { IUserDB } from "../use-cases/interface/output/repository/user.repo";
 import { CHAIN_CONFIG, getExplorerTxUrl } from "./chainConfig";
 import { decodeErc20Transfer } from "./decodeErc20Transfer";
 import { createLogger } from "./observability/logger";
@@ -27,20 +28,38 @@ export function buildNotifyResolved(
   tgApi: Api,
   chainId: number = CHAIN_CONFIG.chainId,
   recipientNotificationUseCase?: RecipientNotificationUseCase,
+  userRepo?: IUserDB,
 ): (event: SigningResolutionEvent) => Promise<void> {
   return async (event: SigningResolutionEvent): Promise<void> => {
-    const { chatId, txHash, rejected, errorCode, errorMessage, data } = event;
+    const { chatId, txHash, rejected, errorCode, errorMessage, data, planKind } = event;
 
     if (!rejected) {
+      if (planKind === "recovery") {
+        await sendRecoverySuccessMessage(tgApi, chainId, chatId, txHash);
+        log.info(
+          { step: "recovery-success", chatId, hash: txHash },
+          "stock recovery resolved",
+        );
+        return;
+      }
       await sendSuccessMessage(tgApi, chainId, chatId, txHash, data);
 
       if (event.recipientTelegramUserId && recipientNotificationUseCase) {
+        let senderDisplayName: string | null = null;
+        if (userRepo) {
+          try {
+            const sender = await userRepo.findById(event.userId);
+            senderDisplayName = sender?.userName ?? null;
+          } catch (err) {
+            log.warn({ err, userId: event.userId }, "sender-lookup-failed");
+          }
+        }
         try {
           await recipientNotificationUseCase.dispatchP2PSend({
             recipientTelegramUserId: event.recipientTelegramUserId,
             senderUserId: event.userId,
             senderChatId: String(event.chatId),
-            senderDisplayName: null,
+            senderDisplayName,
             senderHandle: null,
             tokenSymbol: event.tokenSymbol ?? "UNKNOWN",
             amountFormatted: event.amountFormatted ?? "",
@@ -98,6 +117,19 @@ export function buildNotifyResolved(
         chatId,
         errorMessage ??
           "Your account does not have enough token balance to complete this transfer.",
+      );
+      return;
+    }
+
+    // Lockstep with FE `interpretSignError.ts` (Aster stock-trading codes).
+    // Add new codes here in the same PR that introduces them on the FE — the
+    // string is the contract.
+    const stockMessage = stockErrorMessage(errorCode);
+    if (stockMessage) {
+      await tgApi.sendMessage(chatId, stockMessage);
+      log.info(
+        { step: "stock-error", chatId, errorCode },
+        "stock-specific failure surfaced",
       );
       return;
     }
@@ -167,6 +199,64 @@ async function sendSuccessMessage(
       stripMarkdown(text),
       keyboard ? { reply_markup: keyboard } : {},
     );
+  }
+}
+
+async function sendRecoverySuccessMessage(
+  tgApi: Api,
+  chainId: number,
+  chatId: number,
+  txHash: string | undefined,
+): Promise<void> {
+  const explorerUrl = txHash ? getExplorerTxUrl(chainId, txHash) : null;
+  const keyboard = explorerUrl
+    ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
+    : undefined;
+  const text = [
+    "*Funds returned.*",
+    "",
+    "Your collateral was bridged back to your home chain.",
+  ].join("\n");
+  try {
+    await tgApi.sendMessage(chatId, text, {
+      parse_mode: "Markdown",
+      ...(keyboard ? { reply_markup: keyboard } : {}),
+    });
+  } catch (err) {
+    log.warn({ err, chatId }, "recovery success markdown send failed — retrying plain");
+    await tgApi.sendMessage(
+      chatId,
+      stripMarkdown(text),
+      keyboard ? { reply_markup: keyboard } : {},
+    );
+  }
+}
+
+/**
+ * Maps Aster stock-trading errorCodes to user-facing chat messages. These
+ * codes are the lockstep contract with FE `interpretSignError.ts` (Phase 2
+ * impl plan P2.5b). Returns null when the code is not a stock code so the
+ * caller falls through to its existing branch.
+ */
+function stockErrorMessage(code: string | undefined): string | null {
+  switch (code) {
+    case "aster_pair_inactive":
+      return "This stock pair is not currently tradable. Try a different symbol.";
+    case "aster_min_size":
+      return "Trade size is below the minimum. Try a larger amount.";
+    case "aster_max_position":
+      return "You've hit the per-user position limit for this asset.";
+    case "aster_oracle_stale":
+      return "The stock price oracle is stale. Please try again in a moment.";
+    case "aster_insufficient_collateral":
+      // Recovery is triggered by the capability layer when the failure
+      // happens mid-flight (post-bridge); here we can only acknowledge the
+      // code in case it surfaces standalone.
+      return "Not enough collateral landed on BSC to open the position. Funds will be returned to your home chain.";
+    case "stock_recovery_failed":
+      return "Recovery failed — please contact support so we can manually return your funds.";
+    default:
+      return null;
   }
 }
 

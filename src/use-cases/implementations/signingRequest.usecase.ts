@@ -54,6 +54,8 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       params.requestId,
       rejected ? "rejected" : "approved",
       params.txHash,
+      params.errorCode,
+      params.errorMessage,
     );
     log.info(
       {
@@ -107,6 +109,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       recipientHandle: record.recipientHandle,
       amountFormatted: record.amountFormatted,
       tokenSymbol: record.tokenSymbol,
+      planKind: record.planKind,
     });
   }
 
@@ -137,10 +140,14 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       }
       if (record.status === "rejected") {
         log.info(
-          { step: "waitFor-rejected", requestId },
+          { step: "waitFor-rejected", requestId, errorCode: record.errorCode },
           "signing request rejected",
         );
-        return { status: "rejected" };
+        return {
+          status: "rejected",
+          errorCode: record.errorCode,
+          errorMessage: record.errorMessage,
+        };
       }
       if (record.status === "expired") {
         log.info(

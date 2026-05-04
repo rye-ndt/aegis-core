@@ -6,6 +6,7 @@ import {
   polygon,
   arbitrum,
   optimism,
+  bsc,
   type Chain,
 } from "viem/chains";
 import type { Address } from "viem";
@@ -168,6 +169,25 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     relayEnabled: true,
     usdcEnvKey: "OP_USDC",
     ankrBlockchain: "optimism",
+  },
+  56: {
+    chain: bsc,
+    nativeSymbol: "BNB",
+    name: "BNB Chain",
+    defaultRpcUrls: [
+      "https://bsc.publicnode.com",
+      "https://bsc-rpc.publicnode.com",
+      "https://binance.llamarpc.com",
+    ],
+    privyNetwork: "bnb-smart-chain",
+    aliases: ["bsc", "bnb", "bnb-chain", "binance-smart-chain"],
+    // Phase 2: enabled. The stock capability bundles cross-chain USDC.avax →
+    // USDC.bsc as part of every /stock buy|short, and the return swap on
+    // close/recovery, so Relay must accept BSC as an origin and destination.
+    relayEnabled: true,
+    usdcEnvKey: "BSC_USDC",
+    ankrBlockchain: "bsc",
+    // No `yield` block — Aave V3 stablecoin support out of scope on BSC.
   },
 };
 

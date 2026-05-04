@@ -492,7 +492,7 @@ export class YieldOptimizerUseCase implements IYieldOptimizerUseCase {
         );
       }
 
-      const prevBalance = yesterdaySnapshot ? BigInt(yesterdaySnapshot.balanceRaw) : 0n;
+      const prevBalance = yesterdaySnapshot ? BigInt(yesterdaySnapshot.balanceRaw) : currentBalance;
       const delta24h = currentBalance - prevBalance;
 
       const principalFromProvider = await this.deps.principalProvider.getPrincipalRaw({

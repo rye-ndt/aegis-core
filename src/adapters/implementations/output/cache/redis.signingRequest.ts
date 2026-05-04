@@ -27,9 +27,19 @@ export class RedisSigningRequestCache implements ISigningRequestCache {
     return raw ? (JSON.parse(raw) as SigningRequestRecord) : null;
   }
 
-  async resolve(id: string, status: 'approved' | 'rejected', txHash?: string): Promise<void> {
+  async resolve(
+    id: string,
+    status: 'approved' | 'rejected',
+    txHash?: string,
+    errorCode?: string,
+    errorMessage?: string,
+  ): Promise<void> {
     const record = await this.findById(id);
     if (!record) return;
-    await this.redis.set(this.key(id), JSON.stringify({ ...record, status, txHash }), 'KEEPTTL');
+    await this.redis.set(
+      this.key(id),
+      JSON.stringify({ ...record, status, txHash, errorCode, errorMessage }),
+      'KEEPTTL',
+    );
   }
 }

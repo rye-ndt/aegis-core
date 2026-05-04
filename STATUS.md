@@ -3,7 +3,7 @@
 ## What it is
 Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagonal Architecture (Ports & Adapters) — use-cases depend only on interfaces; assembly lives in `src/adapters/inject/assistant.di.ts`. Users auth via Privy (Google or Telegram); Mini App passes `telegramChatId` to `POST /auth/privy`. Agent parses NL (incl. `$5` fiat shortcuts), classifies intent, compiles tool input schema, resolves fields, and executes via ERC-4337 UserOps through ZeroDev session keys. **Backend never signs transactions** — all signing via user delegated session keys in the mini-app.
 
-> Capability-level details and recent feature notes live in `src/adapters/implementations/output/capabilities/status.md`. Read that file alongside this one before changing capability code.
+> Capability-level details and recent feature notes live in `src/adapters/implementations/output/capabilities/status.md`. Read that file alongside this one before changing capability code. Aster (tokenized stocks) adapter notes live in `src/adapters/implementations/output/aster/status.md` — read before touching the Aster Diamond ABI, pair registry, or broker provider.
 
 ## Tech stack
 | Layer | Choice |
@@ -22,6 +22,7 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 | Yield | Aave v3 (Avalanche mainnet) |
 | Portfolio | Ankr (`ankr_getAccountBalance`) + RPC fallback |
 | Transfers | Ankr (`ankr_getTransactionsByAddress` + `ankr_getTokenTransfers`) merged + cached |
+| Stocks | Aster perpetuals on BSC (Diamond `0x1b6F…feb0`), 1× leverage, USDC.bsc (18-dec) collateral, Relay-bridged from home chain |
 | Deployment | Cloud Run + Neon Postgres + Upstash Redis + GitHub Actions (WIF) |
 
 ## Non-negotiable rules
@@ -64,10 +65,14 @@ src/
 │       │   └── telegram/                  # bot.ts, handler.ts (~200 LOC)
 │       └── output/                        # balance (ankr/rpc/cached 30s), transferHistory
 │                                          # (ankr/cached rate-guarded), capabilities (buy/send/swap/
-│                                          # yield/loyalty/assistantChat), yield (aaveV3Adapter,
-│                                          # subgraphPrincipalProvider, onChainPositionDiscovery),
-│                                          # solver, openai, viemClient, resolverEngine, pinecone,
-│                                          # redis caches, relay, etc.
+│                                          # yield/loyalty/assistantChat/stock/positions),
+│                                          # yield (aaveV3Adapter, subgraphPrincipalProvider,
+│                                          # onChainPositionDiscovery), aster (Diamond client +
+│                                          # ABI + pair registry + price oracle + positions +
+│                                          # broker provider), stocks (relayCrossChainSwapPlanner),
+│                                          # tools (system + read-only agent tools incl. getStockQuote
+│                                          # / getStockPositions), solver, openai, viemClient,
+│                                          # resolverEngine, pinecone, redis caches, relay, etc.
 └── helpers/
     ├── chainConfig.ts                     # CHAIN_REGISTRY/CONFIG; getViemChain, getRpcUrlForChain,
     │                                      # getNativeTokenInfo, NATIVE_PSEUDO_ADDRESS, isNativeAddress
@@ -90,6 +95,8 @@ Default chain: Avalanche C-Chain mainnet (43114). `CHAIN_ID=43113` → Fuji.
 - Reward-controller address per-deploy via `REWARD_CONTROLLER_ADDRESS` env.
 - Avalanche USDC aToken: `0x625E7708f30cA75bfd92586e17077590C60eb4cD`.
 - Aave V3 subgraph (Messari): deployment `72Cez54APnySAn6h8MswzYkwaL9KjvuuKnKArnPJ8yxb`.
+- Aster Diamond (BSC, perpetuals entrypoint): `0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0`. Per-facet implementations resolved through the Diamond — refresh `asterAbi.ts` from BscScan if struct decode breaks.
+- USDC.bsc (Aster venue collateral, **18 decimals**): `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d`. Decimals always sourced from `token_registry`, never hardcoded.
 
 ## HTTP API
 Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid().slice(0,8)`.
@@ -120,6 +127,10 @@ Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid()
 | `GET` | `/delegation/approval-params` | Privy | Default tokens + suggested limits (synthesizes native via `getNativeTokenInfo`) |
 | `GET/POST` | `/delegation/grant` | Privy | List/upsert `token_delegations` |
 | `GET` | `/metrics` | Bearer (`METRICS_TOKEN`) | pgPool/openai/redis/LLM metrics |
+| `GET` | `/stocks/pairs` | None | Verified Aster stock pairs (`{ symbol, pairBase }[]`). 503 `stocks_unavailable` if boot verification failed. `Cache-Control: public, max-age=3600`. |
+| `GET` | `/stocks/quote?symbols=AAPL,TSLA` | None | Mark prices for tradable Aster pairs via cached oracle. 400 on unknown symbols. 503 `stocks_unavailable` when soft-disabled. `Cache-Control: private, max-age=10`. |
+| `GET` | `/stocks/positions` | Privy | Authenticated SCA's open Aster positions via `IStockUseCase.listPositions`. 503 `stocks_unavailable` when soft-disabled. |
+| `GET` | `/delegation/approval-params?chainId=56` | Privy | Optional `chainId` query param routes the suggested-tokens response to a specific chain. Omitted → home chain. USDC.bsc decimals (18) are sourced from `token_registry`. |
 
 ## Telegram commands
 | Command | Behavior |
@@ -130,6 +141,8 @@ Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid()
 | `/swap` | SwapCapability — Relay cross/same-chain |
 | `/yield`, `/withdraw` | YieldCapability — Aave v3 deposit/withdraw |
 | `/points`, `/leaderboard` | LoyaltyCapability |
+| `/stock buy $X SYM`, `/stock short $X SYM`, `/stock close SYM`, `/stock sl SYM PRICE`, `/stock tp SYM PRICE` | StockCapability — Aster perpetuals on BSC. Bridges USDC.avax→USDC.bsc, opens, awards loyalty. Recovery flow on venue revert is its own mini-app session. `close` disambiguates multi-position symbols via inline keyboard (`stock:close-pick:<tradeHashShort>`); `sl`/`tp` use the same picker (`stock:exits-pick:<short>:<sl\|tp>:<price>`) and preserve the unchanged side. After successful `close`, the venue→home return-swap is appended in the same mini-app session via `executeSignSteps({ continueSession: true, planKind: "recovery" })` — `notifyResolved` then surfaces "Funds returned." UX. |
+| `/positions` | PositionsCapability — chat-seeded LLM summary of open Aster positions via the `get_stock_positions` tool. |
 | _(text)_ | AssistantChatCapability — chat + tool-call loop |
 | _(photo)_ | Vision chat with caption |
 
@@ -168,7 +181,7 @@ message
 | `user_preferences` | `aegisGuardEnabled` |
 | `token_delegations` | `limitRaw`, `spentRaw`, `validUntil` per token. Native is valid (`tokenAddress = NATIVE_PSEUDO_ADDRESS`). `upsertMany` preserves `spent_raw` when `limit_raw` is unchanged. |
 | `yield_position_snapshots` | Yield positions (snapshots only — deposits/withdrawals dropped 2026-04-28) |
-| `loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger` | Loyalty program |
+| `loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger` | Loyalty program. `action_types` seed includes `stock_open_long`, `stock_open_short`, `stock_close` (added 2026-05-04 with Aster Phase 2). |
 | `recipient_notifications` | P2P send recipient notifications (pending/delivered/failed) |
 
 ## Redis key schema
@@ -219,6 +232,12 @@ message
 | `YIELD_IDLE_USDC_THRESHOLD_USD`, `YIELD_POOL_SCAN_INTERVAL_MS`, `YIELD_USER_SCAN_INTERVAL_MS`, `YIELD_NUDGE_COOLDOWN_SEC`, `YIELD_ENABLED_CHAIN_IDS` | `10` / `1800000` / `1800000` / `1800` / `43114` | Yield job cadences + nudge gating |
 | `YIELD_REPORT_UTC_HOUR`, `YIELD_REPORT_INTERVAL_MS` | `9` / unset | Daily report UTC hour. When `INTERVAL_MS>0`, run at that interval and skip the daily gate (debug/QA). |
 | `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS`, `LOYALTY_LEADERBOARD_CACHE_TTL_MS` | `60000` / `30000` | |
+| `BSC_USDC` | `0x8AC76a…580d` (Binance-Peg USDC) | Venue collateral for Aster stocks. **18 decimals**, sourced from `token_registry`. Required for stocks. |
+| `ASTER_DIAMOND_ADDRESS_BSC` | `0x1b6F2d…feb0` | Aster Diamond proxy on BSC. Address validated at boot via `verifyStockCapability()`. |
+| `BSC_RPC_URL` | unset → chainConfig fallbacks (`bsc.publicnode.com` etc.) | Optional BSC RPC override. |
+| `ASTER_BROKER_ID` | `0` | Aster broker referral id (uint). |
+| `ASTER_PRICE_TTL_SEC`, `ASTER_POSITIONS_TTL_SEC` | `15` / `60` | In-memory cache TTLs for marks + positions. |
+| `STOCK_RECOVERY_ENABLED` | `true` | When false, disables auto-bridge-back on venue-leg revert AND the post-close return swap. Leave `true` outside debugging. |
 
 ## Coding conventions
 - **IDs**: `newUuid()` only (UUID v4). **Timestamps**: `newCurrentUTCEpoch()` (seconds). Columns end in `AtEpoch`.
@@ -235,6 +254,10 @@ message
 - **Multi-step capabilities**: emit `mini_app` for step 1 only; store steps 2..N via `miniAppRequestCache.store(...)`; FE chains via `GET /request/:id?after=<prev>`. One mini-app session per intent.
 - **Fiat normalization**: `OpenAISchemaCompiler.compile()` runs `normalizeFiatAmount(text)` before LLM — `$N`/`N dollars/bucks/usd` → `N USDC`. New capabilities inherit this; don't re-implement `detectStablecoinIntent`.
 - **Recipient resolution**: `eoa → DB profile.smartAccountAddress` if onboarded, else `deriveScaAddress(eoa, chainId)`. DB row always wins over derivation.
+- **Soft-fail capability boot**: capabilities that depend on external invariants (e.g. on-chain ABI struct verification) expose an `async verifyXCapability()` on `AssistantInject` that swallows errors and flips a `_xCapabilityDisabled` flag. CLIs `await` it after instantiation; the rest of the backend keeps booting. HTTP routes guard via `isXCapabilityDisabled()` and return `503 { error: "x_unavailable" }`. Pattern lives in `verifyStockCapability` — mirror it for any new chain-bound capability.
+- **Per-step `chainId` on cross-chain plans**: `StockExecutionStep.chainId` is set per step so a single mini-app session can sequence home-chain bridge legs and venue-chain action legs together. The FE's chained `?after=<prevId>` poll picks each up with its own chainId. Mirror this on any future cross-chain capability.
+- **`spendTokenAddress` only on the LAST home-chain leg** of multi-step cross-chain plans (mirrors `swapCapability`). Tagging a venue-chain leg attributes spend against a delegation row that doesn't exist for the venue-chain token.
+- **Venue-chain id exception**: chain ids may NOT be inlined outside `chainConfig.ts` — except in a single venue adapter module that pins one venue (e.g. `asterBrokerProvider.ts:VENUE_CHAIN_ID = 56`). Document the constant and never reach for it elsewhere.
 
 ## Extension patterns
 - **New system tool**: `ITool` → add to `SystemToolProviderConcrete.getTools()`.
@@ -245,6 +268,8 @@ message
 - **New sign-error code**: add to FE `interpretSignError.ts` AND BE `notifyResolved.ts` recovery branch. String is the contract.
 - **New chain**: one `CHAIN_REGISTRY` entry in `chainConfig.ts`; set `ankrBlockchain` if Ankr supports it. Native token is auto-synthesized from viem's `Chain.nativeCurrency`.
 - **New external provider port**: define `IXxxProvider` under `interface/output/blockchain` (or appropriate subdir). Implement `CachedXxxProvider` decorator with the rate-guard template.
+- **New read-only agent tool**: implement `ITool` under `output/tools/`, add to `TOOL_TYPE` enum, register in `SystemToolProviderConcrete.getTools()` (gated on optional dep bundle). For stock-style soft-disabled tools, take an `isDisabled: () => boolean` and return `{ success: false, error: "<feature>_unavailable" }` when set. Read-only tools must never trigger autosign or mutations.
+- **New venue-chain capability (e.g. another perp DEX)**: (a) add the chain to `CHAIN_REGISTRY` with `relayEnabled` initially false; (b) define `IXxxBrokerProvider` + companion ports under `interface/output/<feature>/`; (c) put the venue chain id constant only in the broker adapter; (d) add `verifyXCapability()` boot hook + soft-disable flag; (e) flip `relayEnabled: true` once the bridge round-trip is smoke-tested.
 
 ---
 
@@ -276,6 +301,9 @@ Single image `us-east1-docker.pkg.dev/aegis-494004/aegis/aegis-backend:<sha>`. B
 
 ## Feature log (condensed — see `output/capabilities/status.md` for full notes)
 
+- **2026-05-04 — Aster tokenized stocks Phase 3 (close + SL/TP + /positions + return-swap).** `runClose` chains the venue→home return-swap into the same mini-app session via `executeSignSteps({ continueSession: true, planKind: "recovery" })` — `notifyResolved` then surfaces "Funds returned." on the resolved leg. Multi-position SL/TP picker (`stock:exits-pick:<short>:<sl|tp>:<price>`) mirrors the close-pick pattern. `/positions` ships as `PositionsCapability` (LLM-seeded, calls `get_stock_positions` system tool). PnL formatting reads `collateralToken.decimals` (was hardcoded 6 → 10^12 display bug on 18-dec USDC.bsc).
+- **2026-05-04 — Aster tokenized stocks Phase 2 (open / short execution + agent tools + read routes).** `StockUseCaseImpl` (open / close / set-exits / return-swap / list / resolve) consumes `IStockBrokerProvider` + `ICrossChainSwapPlanner` + `IStockPriceOracle` + `IStockPairRegistry` + `IStockPositionsProvider`. `RelayCrossChainSwapPlanner` adapts `IRelayClient.getQuote` to the planner port (consumes `currencyOut.amount` as `expectedOutRaw`; defensively coerces hex `value` → decimal). `StockCapability` parses `/stock buy|short|close|sl|tp` deterministically (regex). 6 sign-error codes (`aster_pair_inactive`, `aster_min_size`, `aster_max_position`, `aster_oracle_stale`, `aster_insufficient_collateral`, `stock_recovery_failed`) — lockstep contract with FE `interpretSignError.ts`. `SigningRequestRecord.planKind: "recovery"` flows through `SigningResolutionEvent` → `notifyResolved` for recovery-success UX. BSC `relayEnabled: true` flipped on. Read-only agent tools `get_stock_quote` / `get_stock_positions` (NO execution tools — agent never trades directly). HTTP `GET /stocks/quote`, `GET /stocks/positions`. Three new loyalty action types (`stock_open_long/short/close`).
+- **2026-05-04 — Aster tokenized stocks Phase 1 (read-only foundation).** BSC chain registry entry (relayEnabled initially false). `AsterDiamondClient` (single viem PublicClient pinned to BSC, fan-out via `fallback`). `AsterPairRegistry` — 6 hardcoded symbols (AAPL/AMZN/TSLA/NVDA/GOOG/META) verified against live `pairsV4()` at boot via `verifyStockCapability()`. Soft-fail boot: errors flip `_stockCapabilityDisabled` and flow as 503 `stocks_unavailable` from every stock route — backend keeps booting. New ports under `interface/output/stocks/` (`IStockBrokerProvider`, `IStockPriceOracle`, `IStockPairRegistry`, `IStockPositionsProvider`, `ICrossChainSwapPlanner`). `GET /stocks/pairs`, `npm run verify:aster` script. `divFixed` shared BigInt helper. Chain id `56` lives only in `asterBrokerProvider.ts:VENUE_CHAIN_ID` (documented exception).
 - **2026-05-04 — Native token via synthesis.** `NATIVE_PSEUDO_ADDRESS` + `getNativeTokenInfo(chainId)` in `chainConfig.ts`; `DbTokenRegistryService` synthesizes the native row (no DB seed). `manifestSolver/stepExecutors.executeErc20Transfer` branches on `isNativeAddress` to emit `{ value: amountRaw, data: "0x" }`.
 - **2026-05-04 — Native auto-sign.** Removed the `!fromToken.isNative` guard in `sendCapability`; native sends now share the autosign branch. `awardPoints` branches `send_native` vs `send_erc20`. `tryEmitDelegationRequest` still skips native (no on-chain `approve()`).
 - **2026-05-04 — Ankr transfer history.** New `ITransferHistoryProvider` port; `AnkrTransferHistoryProvider` merges `getTransactionsByAddress` + `getTokenTransfers`. `CachedTransferHistoryProvider` adds Redis cache + per-user RPM + global RPS + stale-on-gate-refusal. New `GET /transfers` route. New agent tool `get_transfer_history`. Cursor is opaque (Ankr `{tx, token}` JSON).

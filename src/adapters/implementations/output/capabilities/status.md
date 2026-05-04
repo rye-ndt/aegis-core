@@ -1,5 +1,45 @@
 # Capabilities Status
 
+## Stock close / SL-TP / `/positions` — 2026-05-04 (Phase 3)
+
+**What was done:**
+- `/stock close <SYM>` resolves the user's open Aster position via
+  `IStockUseCase.resolvePositionForSymbol`. `kind === "none"` returns a
+  plain message; `kind === "many"` renders an inline keyboard
+  (`stock:close-pick:<tradeHashShort>` — first 12 chars after `0x`) that
+  re-enters `runClose` with a concrete `tradeHash`. Loyalty awards
+  `stock_close` on success.
+- `/stock sl <SYM> <PRICE>` and `/stock tp <SYM> <PRICE>` reuse the same
+  resolver (multi-position case rejects with a hint to close one first).
+  `buildSetExitsPlan` reads the existing SL/TP off the matched position
+  and only overrides the side the user is editing — preserving the other
+  to avoid clobbering. No loyalty award.
+- `/positions` is a thin `PositionsCapability` that delegates to
+  `assistantUseCase.chat()` with a fixed seed prompt nudging the LLM
+  toward the `get_stock_positions` system tool. Excluded from the
+  `SendCapability` loop in `assistant.di.ts`.
+
+**Why this approach:**
+- Disambiguation in the capability (not the use-case) keeps the use-case
+  pure: callers always invoke it with a concrete `tradeHash`. The inline
+  keyboard mirrors the swap/yield disambiguation pattern.
+- Reading current SL/TP from the cached position (rather than asking the
+  user to re-enter both) matches the construction's "don't clobber" rule
+  and avoids a second round-trip.
+- For `/positions`, the dedicated thin capability is the construction's
+  alternative to a command-mapping seed (both ~30 LOC). It avoids
+  touching `AssistantChatCapability` triggers and reuses the existing
+  tool registry — the LLM already has access to `get_stock_positions`
+  through the per-user registry factory.
+
+**New conventions:**
+- Capabilities that return cached domain state should use the existing
+  `resolvePositionForSymbol` shape (`{ kind: "none" | "one" | "many" }`)
+  rather than throw on ambiguity. Disambiguation belongs at the
+  capability layer.
+- Callback prefix `stock:close-pick:<tradeHashShort>` — 12-char truncation
+  of `tradeHash` (post-`0x`). Telegram payload limit forced the truncation.
+
 ## Ankr-backed transfer history — 2026-05-04
 
 **What was done:**

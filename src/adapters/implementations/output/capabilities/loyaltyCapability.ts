@@ -24,6 +24,9 @@ const ACTION_LABELS: Record<string, string> = {
   yield_hold_day: "yield hold",
   referral: "referral",
   manual_adjust: "adjustment",
+  stock_open_long: "stock buy",
+  stock_open_short: "stock short",
+  stock_close: "stock close",
 };
 
 function formatRelativeTime(epochSeconds: number): string {

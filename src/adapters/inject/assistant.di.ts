@@ -1,123 +1,155 @@
-import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
-import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
-import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
-import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
-import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
-import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
-import { ExecuteIntentTool } from "../implementations/output/tools/executeIntent.tool";
-import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.tool";
-import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
-import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
-import { HttpApiServer } from "../implementations/input/http/httpServer";
-import type { IAuthUseCase } from "../../use-cases/interface/input/auth.interface";
-import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
-import type { IIntentUseCase } from "../../use-cases/interface/input/intent.interface";
-import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecase";
-import { ViemClientAdapter } from "../implementations/output/blockchain/viemClient";
-import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
-import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
-import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
-import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
-import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
-import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
-import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
-import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
-import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
-import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
-import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
-import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
-import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
-import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
-import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
-import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
-import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
-import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
-import { GramjsTelegramResolver } from "../implementations/output/telegram/gramjs.telegramResolver";
-import { RedisSessionDelegationCache } from '../implementations/output/cache/redis.sessionDelegation';
-import type { ISessionDelegationCache } from '../../use-cases/interface/output/cache/sessionDelegation.cache';
-import { PortfolioUseCaseImpl } from '../../use-cases/implementations/portfolio.usecase';
-import type { IPortfolioUseCase } from '../../use-cases/interface/input/portfolio.interface';
-import { SessionDelegationUseCaseImpl } from '../../use-cases/implementations/sessionDelegation.usecase';
-import type { ISessionDelegationUseCase } from '../../use-cases/interface/input/sessionDelegation.interface';
-import { DelegationRequestBuilder } from '../implementations/output/delegation/delegationRequestBuilder';
-import type { IDelegationRequestBuilder } from '../../use-cases/interface/output/delegation/delegationRequestBuilder.interface';
-import Redis from 'ioredis';
-import { metricsRegistry } from "../../helpers/observability/metricsRegistry";
-import { createLogger } from "../../helpers/observability/logger";
-import { RedisSigningRequestCache } from '../implementations/output/cache/redis.signingRequest';
-import { RedisMiniAppRequestCache } from '../implementations/output/cache/redis.miniAppRequest';
-import type { IMiniAppRequestCache } from '../../use-cases/interface/output/cache/miniAppRequest.cache';
-import { SigningRequestUseCaseImpl } from '../../use-cases/implementations/signingRequest.usecase';
-import type { ISigningRequestUseCase } from '../../use-cases/interface/input/signingRequest.interface';
-import { ResolverEngineImpl } from '../implementations/output/resolver/resolverEngine';
-import type { IResolverEngine } from '../../use-cases/interface/output/resolver.interface';
-import { CommandMappingUseCase } from '../../use-cases/implementations/commandMapping.usecase';
-import type { ICommandMappingUseCase } from '../../use-cases/interface/input/commandMapping.interface';
-import { BotTelegramNotifier } from "../implementations/output/telegram/botNotifier";
-import type { ITelegramNotifier } from "../../use-cases/interface/output/telegramNotifier.interface";
-import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
-import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
 import type { Bot } from "grammy";
-import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
-import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
-import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
-import { PrivyWalletDataProvider } from "../implementations/output/walletData/privy.walletDataProvider";
-import { SystemToolProviderConcrete } from "../implementations/output/systemToolProvider.concrete";
-import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
-import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
-import { CHAIN_CONFIG } from "../../helpers/chainConfig";
-import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
-import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
-import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
-import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRegistry";
+import Redis from "ioredis";
+import {
+  CHAIN_CONFIG,
+  getAnkrBlockchain,
+  getChainObject,
+  getChainRpcUrls,
+  getEnabledYieldChains,
+  getYieldConfig,
+} from "../../helpers/chainConfig";
+import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
+import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
+import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
+import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
+import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
+import { YIELD_ENV } from "../../helpers/env/yieldEnv";
+import { createLogger } from "../../helpers/observability/logger";
+import { metricsRegistry } from "../../helpers/observability/metricsRegistry";
+import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.usecase";
+import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
 import { CapabilityDispatcher } from "../../use-cases/implementations/capabilityDispatcher.usecase";
+import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRegistry";
+import { CommandMappingUseCase } from "../../use-cases/implementations/commandMapping.usecase";
+import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
+import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecase";
+import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCase";
+import { PortfolioUseCaseImpl } from "../../use-cases/implementations/portfolio.usecase";
+import { RecipientNotificationUseCase } from "../../use-cases/implementations/recipientNotification.useCase";
+import { SessionDelegationUseCaseImpl } from "../../use-cases/implementations/sessionDelegation.usecase";
+import { SigningRequestUseCaseImpl } from "../../use-cases/implementations/signingRequest.usecase";
+import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
+import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
+import { TransferHistoryUseCaseImpl } from "../../use-cases/implementations/transferHistory.usecase";
+import { YieldOptimizerUseCase } from "../../use-cases/implementations/yieldOptimizerUseCase";
+import { YieldPoolRanker } from "../../use-cases/implementations/yieldPoolRanker";
+import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
+import type { IAuthUseCase } from "../../use-cases/interface/input/auth.interface";
 import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capabilityDispatcher.interface";
+import type { ICommandMappingUseCase } from "../../use-cases/interface/input/commandMapping.interface";
+import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
+import type { IIntentUseCase } from "../../use-cases/interface/input/intent.interface";
+import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
+import type { IPortfolioUseCase } from "../../use-cases/interface/input/portfolio.interface";
+import type { ISessionDelegationUseCase } from "../../use-cases/interface/input/sessionDelegation.interface";
+import type { ISigningRequestUseCase } from "../../use-cases/interface/input/signingRequest.interface";
+import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
+import type { ITransferHistoryUseCase } from "../../use-cases/interface/input/transferHistory.interface";
+import type { IBalanceProvider } from "../../use-cases/interface/output/blockchain/balanceProvider.interface";
+import type { ITransferHistoryProvider } from "../../use-cases/interface/output/blockchain/transferHistoryProvider.interface";
+import type { IMiniAppRequestCache } from "../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { ISessionDelegationCache } from "../../use-cases/interface/output/cache/sessionDelegation.cache";
+import type { ITransferHistoryCache } from "../../use-cases/interface/output/cache/transferHistory.cache";
+import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
+import type { IDelegationRequestBuilder } from "../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
+import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
+import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
+import type { IPendingCollectionStore } from "../../use-cases/interface/output/pendingCollectionStore.interface";
+import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
+import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { IResolverEngine } from "../../use-cases/interface/output/resolver.interface";
+import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
+import type { ITelegramNotifier } from "../../use-cases/interface/output/telegramNotifier.interface";
+import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
+import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
+import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
+import type {
+  DailyReport,
+  IYieldOptimizerUseCase,
+} from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
+import type { IYieldRepository } from "../../use-cases/interface/yield/IYieldRepository";
+import { HttpApiServer } from "../implementations/input/http/httpServer";
+import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
+import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
+import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
+import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
+import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
+import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
+import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
+import { RpcBalanceProvider } from "../implementations/output/balance/rpcBalanceProvider";
+import { ViemClientAdapter } from "../implementations/output/blockchain/viemClient";
+import { RedisMiniAppRequestCache } from "../implementations/output/cache/redis.miniAppRequest";
+import { RedisSessionDelegationCache } from "../implementations/output/cache/redis.sessionDelegation";
+import { RedisSigningRequestCache } from "../implementations/output/cache/redis.signingRequest";
+import { RedisTransferHistoryCache } from "../implementations/output/cache/redis.transferHistory";
+import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
+import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
+import { PositionsCapability } from "../implementations/output/capabilities/positionsCapability";
+import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
+import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
+import { SendCapability } from "../implementations/output/capabilities/sendCapability";
+import { StockCapability } from "../implementations/output/capabilities/stockCapability";
+import { SwapCapability } from "../implementations/output/capabilities/swapCapability";
+import { StockUseCaseImpl } from "../../use-cases/implementations/stock.usecase";
+import { RelayCrossChainSwapPlanner } from "../implementations/output/stocks/relayCrossChainSwapPlanner";
+import {
+  AsterPositionsProvider,
+  CachedStockPositionsProvider,
+} from "../implementations/output/aster/asterPositionsProvider";
+import type { IStockUseCase } from "../../use-cases/interface/input/stock.interface";
+import type { IStockPositionsProvider } from "../../use-cases/interface/output/stocks/stockPositionsProvider.interface";
+import type { ICrossChainSwapPlanner } from "../../use-cases/interface/output/stocks/crossChainSwapPlanner.interface";
+import {
+  YieldCapability,
+  buildNudgeKeyboard,
+} from "../implementations/output/capabilities/yieldCapability";
+import { DelegationRequestBuilder } from "../implementations/output/delegation/delegationRequestBuilder";
+import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
+import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
+import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
+import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
+import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
+import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
 import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
 import { RedisPendingCollectionStore } from "../implementations/output/pendingCollectionStore/redis";
-import type { IPendingCollectionStore } from "../../use-cases/interface/output/pendingCollectionStore.interface";
-import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
-import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
-import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
-import { SendCapability } from "../implementations/output/capabilities/sendCapability";
-import { SwapCapability } from "../implementations/output/capabilities/swapCapability";
+import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
 import { RelayClient } from "../implementations/output/relay/relayClient";
+import { ResolverEngineImpl } from "../implementations/output/resolver/resolverEngine";
+import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
+import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
+import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
+import { SystemToolProviderConcrete } from "../implementations/output/systemToolProvider.concrete";
+import { BotTelegramNotifier } from "../implementations/output/telegram/botNotifier";
+import { GramjsTelegramResolver } from "../implementations/output/telegram/gramjs.telegramResolver";
+import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
+import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
+import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
+import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
+import { ExecuteIntentTool } from "../implementations/output/tools/executeIntent.tool";
+import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.tool";
+import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
 import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
-import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
-import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
-import { AaveV3Adapter } from "../implementations/output/yield/aaveV3Adapter";
-import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
-import { YieldPoolRanker } from "../../use-cases/implementations/yieldPoolRanker";
-import { YieldOptimizerUseCase } from "../../use-cases/implementations/yieldOptimizerUseCase";
-import { OnChainPositionDiscovery } from "../implementations/output/yield/onChainPositionDiscovery";
-import { SubgraphPrincipalProvider } from "../implementations/output/yield/subgraphPrincipalProvider";
-import type { IYieldOptimizerUseCase } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
-import type { IYieldRepository } from "../../use-cases/interface/yield/IYieldRepository";
-import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
-import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
-import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
-import { YieldCapability, buildNudgeKeyboard } from "../implementations/output/capabilities/yieldCapability";
-import { getYieldConfig, getEnabledYieldChains, getChainRpcUrl, getChainRpcUrls, getChainObject } from "../../helpers/chainConfig";
-import { YIELD_ENV } from "../../helpers/env/yieldEnv";
-import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
-import type { DailyReport } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
-import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
-import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCase";
-import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
-import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
-import { RecipientNotificationUseCase } from "../../use-cases/implementations/recipientNotification.useCase";
-import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
-import { RpcBalanceProvider } from "../implementations/output/balance/rpcBalanceProvider";
-import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
-import type { IBalanceProvider } from "../../use-cases/interface/output/blockchain/balanceProvider.interface";
-import { getAnkrBlockchain } from "../../helpers/chainConfig";
+import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
 import { AnkrTransferHistoryProvider } from "../implementations/output/transferHistory/ankrTransferHistoryProvider";
 import { CachedTransferHistoryProvider } from "../implementations/output/transferHistory/cachedTransferHistoryProvider";
-import { RedisTransferHistoryCache } from "../implementations/output/cache/redis.transferHistory";
-import { TransferHistoryUseCaseImpl } from "../../use-cases/implementations/transferHistory.usecase";
-import type { ITransferHistoryUseCase } from "../../use-cases/interface/input/transferHistory.interface";
-import type { ITransferHistoryProvider } from "../../use-cases/interface/output/blockchain/transferHistoryProvider.interface";
-import type { ITransferHistoryCache } from "../../use-cases/interface/output/cache/transferHistory.cache";
-import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
+import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
+import { PrivyWalletDataProvider } from "../implementations/output/walletData/privy.walletDataProvider";
+import { TavilyWebSearchService } from "../implementations/output/webSearch/tavily.webSearchService";
+import { AaveV3Adapter } from "../implementations/output/yield/aaveV3Adapter";
+import { OnChainPositionDiscovery } from "../implementations/output/yield/onChainPositionDiscovery";
+import { SubgraphPrincipalProvider } from "../implementations/output/yield/subgraphPrincipalProvider";
+import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
+import { ASTER_ENV } from "../../helpers/env/asterEnv";
+import { AsterDiamondClient } from "../implementations/output/aster/asterDiamond.client";
+import { AsterPairRegistry } from "../implementations/output/aster/asterPairRegistry";
+import {
+  AsterPriceOracle,
+  CachedStockPriceOracle,
+} from "../implementations/output/aster/asterPriceOracle";
+import { AsterBrokerProvider } from "../implementations/output/aster/asterBrokerProvider";
+import type { IStockPairRegistry } from "../../use-cases/interface/output/stocks/stockPair.interface";
+import type { IStockPriceOracle } from "../../use-cases/interface/output/stocks/stockPriceOracle.interface";
+import type { IStockBrokerProvider } from "../../use-cases/interface/output/stocks/stockBrokerProvider.interface";
 
 const log = createLogger("assistantDI");
 
@@ -164,12 +196,23 @@ export class AssistantInject {
   private _userIdleScanJob: UserIdleScanJob | null = null;
   private _yieldReportJob: YieldReportJob | null = null;
   private _loyaltyUseCase: ILoyaltyUseCase | null = null;
-  private _recipientNotificationUseCase: RecipientNotificationUseCase | null = null;
+  private _recipientNotificationUseCase: RecipientNotificationUseCase | null =
+    null;
   private _balanceProvider: IBalanceProvider | null = null;
   private _fallbackProvider: IBalanceProvider | null = null;
   private _ankrTransferHistory: ITransferHistoryProvider | null = null;
   private _transferHistoryCache: ITransferHistoryCache | null = null;
   private _transferHistoryUseCase: ITransferHistoryUseCase | null = null;
+  // ----- Aster (tokenized stocks) -----
+  private _asterDiamondClient: AsterDiamondClient | null = null;
+  private _stockPairRegistry: IStockPairRegistry | null = null;
+  private _stockPriceOracle: IStockPriceOracle | null = null;
+  private _stockBrokerProvider: IStockBrokerProvider | null = null;
+  private _stockPositionsProvider: IStockPositionsProvider | null = null;
+  private _crossChainSwapPlanner: ICrossChainSwapPlanner | null = null;
+  private _stockUseCase: IStockUseCase | null = null;
+  /** Set true if boot-time `verifyStockCapability()` fails (fix #9 — soft fail). */
+  private _stockCapabilityDisabled = false;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -208,24 +251,33 @@ export class AssistantInject {
 
   getTokenCrawlerJob(): TokenCrawlerJob {
     if (!this._tokenCrawlerJob) {
-      const intervalMs = parseInt(process.env.TOKEN_CRAWLER_INTERVAL_MS ?? String(15 * 60 * 1000), 10);
+      const intervalMs = parseInt(
+        process.env.TOKEN_CRAWLER_INTERVAL_MS ?? String(15 * 60 * 1000),
+        10,
+      );
       const ingestionUseCase = new TokenIngestionUseCase(
         new PangolinTokenCrawler(),
         this.getSqlDB().tokenRegistry,
       );
-      this._tokenCrawlerJob = new TokenCrawlerJob(ingestionUseCase, this.getChainId(), intervalMs);
+      this._tokenCrawlerJob = new TokenCrawlerJob(
+        ingestionUseCase,
+        this.getChainId(),
+        intervalMs,
+      );
     }
     return this._tokenCrawlerJob;
   }
 
   getSolverRegistry(): SolverRegistry {
     if (!this._solverRegistry) {
-      this._solverRegistry = new SolverRegistry([], this.getSqlDB().toolManifests);
+      this._solverRegistry = new SolverRegistry(
+        [],
+        this.getSqlDB().toolManifests,
+      );
       this._solverRegistry.register(
         INTENT_ACTION.CLAIM_REWARDS,
         new ClaimRewardsSolver(process.env.REWARD_CONTROLLER_ADDRESS ?? ""),
       );
-
     }
     return this._solverRegistry;
   }
@@ -268,7 +320,10 @@ export class AssistantInject {
     const vectorStore = this.getToolVectorStore();
     if (!embeddingService || !vectorStore) return undefined;
     if (!this._toolIndexService) {
-      this._toolIndexService = new PineconeToolIndexService(embeddingService, vectorStore);
+      this._toolIndexService = new PineconeToolIndexService(
+        embeddingService,
+        vectorStore,
+      );
     }
     return this._toolIndexService;
   }
@@ -353,14 +408,31 @@ export class AssistantInject {
       const balanceProvider = this.getBalanceProvider();
       const fallbackProvider = this.getFallbackProvider();
 
-      const registryFactory = async (userId: string, conversationId: string): Promise<IToolRegistry> => {
+      const registryFactory = async (
+        userId: string,
+        conversationId: string,
+      ): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
 
         r.register(new WebSearchTool(webSearchService));
-        r.register(new ExecuteIntentTool(userId, conversationId, intentUseCase));
-        r.register(new GetPortfolioTool(userId, userProfileDB, balanceProvider, fallbackProvider, chainId, userProfileCache));
+        r.register(
+          new ExecuteIntentTool(userId, conversationId, intentUseCase),
+        );
+        r.register(
+          new GetPortfolioTool(
+            userId,
+            userProfileDB,
+            balanceProvider,
+            fallbackProvider,
+            chainId,
+            userProfileCache,
+          ),
+        );
 
-        for (const tool of this.getSystemToolProvider().getTools(userId, conversationId)) {
+        for (const tool of this.getSystemToolProvider().getTools(
+          userId,
+          conversationId,
+        )) {
           r.register(tool);
         }
 
@@ -433,15 +505,19 @@ export class AssistantInject {
     if (!url) return undefined;
     if (!this._redis) {
       this._redis = new Redis(url, { lazyConnect: false });
-      this._redis.on('error', (err: Error) => log.error({ err }, 'Redis error'));
-      this._redis.on('ready', () => log.info('Redis ready'));
+      this._redis.on("error", (err: Error) =>
+        log.error({ err }, "Redis error"),
+      );
+      this._redis.on("ready", () => log.info("Redis ready"));
       metricsRegistry.bindRedis(this._redis);
       const _origSend = this._redis.sendCommand.bind(this._redis);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._redis as any).sendCommand = (cmd: any) => {
         const start = Date.now();
         const promise = _origSend(cmd);
-        Promise.resolve(promise).finally(() => metricsRegistry.recordRedisOp(Date.now() - start));
+        Promise.resolve(promise).finally(() =>
+          metricsRegistry.recordRedisOp(Date.now() - start),
+        );
         return promise;
       };
     }
@@ -451,7 +527,9 @@ export class AssistantInject {
   getSessionDelegationCache(): ISessionDelegationCache | undefined {
     if (!this.getRedis()) return undefined;
     if (!this._sessionDelegationCache) {
-      this._sessionDelegationCache = new RedisSessionDelegationCache(this.getRedis()!);
+      this._sessionDelegationCache = new RedisSessionDelegationCache(
+        this.getRedis()!,
+      );
     }
     return this._sessionDelegationCache;
   }
@@ -485,7 +563,9 @@ export class AssistantInject {
   }
 
   getSigningRequestUseCase(
-    onResolved: (event: import("../../use-cases/interface/input/signingRequest.interface").SigningResolutionEvent) => void,
+    onResolved: (
+      event: import("../../use-cases/interface/input/signingRequest.interface").SigningResolutionEvent,
+    ) => void,
   ): ISigningRequestUseCase | undefined {
     const redis = this.getRedis();
     if (!redis) return undefined;
@@ -611,6 +691,12 @@ export class AssistantInject {
         this.getUserProfileCache(),
         this.getTransferHistoryUseCase(),
         this.getChainId(),
+        {
+          oracle: this.getStockPriceOracle(),
+          pairs: this.getStockPairRegistry(),
+          getStockUseCase: () => this.getStockUseCaseSync(),
+          isDisabled: () => this.isStockCapabilityDisabled(),
+        },
       );
     }
     return this._systemToolProvider;
@@ -645,7 +731,10 @@ export class AssistantInject {
     if (this._transferHistoryUseCase) return this._transferHistoryUseCase;
     const chainId = this.getChainId();
     if (getAnkrBlockchain(chainId) == null) {
-      log.warn({ chainId }, "transfer-history disabled — chain not supported by Ankr");
+      log.warn(
+        { chainId },
+        "transfer-history disabled — chain not supported by Ankr",
+      );
       return undefined;
     }
     const ankr = this.getAnkrTransferHistoryProvider();
@@ -706,7 +795,7 @@ export class AssistantInject {
    * Returns undefined if no bot has been attached yet — capabilities that
    * need to render to Telegram require a live Bot reference.
    */
-  getCapabilityDispatcher(): ICapabilityDispatcher | undefined {
+  async getCapabilityDispatcher(): Promise<ICapabilityDispatcher | undefined> {
     if (this._capabilityDispatcher) return this._capabilityDispatcher;
     const bot = this.getBot();
     if (!bot) return undefined;
@@ -759,6 +848,8 @@ export class AssistantInject {
       if (command === INTENT_COMMAND.WITHDRAW) continue;
       if (command === INTENT_COMMAND.POINTS) continue;
       if (command === INTENT_COMMAND.LEADERBOARD) continue;
+      if (command === INTENT_COMMAND.STOCK) continue;
+      if (command === INTENT_COMMAND.POSITIONS) continue;
       registry.register(new SendCapability(command, sendDeps));
     }
 
@@ -783,7 +874,10 @@ export class AssistantInject {
         }),
       );
     } else {
-      log.warn({ reason: "redis_unavailable" }, "/swap capability skipped — signing-request use case not ready");
+      log.warn(
+        { reason: "redis_unavailable" },
+        "/swap capability skipped — signing-request use case not ready",
+      );
     }
 
     const yieldOptimizer = this.getYieldOptimizerUseCase();
@@ -807,11 +901,48 @@ export class AssistantInject {
       }),
     );
 
+    // /stock — Aster perpetuals capability. Requires the signing-request use
+    // case (mini-app autosign) and a working broker provider. Soft-disabled
+    // when boot verification fails (`isStockCapabilityDisabled`).
+    if (this._signingRequestUseCase) {
+      try {
+        const stockUseCase = await this.getStockUseCase();
+        registry.register(
+          new StockCapability({
+            stockUseCase,
+            signingRequestUseCase: this._signingRequestUseCase,
+            miniAppRequestCache: this.getMiniAppRequestCache(),
+            loyaltyUseCase: this.getLoyaltyUseCase(),
+            isStockCapabilityDisabled: () => this.isStockCapabilityDisabled(),
+          }),
+        );
+      } catch (err) {
+        log.error(
+          { err },
+          "/stock capability skipped — broker provider failed to initialise",
+        );
+      }
+    } else {
+      log.warn(
+        { reason: "redis_unavailable" },
+        "/stock capability skipped — signing-request use case not ready",
+      );
+    }
+
+    // /positions — chat-seeded summariser of open Aster positions. Delegates
+    // to the assistant LLM loop with a fixed prompt that nudges the agent
+    // toward the `get_stock_positions` tool.
+    registry.register(new PositionsCapability(this.getUseCase()));
+
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
     // command and isn't continuing a pending capability flow.
     registry.registerDefault(new AssistantChatCapability(this.getUseCase()));
 
-    this._capabilityDispatcher = new CapabilityDispatcher(registry, renderer, pending);
+    this._capabilityDispatcher = new CapabilityDispatcher(
+      registry,
+      renderer,
+      pending,
+    );
     return this._capabilityDispatcher;
   }
 
@@ -880,7 +1011,9 @@ export class AssistantInject {
         redis,
         nudgeCooldownSec: YIELD_ENV.nudgeCooldownSec,
         idleThresholdUsd: YIELD_ENV.idleUsdcThresholdUsd,
-        principalProvider: new SubgraphPrincipalProvider(YIELD_ENV.theGraphApiKey),
+        principalProvider: new SubgraphPrincipalProvider(
+          YIELD_ENV.theGraphApiKey,
+        ),
         positionDiscovery: new OnChainPositionDiscovery({ protocolRegistry }),
         sendNudge,
       });
@@ -892,7 +1025,10 @@ export class AssistantInject {
     const optimizer = this.getYieldOptimizerUseCase();
     if (!optimizer) return undefined;
     if (!this._yieldPoolScanJob) {
-      this._yieldPoolScanJob = new YieldPoolScanJob(optimizer, YIELD_ENV.poolScanIntervalMs);
+      this._yieldPoolScanJob = new YieldPoolScanJob(
+        optimizer,
+        YIELD_ENV.poolScanIntervalMs,
+      );
     }
     return this._yieldPoolScanJob;
   }
@@ -923,10 +1059,20 @@ export class AssistantInject {
         process.env.OPENAI_MODEL ?? "gpt-4o",
       );
 
-      const sendReport = async (_userId: string, chatId: string, report: DailyReport): Promise<void> => {
+      const sendReport = async (
+        _userId: string,
+        chatId: string,
+        report: DailyReport,
+      ): Promise<void> => {
         if (!bot) return;
 
-        type PositionSummary = { protocol: string; symbol: string; balance: string; delta: string; deltaPrefix: string };
+        type PositionSummary = {
+          protocol: string;
+          symbol: string;
+          balance: string;
+          delta: string;
+          deltaPrefix: string;
+        };
         const summaries: PositionSummary[] = [];
         for (const pos of report.positions) {
           const yieldCfg = getYieldConfig(pos.chainId);
@@ -935,16 +1081,29 @@ export class AssistantInject {
           );
           if (!stable) continue;
           const { decimals, symbol } = stable;
-          const balance = (Number(pos.balanceRaw) / Math.pow(10, decimals)).toFixed(4);
-          const delta = (Number(pos.delta24hRaw) / Math.pow(10, decimals)).toFixed(4);
+          const balance = (
+            Number(pos.balanceRaw) / Math.pow(10, decimals)
+          ).toFixed(4);
+          const delta = (
+            Number(pos.delta24hRaw) / Math.pow(10, decimals)
+          ).toFixed(4);
           const deltaPrefix = Number(pos.delta24hRaw) >= 0 ? "+" : "";
-          summaries.push({ protocol: pos.protocolId, symbol, balance, delta, deltaPrefix });
+          summaries.push({
+            protocol: pos.protocolId,
+            symbol,
+            balance,
+            delta,
+            deltaPrefix,
+          });
         }
 
         if (summaries.length === 0) return;
 
         const dataBlurb = summaries
-          .map((s) => `${s.protocol}: ${s.deltaPrefix}${s.delta} ${s.symbol} earned today, ${s.balance} ${s.symbol} total`)
+          .map(
+            (s) =>
+              `${s.protocol}: ${s.deltaPrefix}${s.delta} ${s.symbol} earned today, ${s.balance} ${s.symbol} total`,
+          )
           .join("; ");
 
         let message: string;
@@ -975,11 +1134,16 @@ export class AssistantInject {
 
         if (!message) {
           message = summaries
-            .map((s) => `*${s.protocol}* — earned ${s.deltaPrefix}${s.delta} *${s.symbol}* today · ${s.balance} *${s.symbol}* total`)
+            .map(
+              (s) =>
+                `*${s.protocol}* — earned ${s.deltaPrefix}${s.delta} *${s.symbol}* today · ${s.balance} *${s.symbol}* total`,
+            )
             .join("\n");
         }
 
-        await bot.api.sendMessage(Number(chatId), `📊 ${message}`, { parse_mode: "Markdown" });
+        await bot.api.sendMessage(Number(chatId), `${message}`, {
+          parse_mode: "Markdown",
+        });
       };
 
       this._yieldReportJob = new YieldReportJob(
@@ -1023,7 +1187,9 @@ export class AssistantInject {
     return this._recipientNotificationUseCase;
   }
 
-  getHttpApiServer(signingRequestUseCase?: ISigningRequestUseCase): HttpApiServer {
+  getHttpApiServer(
+    signingRequestUseCase?: ISigningRequestUseCase,
+  ): HttpApiServer {
     const port = parseInt(process.env.HTTP_API_PORT ?? "4000", 10);
     return new HttpApiServer(
       this.getAuthUseCase(),
@@ -1047,6 +1213,145 @@ export class AssistantInject {
       this.getLoyaltyUseCase(),
       this.getSqlDB().users,
       this.getTransferHistoryUseCase(),
+      this.getStockPairRegistry(),
+      this.getStockPriceOracle(),
+      () => this.isStockCapabilityDisabled(),
+      () => this.getStockUseCaseSync(),
     );
+  }
+
+  // -------------------------------------------------------------------
+  // Aster (tokenized stocks) — Phase 1 wiring.
+  // -------------------------------------------------------------------
+
+  getAsterDiamondClient(): AsterDiamondClient {
+    if (!this._asterDiamondClient) {
+      this._asterDiamondClient = new AsterDiamondClient();
+    }
+    return this._asterDiamondClient;
+  }
+
+  getStockPairRegistry(): IStockPairRegistry {
+    if (!this._stockPairRegistry) {
+      this._stockPairRegistry = new AsterPairRegistry(this.getAsterDiamondClient());
+    }
+    return this._stockPairRegistry;
+  }
+
+  getStockPriceOracle(): IStockPriceOracle {
+    if (!this._stockPriceOracle) {
+      const inner = new AsterPriceOracle(
+        this.getAsterDiamondClient(),
+        this.getStockPairRegistry(),
+      );
+      this._stockPriceOracle = new CachedStockPriceOracle(inner, {
+        ttlSec: ASTER_ENV.priceTtlSec,
+      });
+    }
+    return this._stockPriceOracle;
+  }
+
+  /**
+   * Per-user-bound positions provider. Each call returns a fresh cached
+   * wrapper keyed by `userId` so users don't see one another's positions.
+   * The underlying `AsterPositionsProvider` is shared.
+   */
+  getStockPositionsProvider(_userId: string): IStockPositionsProvider {
+    // Per-process cache is fine; cache key includes the trader address so
+    // users with different SCAs never collide.
+    if (!this._stockPositionsProvider) {
+      // Decimals must come from the broker's collateral token, never
+      // hardcoded. `verifyStockCapability` eagerly constructs the broker
+      // at boot so this lookup is always satisfied by the time the
+      // capability dispatcher reaches positions.
+      if (!this._stockBrokerProvider) {
+        throw new Error(
+          "stock broker provider not initialised — call verifyStockCapability() first",
+        );
+      }
+      const inner = new AsterPositionsProvider(
+        this.getAsterDiamondClient(),
+        this.getStockPairRegistry(),
+        this._stockBrokerProvider.collateralToken.decimals,
+      );
+      this._stockPositionsProvider = new CachedStockPositionsProvider(inner, {
+        ttlSec: ASTER_ENV.positionsTtlSec,
+      });
+    }
+    return this._stockPositionsProvider;
+  }
+
+  getCrossChainSwapPlanner(): ICrossChainSwapPlanner {
+    if (!this._crossChainSwapPlanner) {
+      this._crossChainSwapPlanner = new RelayCrossChainSwapPlanner(
+        this.getRelayClient(),
+      );
+    }
+    return this._crossChainSwapPlanner;
+  }
+
+  /**
+   * Memoised stock use-case. Async because the broker construction reads
+   * `tokenRegistry`. Used by both the `/stock` capability dispatcher and
+   * the read-only HTTP routes (`/stocks/positions`).
+   */
+  async getStockUseCase(): Promise<IStockUseCase> {
+    if (!this._stockUseCase) {
+      const broker = await this.getStockBrokerProvider();
+      this._stockUseCase = new StockUseCaseImpl({
+        broker,
+        positions: (uid) => this.getStockPositionsProvider(uid),
+        oracle: this.getStockPriceOracle(),
+        pairs: this.getStockPairRegistry(),
+        crossChainSwap: this.getCrossChainSwapPlanner(),
+        userProfileRepo: this.getSqlDB().userProfiles,
+        tokenRegistry: this.getTokenRegistryService(),
+      });
+    }
+    return this._stockUseCase;
+  }
+
+  /** Sync accessor for the memoised stock use-case. Returns null if it has
+   * not yet been constructed (verifyStockCapability is the boot path that
+   * eagerly initialises it). */
+  getStockUseCaseSync(): IStockUseCase | null {
+    return this._stockUseCase;
+  }
+
+  /** Memoised broker provider (async because USDC.bsc decimals come from token_registry). */
+  async getStockBrokerProvider(): Promise<IStockBrokerProvider> {
+    if (!this._stockBrokerProvider) {
+      this._stockBrokerProvider = await AsterBrokerProvider.create(
+        this.getAsterDiamondClient(),
+        this.getStockPairRegistry(),
+        this.getTokenRegistryService(),
+      );
+    }
+    return this._stockBrokerProvider;
+  }
+
+  isStockCapabilityDisabled(): boolean {
+    return this._stockCapabilityDisabled;
+  }
+
+  /**
+   * Boot-time verification (fix #9 — soft fail). On failure, the soft-disable
+   * flag flips on; HTTP routes return 503 and (in Phase 2) the stock
+   * capability replies with a friendly "stocks unavailable" message.
+   * Non-stock features keep booting either way.
+   */
+  async verifyStockCapability(): Promise<void> {
+    try {
+      await this.getStockPairRegistry().verifyAgainstChain();
+      // Eagerly construct the broker + use-case so collateral decimals
+      // are available synchronously to `getStockPositionsProvider`
+      // (sync factory) and the HTTP routes can hand off to a ready
+      // use-case via `getStockUseCaseSync()`.
+      await this.getStockUseCase();
+      log.info({ step: "succeeded" }, "stock capability verified");
+    } catch (err) {
+      this._stockCapabilityDisabled = true;
+      log.error({ err }, "stock capability disabled — boot verification failed");
+    }
   }
 }

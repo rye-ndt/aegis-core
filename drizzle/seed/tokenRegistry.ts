@@ -39,6 +39,24 @@ const TOKENS_BY_CHAIN: Record<number, TokenSeed[]> = {
 const TOKENS = TOKENS_BY_CHAIN[CHAIN_ID];
 if (!TOKENS) throw new Error(`No token seed defined for CHAIN_ID=${CHAIN_ID}`);
 
+// Cross-chain rows seeded regardless of CHAIN_ID — required by capabilities
+// that span chains. USDC.bsc is the venue collateral for tokenized stocks
+// (Aster on BSC). 18 decimals on BSC, NOT 6.
+type CrossChainSeed = TokenSeed & { chainId: number };
+const CROSS_CHAIN_SEEDS: CrossChainSeed[] = [];
+const bscUsdc = process.env.BSC_USDC?.trim();
+if (bscUsdc && /^0x[0-9a-fA-F]{40}$/.test(bscUsdc)) {
+  CROSS_CHAIN_SEEDS.push({
+    chainId: 56,
+    symbol: "USDC",
+    name: "Binance-Peg USD Coin",
+    address: bscUsdc,
+    decimals: 18,
+    isNative: false,
+    isVerified: true,
+  });
+}
+
 async function seed() {
   const pool = new Pool({
     connectionString:
@@ -48,14 +66,18 @@ async function seed() {
 
   const now = Math.floor(Date.now() / 1000);
 
-  for (const token of TOKENS) {
+  type Row = TokenSeed & { chainId: number };
+  const homeRows: Row[] = TOKENS.map((t) => ({ ...t, chainId: CHAIN_ID }));
+  const allRows: Row[] = [...homeRows, ...CROSS_CHAIN_SEEDS];
+
+  for (const token of allRows) {
     await db
       .insert(tokenRegistry)
       .values({
         id: uuidv4(),
         symbol: token.symbol,
         name: token.name,
-        chainId: CHAIN_ID,
+        chainId: token.chainId,
         address: token.address,
         decimals: token.decimals,
         isNative: token.isNative,
@@ -73,7 +95,7 @@ async function seed() {
           updatedAtEpoch: now,
         },
       });
-    console.log(`Seeded ${token.symbol}`);
+    console.log(`Seeded ${token.symbol} on chain ${token.chainId}`);
   }
 
   await pool.end();

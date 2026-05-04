@@ -2,75 +2,90 @@
 
 ## The one-line pitch
 
-Aegis is the AI-native crypto wallet for the 500 million people who want to participate in DeFi but can't navigate it — a Telegram-native agent that understands plain language, executes on-chain actions non-custodially, and proactively grows your money while you sleep.
+Aegis is the daily intelligence layer for your on-chain money — the easiest way for Southeast Asian crypto holders to earn real DeFi yield, hold US stocks, and act on market moves through a single Telegram chat, in plain language, without ever giving up custody.
 
 ---
 
-## The problem: DeFi is still for insiders
+## The problem: Southeast Asia holds the crypto, but can't use it
 
-**Crypto is a trillion-dollar asset class that most people can't actually use.**
+Southeast Asia is one of the most crypto-saturated regions in the world. Vietnam ranks consistently in the top 5 globally for crypto adoption. The Philippines, Indonesia, and Thailand each have tens of millions of holders. These users hold stablecoins on Binance and local exchanges. They have idle USDT sitting in custodial accounts earning 1–2% — while the same dollar on-chain can earn 5–8% in Aave or comparable protocols.
 
-The gap isn't knowledge or desire. It's interface. Today's DeFi experience requires users to:
-- Copy-paste wallet addresses, juggle gas settings, and manually approve every transaction
-- Trust centralized bots that demand their private key — one breach away from losing everything
-- Actively monitor yield rates, manually move funds across protocols, and time the market themselves
-- Leave idle stablecoins sitting untouched while losing real value to inflation
+They cannot access that yield, because using it requires them to:
 
-Meanwhile, 800+ million people use Telegram daily. Many already hold crypto. None of them want to be power users. They want results.
+- Bridge funds off centralized exchanges into a self-custody wallet
+- Learn to use MetaMask, manage seed phrases, pay gas, and approve contracts
+- Decide which protocol, which pool, which chain — and monitor it daily
+- Trust a random Telegram trading bot with their private key, knowing one breach erases everything
+
+Meanwhile, the same users are locked out of US equities entirely — you cannot open a Robinhood or Schwab account from Hanoi or Manila. They want exposure to Tesla, Nvidia, the S&P. They have no way to get it.
+
+The result: hundreds of millions of dollars of stablecoins sitting idle in Southeast Asian retail accounts, earning nothing, while their holders watch DeFi yields and US equities from the sidelines.
 
 ---
 
 ## The opportunity
 
-Three trends are converging right now:
+Three things are converging right now that did not exist eighteen months ago:
 
-1. **Account abstraction (ERC-4337) is live.** Smart Contract Accounts allow session-key delegation — users can authorize an agent to act on their behalf without ever handing over the master key.
+1. **Account abstraction (ERC-4337) is production-mature.** Smart Contract Accounts with session-key delegation let an agent execute on a user's behalf without ever holding the master key. The custodial-vs-self-custody tradeoff that has defined crypto UX is finally solvable.
 
-2. **LLMs are good enough to parse intent.** "Send $50 USDC to @mike" is now a fully resolvable instruction. The translation layer from natural language to on-chain calldata works.
+2. **LLM intent parsing crossed the reliability threshold.** "Move my idle USDC into the highest-yield pool" is now a deterministic instruction. The translation layer from natural language to on-chain calldata works in production.
 
-3. **Telegram Mini Apps are mainstream.** Over 300 million users interact with Telegram Mini Apps monthly. The distribution channel already exists and has deep penetration in crypto-native markets.
+3. **Telegram is the de facto financial frontend in Southeast Asia.** Vietnam alone has tens of millions of daily Telegram users; the platform is where crypto communities, traders, and OTC desks already live. Telegram Mini Apps added native payment rails and TON wallet integration in 2024. The distribution channel is in place.
 
-The window to own the "AI-native DeFi wallet" category is open. It will not stay open long.
+Tokenized US equities (via Aster) and prediction markets (via Kalshi) became accessible to non-US users on-chain in the same window. For the first time, a single agent can give a Vietnamese retail user yield on stables, exposure to Tesla, and a position on the next Fed decision — with no offshore brokerage account and no custodial trust.
+
+The window to own the "AI-native financial command center for SEA retail" category is open. It will not stay open.
 
 ---
 
 ## Our solution: Aegis
 
-Aegis is a Telegram-native AI agent that lets anyone execute DeFi actions — sending, swapping, and earning yield — through a natural language conversation, with no private key exposure, no complex UI, and no manual monitoring.
+Aegis is a Telegram-native AI agent. Every morning, the user opens it and sees:
+
+- What their portfolio did yesterday, and _why_ — yield earned, gains and losses on positions, fees paid, gas spent
+- What's at risk today — APY changes, idle balances, market moves on assets they hold
+- What to do about it — one tap to compound, rebalance, hedge, or take a new position
+
+Underneath that intelligence layer, every DeFi action is one sentence away. Send. Swap. Earn yield. Buy tokenized US stocks. Take a position on Kalshi. The agent resolves the intent, sequences the on-chain calls, and executes through ZeroDev session keys — non-custodial, no signing friction, no learning curve.
 
 ### What users actually experience
 
-- **"Send 50 USDC to @alice"** — Aegis resolves Alice's wallet from her Telegram handle, estimates gas, shows a plain-English preview, and executes via a one-tap approval in the mini-app.
-- **"Swap my ETH for AVAX"** — Aegis finds the best route across chains via Relay, sequences the transactions, and keeps the mini-app open until every step is signed.
-- **"Earn yield on my USDC"** — Aegis proactively detects idle USDC, suggests the highest-scoring Aave pool (ranked by a 7-day EMA algorithm), and moves funds with a single approval. A daily PnL report lands in Telegram every morning.
-- **"How much did I spend on gas last month?"** — The AI assistant answers from on-chain data via tool calls.
+- **"Earn yield on my USDC"** — Aegis surveys Aave and other protocols, ranks by 7-day EMA, suggests the highest-scoring pool, and moves funds with one approval. A daily PnL report lands in Telegram every morning.
+- **"Buy $200 of Tesla"** — Aegis routes through Aster, executes the position, and adds it to the portfolio view. No US brokerage account required.
+- **"Will the Fed cut rates in June?"** — Aegis pulls live Kalshi odds and lets the user take a position from chat.
+- **"Send 50 USDC to @alice"** — Resolved from Telegram handle, executed in one tap.
+- **"How much did I make this week?"** — Answered from on-chain data via tool calls, in plain language.
 
 ### Why it's defensible
 
-| What we do | What competitors do |
-|---|---|
-| Session key delegation — the backend never holds a private key | Most bots require key export |
-| Intent-based NL → calldata pipeline | Fixed command menus |
-| Proactive yield engine with daily nudges | Passive, user must act |
-| Modular Capability system — any DeFi action can be added as a plugin | Monolithic, centralized roadmap |
-| Loyalty points rewarding on-chain activity | No retention mechanics |
+| What we do                                                    | What competitors do                                    |
+| ------------------------------------------------------------- | ------------------------------------------------------ |
+| Daily intelligence layer — the user comes back every morning  | Reactive UIs the user opens only when they want to act |
+| Session-key delegation — backend never holds a key            | Trading bots that demand seed phrase export            |
+| Intent-based NL → calldata pipeline                           | Fixed command menus and clunky web UIs                 |
+| Modular Capability platform — any protocol plugs in as a tool | Monolithic feature roadmaps centralized on one team    |
+| Loyalty points rewarding on-chain activity                    | No retention mechanics                                 |
 
-**The core moat is trust.** Non-custodial execution is not a feature — it is the only architecture that can scale to mainstream users who've been burned by custodial failures (FTX, Binance, etc.). Our session-key model gives users full control without the UX burden.
+The core moat is two-sided. **For users**, it is trust — non-custodial execution is the only architecture that scales to a region scarred by FTX, exchange freezes, and rug pulls. **For protocols**, it is distribution — once Aegis owns the SEA retail relationship, every new DeFi product wants to be the next plugged-in Capability, not the next standalone app fighting for installs.
 
 ---
 
 ## Business model
 
 ### Primary: Protocol fee on execution
-Every swap, send, and yield deposit settled through Aegis carries a small protocol fee baked into the transaction. This is invisible to the user — the gas abstraction layer absorbs the complexity.
 
-### Secondary: Premium features
-- **Aegis Guard** — customizable per-token spending limits; advanced controls for power users.
-- **Loyalty Season passes** — seasonal point multipliers and rewards for high-volume users.
-- **Developer tools** — custom HTTP tool registration (enterprises and protocols plug their products into the agent's capability layer).
+Every swap, send, yield deposit, stock purchase, and prediction market position settled through Aegis carries a small protocol fee, abstracted into the transaction. Invisible to the user, scales linearly with volume.
 
-### Tertiary: Ecosystem partnerships
-Protocol integrations (lending, DEXs, liquid staking) pay for placement in the yield ranker and capability registry. This is similar to how aggregators charge protocols for priority routing.
+### Secondary: Platform fees from integrated protocols
+
+The Capability system is open. Lending protocols, DEXs, asset issuers, and prediction markets pay for placement and integration — analogous to how aggregators charge for routing priority, or how Shopify charges app developers for marketplace presence. This is where the long-term margin lives.
+
+### Tertiary: Premium features
+
+- **Aegis Guard** — customizable per-token spending limits and advanced controls
+- **Loyalty Season passes** — point multipliers and tiered rewards
+- **Developer tools** — custom HTTP tool registration for protocols and enterprises
 
 ---
 
@@ -78,40 +93,49 @@ Protocol integrations (lending, DEXs, liquid staking) pay for placement in the y
 
 **The product is live and fully functional on Avalanche mainnet.**
 
-- Non-custodial send, swap, and yield deposit/withdraw are all production-ready.
-- Loyalty Season 0 is seeded and active — daily on-chain activity is already being rewarded.
-- A deployed Cloud Run backend handles real user sessions with structured observability (pino logs, Prometheus-compatible metrics).
-- The Telegram bot and Mini App are integrated end-to-end: auth, session key delegation, signing, confirmation, and failure recovery (including an insufficient-balance recovery flow that automatically prompts the user to top up via MoonPay).
+- Non-custodial send, swap (cross-chain via Relay), and yield deposit/withdraw on Aave v3 are production-ready
+- Loyalty Season 0 is seeded and active — daily on-chain activity is being rewarded
+- Cloud Run backend handles real user sessions with structured observability (pino logs, Prometheus-compatible metrics, Neon Postgres, Upstash Redis)
+- Telegram bot and Mini App are integrated end-to-end: auth via Privy, session key delegation, signing, confirmation, and failure recovery (including auto-prompt to top up via MoonPay on insufficient balance)
+- Tokenized US stocks (via Aster) and prediction markets (via Kalshi) are the next two Capabilities, slotting into the same architecture without requiring a redesign
+
+The architecture was built from day one as a hexagonal, plugin-style platform. Adding a new protocol is a Capability, not a refactor.
 
 ---
 
 ## Why now
 
-- **Account abstraction reached production maturity in 2023–2024.** ZeroDev and Pimlico have hardened the infrastructure. Building on ERC-4337 today is like building on AWS in 2008.
-- **OpenAI's function-calling API makes intent parsing production-viable.** The NL → structured JSON pipeline is reliable enough to trust with real money.
-- **Telegram's mini-app ecosystem is at an inflection point.** The platform added payment rails and native TON wallet integration in 2024; DeFi mini-apps are the obvious next layer.
-- **Regulatory clarity is improving.** The shift in US regulatory posture creates a window to build consumer-facing on-chain products that were previously too risky to market.
+- **Account abstraction reached production maturity in 2023–2024.** ZeroDev and Pimlico hardened the infrastructure. Building on ERC-4337 today is like building on AWS in 2008.
+- **OpenAI's function-calling API made intent parsing trustworthy with real money.** The NL → structured JSON pipeline is reliable enough to ship.
+- **Telegram Mini Apps hit an inflection point in SEA.** Native payments, TON integration, and 800M+ global daily users — heavily concentrated in our target region.
+- **Tokenized US equities are accessible on-chain for the first time.** Aster and similar issuers opened up an asset class that was effectively walled off from non-US retail.
+- **Regulatory clarity is improving in key SEA markets.** Vietnam, Thailand, and the Philippines have all signaled clearer frameworks for retail crypto products in the past 18 months.
 
 ---
 
 ## Roadmap
 
-### Now (Avalanche mainnet)
+### Now (Avalanche mainnet, SEA launch)
+
 - Send, swap (cross-chain via Relay), yield (Aave v3 USDC)
-- Loyalty Season 0 with 7 action types
+- Loyalty Season 0
 - Non-custodial execution via ZeroDev session keys
-- Proactive daily yield reports and idle-fund nudges
-- P2P notification — recipients get notified when they receive a transfer
+- Daily yield reports and idle-fund nudges
+- P2P recipient notifications via Telegram
 
 ### Next (6 months)
-- Multi-chain expansion (Base, Arbitrum, Polygon, Optimism) — chain config is already abstracted
+
+- **Tokenized US stocks via Aster** — Tesla, Nvidia, S&P, accessible from any SEA Telegram account
+- **Prediction markets via Kalshi** — Fed decisions, elections, sports, all from chat
+- **Daily intelligence engine v2** — personalized portfolio reports with risk callouts and one-tap actions
+- Multi-chain expansion (Base, Arbitrum, Polygon) — chain config already abstracted
 - Additional yield protocols (Benqi, Yearn) — adapter interface is pluggable
-- Onramp via MoonPay webhook (buy → watch deposit → auto-invest)
-- Proactive market intelligence — daily sentiment → personalized position suggestions
-- Mobile push notifications via Telegram channel
+- Onramp via MoonPay webhook — buy → watch deposit → auto-invest
 
 ### Later (12 months)
-- Agent-to-agent marketplace — third-party protocols publish Capability plugins
+
+- Geographic expansion beyond SEA (LatAm, MENA share the same structural gap)
+- Capability marketplace — third-party protocols ship plugins without our involvement
 - Institutional Aegis Guard — treasury management for DAOs and funds
 - Referral program with on-chain reward distribution
 
@@ -119,20 +143,23 @@ Protocol integrations (lending, DEXs, liquid staking) pay for placement in the y
 
 ## Team
 
-Built by founders who have shipped production DeFi infrastructure and understand both the technical depth (hexagonal architecture, ERC-4337, cross-chain execution) and the consumer product challenge (Telegram-native UX, non-technical user flows, trust-first design).
+Built by founders who have shipped production DeFi infrastructure and understand both the technical depth (hexagonal architecture, ERC-4337, cross-chain execution) and the consumer challenge (Telegram-native UX, non-technical users, trust-first design in a market burned by custodial failures).
 
 ---
 
 ## Ask
 
 We are raising a **pre-seed round** to:
-1. Expand the team (2 engineers, 1 growth)
-2. Cover protocol integration costs and ecosystem partnership deals
-3. Fund user acquisition through crypto communities and Telegram growth channels
-4. Scale infrastructure to 10x current user capacity
 
-**The architecture is built to scale. The moat is the user relationship. The timing is now.**
+1. Hire 2 engineers and 1 growth lead for the SEA launch
+2. Cover Aster and Kalshi integration costs and launch ecosystem partnerships
+3. Fund user acquisition through Vietnamese and Filipino crypto communities and Telegram channels
+4. Scale infrastructure to 10x current capacity ahead of the launch wave
+
+The architecture is built to scale. The wedge is daily intelligence. The beachhead is Southeast Asia. The endgame is the platform every on-chain protocol plugs into to reach retail.
+
+The timing is now.
 
 ---
 
-*Aegis — own your keys, not your complexity.*
+_Aegis — own your keys, not your complexity._

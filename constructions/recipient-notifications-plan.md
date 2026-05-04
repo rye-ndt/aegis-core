@@ -57,38 +57,44 @@ Later: Bob /start  →  AuthHandler creates session  →
 Add after `telegramSessions`:
 
 ```ts
-export const recipientNotifications = pgTable("recipient_notifications", {
-  id: uuid("id").primaryKey(),
-  // Recipient identity. We always know telegramUserId at send time; the
-  // other two are filled in once the recipient /starts the bot.
-  recipientTelegramUserId: text("recipient_telegram_user_id").notNull(),
-  recipientUserId: uuid("recipient_user_id"),         // null until /start
-  recipientChatId: text("recipient_chat_id"),         // null until /start
+export const recipientNotifications = pgTable(
+  "recipient_notifications",
+  {
+    id: uuid("id").primaryKey(),
+    // Recipient identity. We always know telegramUserId at send time; the
+    // other two are filled in once the recipient /starts the bot.
+    recipientTelegramUserId: text("recipient_telegram_user_id").notNull(),
+    recipientUserId: uuid("recipient_user_id"), // null until /start
+    recipientChatId: text("recipient_chat_id"), // null until /start
 
-  // Sender context (for the message body — no PII beyond what Alice typed).
-  senderUserId: uuid("sender_user_id").notNull(),
-  senderChatId: text("sender_chat_id").notNull(),
-  senderDisplayName: text("sender_display_name"),     // e.g. "alice" or "Alice S."
-  senderHandle: text("sender_handle"),                // "alice" without @, if known
+    // Sender context (for the message body — no PII beyond what Alice typed).
+    senderUserId: uuid("sender_user_id").notNull(),
+    senderChatId: text("sender_chat_id").notNull(),
+    senderDisplayName: text("sender_display_name"), // e.g. "alice" or "Alice S."
+    senderHandle: text("sender_handle"), // "alice" without @, if known
 
-  // Transfer context.
-  kind: text("kind").notNull(),                       // 'p2p_send' for v1
-  tokenSymbol: text("token_symbol").notNull(),
-  amountFormatted: text("amount_formatted").notNull(),// human string, e.g. "5"
-  chainId: integer("chain_id").notNull(),
-  txHash: text("tx_hash"),
+    // Transfer context.
+    kind: text("kind").notNull(), // 'p2p_send' for v1
+    tokenSymbol: text("token_symbol").notNull(),
+    amountFormatted: text("amount_formatted").notNull(), // human string, e.g. "5"
+    chainId: integer("chain_id").notNull(),
+    txHash: text("tx_hash"),
 
-  // Lifecycle.
-  status: text("status").notNull(),                   // 'pending' | 'delivered' | 'failed'
-  attempts: integer("attempts").notNull().default(0),
-  lastError: text("last_error"),
-  createdAtEpoch: integer("created_at_epoch").notNull(),
-  deliveredAtEpoch: integer("delivered_at_epoch"),
-}, (t) => ({
-  byTelegramUser: index("recipient_notif_by_tg_user_idx")
-    .on(t.recipientTelegramUserId, t.status),
-  byCreatedAt: index("recipient_notif_created_at_idx").on(t.createdAtEpoch),
-}));
+    // Lifecycle.
+    status: text("status").notNull(), // 'pending' | 'delivered' | 'failed'
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    createdAtEpoch: integer("created_at_epoch").notNull(),
+    deliveredAtEpoch: integer("delivered_at_epoch"),
+  },
+  (t) => ({
+    byTelegramUser: index("recipient_notif_by_tg_user_idx").on(
+      t.recipientTelegramUserId,
+      t.status,
+    ),
+    byCreatedAt: index("recipient_notif_created_at_idx").on(t.createdAtEpoch),
+  }),
+);
 ```
 
 Generate migration via drizzle (`pnpm drizzle-kit generate` per existing convention — never raw SQL).
@@ -120,9 +126,22 @@ export interface RecipientNotificationRow {
 }
 
 export interface IRecipientNotificationRepo {
-  insert(row: Omit<RecipientNotificationRow, "id" | "attempts" | "lastError" | "deliveredAtEpoch">): Promise<RecipientNotificationRow>;
-  findPendingForTelegramUser(telegramUserId: string, limit?: number): Promise<RecipientNotificationRow[]>;
-  markDelivered(id: string, deliveredAtEpoch: number, recipientUserId?: string, recipientChatId?: string): Promise<void>;
+  insert(
+    row: Omit<
+      RecipientNotificationRow,
+      "id" | "attempts" | "lastError" | "deliveredAtEpoch"
+    >,
+  ): Promise<RecipientNotificationRow>;
+  findPendingForTelegramUser(
+    telegramUserId: string,
+    limit?: number,
+  ): Promise<RecipientNotificationRow[]>;
+  markDelivered(
+    id: string,
+    deliveredAtEpoch: number,
+    recipientUserId?: string,
+    recipientChatId?: string,
+  ): Promise<void>;
   markFailed(id: string, error: string): Promise<void>;
 }
 ```
@@ -142,7 +161,11 @@ export class RecipientNotificationUseCase {
   constructor(
     private readonly repo: IRecipientNotificationRepo,
     private readonly telegramSessions: ITelegramSessionRepo,
-    private readonly send: (chatId: number, text: string, opts?: object) => Promise<void>,
+    private readonly send: (
+      chatId: number,
+      text: string,
+      opts?: object,
+    ) => Promise<void>,
   ) {}
 
   /** Called immediately after a successful p2p send confirmation. */
@@ -169,10 +192,18 @@ export class RecipientNotificationUseCase {
     // Try live delivery: do we already know this telegramUserId's chat?
     // The mapping lives in telegramSessions where userId is the privy/aegis user.
     // The bridge: lookupChatIdByTelegramUserId — see helper below.
-    const chatId = await this.lookupChatIdByTelegramUserId(input.recipientTelegramUserId);
+    const chatId = await this.lookupChatIdByTelegramUserId(
+      input.recipientTelegramUserId,
+    );
     if (chatId === null) {
-      log.info({ step: "deferred", recipientTelegramUserId: input.recipientTelegramUserId, id: row.id },
-        "recipient not onboarded — notification queued");
+      log.info(
+        {
+          step: "deferred",
+          recipientTelegramUserId: input.recipientTelegramUserId,
+          id: row.id,
+        },
+        "recipient not onboarded — notification queued",
+      );
       return;
     }
 
@@ -180,11 +211,21 @@ export class RecipientNotificationUseCase {
   }
 
   /** Called from the /start handler once a session is created. */
-  async flushPendingForTelegramUser(telegramUserId: string, chatId: number, recipientUserId: string): Promise<number> {
-    const pending = await this.repo.findPendingForTelegramUser(telegramUserId, 50);
+  async flushPendingForTelegramUser(
+    telegramUserId: string,
+    chatId: number,
+    recipientUserId: string,
+  ): Promise<number> {
+    const pending = await this.repo.findPendingForTelegramUser(
+      telegramUserId,
+      50,
+    );
     if (pending.length === 0) return 0;
 
-    log.info({ step: "flush-start", count: pending.length, telegramUserId }, "flushing pending notifications");
+    log.info(
+      { step: "flush-start", count: pending.length, telegramUserId },
+      "flushing pending notifications",
+    );
 
     if (pending.length === 1) {
       await this.tryDeliver(pending[0]!, chatId, recipientUserId);
@@ -194,7 +235,13 @@ export class RecipientNotificationUseCase {
       try {
         await this.send(chatId, text, { parse_mode: "Markdown" });
         const now = Math.floor(Date.now() / 1000);
-        for (const r of pending) await this.repo.markDelivered(r.id, now, recipientUserId, String(chatId));
+        for (const r of pending)
+          await this.repo.markDelivered(
+            r.id,
+            now,
+            recipientUserId,
+            String(chatId),
+          );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error({ err: msg, telegramUserId }, "digest delivery failed");
@@ -205,20 +252,34 @@ export class RecipientNotificationUseCase {
     return pending.length;
   }
 
-  private async tryDeliver(row: RecipientNotificationRow, chatId: number, recipientUserId?: string): Promise<void> {
+  private async tryDeliver(
+    row: RecipientNotificationRow,
+    chatId: number,
+    recipientUserId?: string,
+  ): Promise<void> {
     const text = this.renderSingle(row);
     try {
       await this.send(chatId, text, { parse_mode: "Markdown" });
-      await this.repo.markDelivered(row.id, Math.floor(Date.now() / 1000), recipientUserId, String(chatId));
+      await this.repo.markDelivered(
+        row.id,
+        Math.floor(Date.now() / 1000),
+        recipientUserId,
+        String(chatId),
+      );
       log.info({ step: "delivered", id: row.id }, "recipient notified");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.warn({ err: msg, id: row.id }, "delivery failed — will remain pending");
+      log.warn(
+        { err: msg, id: row.id },
+        "delivery failed — will remain pending",
+      );
       await this.repo.markFailed(row.id, msg);
     }
   }
 
-  private async lookupChatIdByTelegramUserId(telegramUserId: string): Promise<number | null> {
+  private async lookupChatIdByTelegramUserId(
+    telegramUserId: string,
+  ): Promise<number | null> {
     // For Telegram private chats, chatId === userId numerically. So if any
     // telegramSessions row exists where telegramChatId === telegramUserId,
     // the recipient is onboarded. This is the cheap lookup; no schema change.
@@ -227,18 +288,24 @@ export class RecipientNotificationUseCase {
   }
 
   private renderSingle(r: RecipientNotificationRow): string {
-    const sender = r.senderHandle ? `@${r.senderHandle}` : (r.senderDisplayName ?? "someone");
+    const sender = r.senderHandle
+      ? `@${r.senderHandle}`
+      : (r.senderDisplayName ?? "someone");
     const chain = chainName(r.chainId);
-    const tx = r.txHash ? `\n[View on explorer](${explorerUrl(r.chainId, r.txHash)})` : "";
-    return `💸 *${sender}* sent you *${r.amountFormatted} ${r.tokenSymbol}* on ${chain}.${tx}`;
+    const tx = r.txHash
+      ? `\n[View on explorer](${explorerUrl(r.chainId, r.txHash)})`
+      : "";
+    return `*${sender}* sent you *${r.amountFormatted} ${r.tokenSymbol}* on ${chain}.${tx}`;
   }
 
   private renderDigest(rows: RecipientNotificationRow[]): string {
     const lines = rows.map((r) => {
-      const sender = r.senderHandle ? `@${r.senderHandle}` : (r.senderDisplayName ?? "someone");
+      const sender = r.senderHandle
+        ? `@${r.senderHandle}`
+        : (r.senderDisplayName ?? "someone");
       return `• ${sender} → ${r.amountFormatted} ${r.tokenSymbol} on ${chainName(r.chainId)}`;
     });
-    return `👋 Welcome back! While you were away you received:\n\n${lines.join("\n")}`;
+    return `Welcome back! While you were away you received:\n\n${lines.join("\n")}`;
   }
 }
 ```
@@ -307,9 +374,14 @@ Both files construct `signingRequestUseCase` with the `notifyResolved` callback.
 
 ```ts
 const recipientNotify = inject.getRecipientNotificationUseCase(
-  async (chatId, text, opts) => { await tgApi.sendMessage(chatId, text, opts); },
+  async (chatId, text, opts) => {
+    await tgApi.sendMessage(chatId, text, opts);
+  },
 );
-const signingRequestUseCase = inject.getSigningRequestUseCase(notifyResolved, recipientNotify);
+const signingRequestUseCase = inject.getSigningRequestUseCase(
+  notifyResolved,
+  recipientNotify,
+);
 ```
 
 Pass into `TelegramAssistantHandler` constructor as well so `/start` can flush.
@@ -325,15 +397,15 @@ Pass into `TelegramAssistantHandler` constructor as well so `/start` can flush.
 
 ## Edge cases & decisions
 
-| Case | Behaviour |
-|---|---|
-| Recipient never `/start`s | Row stays `pending` forever. v1: no expiry. v2: add a 30-day TTL job. |
-| Same recipient, many pending | `/start` shows a digest (single message), not N messages. Threshold: `>1` ⇒ digest. |
-| Live delivery fails (Telegram 403, user blocked bot) | `markFailed` with the error. Do **not** retry automatically in v1. |
+| Case                                                             | Behaviour                                                                                                                                                                                                        |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Recipient never `/start`s                                        | Row stays `pending` forever. v1: no expiry. v2: add a 30-day TTL job.                                                                                                                                            |
+| Same recipient, many pending                                     | `/start` shows a digest (single message), not N messages. Threshold: `>1` ⇒ digest.                                                                                                                              |
+| Live delivery fails (Telegram 403, user blocked bot)             | `markFailed` with the error. Do **not** retry automatically in v1.                                                                                                                                               |
 | Recipient onboarded but `chatId !== telegramUserId` (group chat) | We only target private chats. The `lookupChatIdByTelegramUserId` shortcut (chatId === userId) is correct for DMs. If we ever support group sends, replace with an explicit `userProfiles.telegramChatId` lookup. |
-| Privy creates the recipient wallet but recipient never claims | Tokens are at the deterministic smart-account address — recoverable on first `/start`. The notification will sit pending and surface at that moment. Exactly the desired UX. |
-| Sender retries the same intent | Each successful tx generates one row. Not deduped — that's correct, both transfers really happened. |
-| Notification dispatch throws | Never propagates to the sender's `/confirm` response. Logged at error level; the tx still succeeds visibly. |
+| Privy creates the recipient wallet but recipient never claims    | Tokens are at the deterministic smart-account address — recoverable on first `/start`. The notification will sit pending and surface at that moment. Exactly the desired UX.                                     |
+| Sender retries the same intent                                   | Each successful tx generates one row. Not deduped — that's correct, both transfers really happened.                                                                                                              |
+| Notification dispatch throws                                     | Never propagates to the sender's `/confirm` response. Logged at error level; the tx still succeeds visibly.                                                                                                      |
 
 ---
 
