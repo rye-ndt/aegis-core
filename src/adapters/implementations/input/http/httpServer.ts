@@ -1,7 +1,7 @@
 import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
-import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
+import { CHAIN_CONFIG, getNativeTokenInfo } from "../../../../helpers/chainConfig";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
@@ -861,7 +861,7 @@ export class HttpApiServer {
     const nowEpoch = newCurrentUTCEpoch();
     const validUntil30Days = nowEpoch + 30 * 24 * 60 * 60;
 
-    const NATIVE_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+    const native = getNativeTokenInfo(chainId);
     const tokens: Array<{
       tokenAddress: string;
       tokenSymbol: string;
@@ -883,13 +883,15 @@ export class HttpApiServer {
         suggestedLimitRaw: (500n * 10n ** 6n).toString(),
         validUntil: validUntil30Days,
       },
-      {
-        tokenAddress: NATIVE_ADDRESS,
-        tokenSymbol: CHAIN_CONFIG.nativeSymbol,
-        tokenDecimals: 18,
-        suggestedLimitRaw: (50n * 10n ** 18n).toString(),
-        validUntil: validUntil30Days,
-      },
+      ...(native
+        ? [{
+            tokenAddress: native.address,
+            tokenSymbol: native.symbol,
+            tokenDecimals: native.decimals,
+            suggestedLimitRaw: (50n * 10n ** BigInt(native.decimals)).toString(),
+            validUntil: validUntil30Days,
+          }]
+        : []),
     ];
 
     if (this.portfolioUseCase) {

@@ -188,9 +188,12 @@ export class SendCapability implements Capability<SendParams> {
     }, "autosign guard check");
 
     // Auto-sign path: delegation already sufficient.
+    // Native is allowed: the SCA's session-key validator (sudo policy) already
+    // authorises arbitrary value transfers on-chain; the tokenDelegations row
+    // (keyed on NATIVE_PSEUDO_ADDRESS) is the off-chain spend budget, identical
+    // in shape to ERC-20 delegations. No on-chain approve() exists or is needed.
     if (
       fromToken &&
-      !fromToken.isNative &&
       this.deps.tokenDelegationDB &&
       this.deps.executionEstimator
     ) {
@@ -233,7 +236,10 @@ export class SendCapability implements Capability<SendParams> {
           amountRaw: computedAmountRaw,
         });
         if (this.command === INTENT_COMMAND.SEND) {
-          void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
+          void this.deps.loyaltyUseCase?.awardPoints({
+            userId: ctx.userId,
+            actionType: params.resolvedFrom?.isNative ? "send_native" : "send_erc20",
+          }).catch(() => undefined);
         }
         log.debug({ userId: ctx.userId }, "skip delegation prompt — existing delegation covers spend");
         return { kind: "noop" };

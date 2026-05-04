@@ -19,6 +19,7 @@ const ACTION_LABELS: Record<string, string> = {
   swap_same_chain: "swap (same-chain)",
   swap_cross_chain: "swap (cross-chain)",
   send_erc20: "send",
+  send_native: "send (native)",
   yield_deposit: "yield deposit",
   yield_hold_day: "yield hold",
   referral: "referral",

@@ -1,7 +1,13 @@
 /**
- * Seed script: inserts verified tokens for the configured Avalanche chain.
+ * Seed script: inserts verified ERC-20 tokens for the configured Avalanche chain.
  * Driven by CHAIN_ID env (defaults to 43114 mainnet); 43113 (Fuji) also supported.
  * Run with: npx ts-node drizzle/seed/tokenRegistry.ts
+ *
+ * Native tokens (AVAX/ETH/POL/...) are intentionally NOT seeded — they're
+ * synthesised on the fly by `DbTokenRegistryService` from
+ * `chainConfig.getNativeTokenInfo(chainId)`. Seeding native rows risks
+ * indexer collisions on the (symbol, chainId) upsert key, so we keep
+ * native handling out of the DB entirely.
  */
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool } from "../../node_modules/@types/pg";
@@ -21,12 +27,10 @@ type TokenSeed = {
 
 const TOKENS_BY_CHAIN: Record<number, TokenSeed[]> = {
   43114: [
-    { symbol: "AVAX",  name: "Avalanche",    address: "0x0000000000000000000000000000000000000000", decimals: 18, isNative: true,  isVerified: true },
     { symbol: "WAVAX", name: "Wrapped AVAX", address: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7", decimals: 18, isNative: false, isVerified: true },
     { symbol: "USDC",  name: "USD Coin",     address: "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E", decimals: 6,  isNative: false, isVerified: true },
   ],
   43113: [
-    { symbol: "AVAX",  name: "Avalanche",    address: "0x0000000000000000000000000000000000000000", decimals: 18, isNative: true,  isVerified: true },
     { symbol: "WAVAX", name: "Wrapped AVAX", address: "0xd00ae08403B9bbb9124bB305C09058E32C39A48c", decimals: 18, isNative: false, isVerified: true },
     { symbol: "USDC",  name: "USD Coin",     address: "0x5425890298aed601595a70AB815c96711a31Bc65", decimals: 6,  isNative: false, isVerified: true },
   ],

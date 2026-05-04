@@ -2,6 +2,7 @@ import { encodeFunctionData } from "viem";
 import type { ToolStep } from "../../../../../use-cases/interface/output/toolManifest.types";
 import { resolve, resolveRecord, type TemplateContext } from "./templateEngine";
 import { createLogger } from "../../../../../helpers/observability/logger";
+import { isNativeAddress } from "../../../../../helpers/chainConfig";
 
 const log = createLogger("stepExecutors");
 export type { TemplateContext };
@@ -126,6 +127,15 @@ export async function executeErc20Transfer(
   if (!tokenAddress) throw new Error("erc20_transfer step: missing intent.params.tokenAddress");
   if (!amountRaw)    throw new Error("erc20_transfer step: missing intent.params.amountRaw");
   if (!recipient)    throw new Error("erc20_transfer step: missing intent.recipient");
+
+  // Native gas token: send raw value with empty calldata. The token registry
+  // service synthesises native records using NATIVE_PSEUDO_ADDRESS, so any
+  // erc20_transfer step routed through that pseudo-address is actually a
+  // native send.
+  if (isNativeAddress(tokenAddress)) {
+    log.info({ step: "erc20_transfer", choice: "native", recipient }, "native value transfer");
+    return { to: recipient, data: "0x", value: amountRaw };
+  }
 
   const data = encodeFunctionData({
     abi: [
