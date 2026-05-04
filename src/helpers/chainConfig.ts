@@ -256,6 +256,49 @@ export function getExplorerTxUrl(chainId: number, txHash: string): string | null
   return `${base}/tx/${txHash}`;
 }
 
+/**
+ * EVM convention pseudo-address for native gas tokens (ETH/AVAX/POL/...).
+ * Used everywhere a native token needs to flow through code paths designed
+ * for ERC-20 addresses (token registry lookups, delegations, intent params).
+ * The transfer executor recognises this address and emits a raw value send
+ * instead of an ERC-20 `transfer()` call.
+ */
+export const NATIVE_PSEUDO_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
+
+export function isNativeAddress(address: string | null | undefined): boolean {
+  if (!address) return false;
+  return address.toLowerCase() === NATIVE_PSEUDO_ADDRESS.toLowerCase();
+}
+
+/**
+ * Returns the native token info for the chain, sourced from viem's
+ * `Chain.nativeCurrency` plus our chain registry. Address is the EVM
+ * native pseudo-address. Returns null for unknown chains.
+ *
+ * This is the single source of truth for native tokens — they are NOT
+ * seeded into `tokenRegistry`. Callers (token registry service, transfer
+ * executor, approval-params endpoint) synthesise rows from this helper.
+ */
+export function getNativeTokenInfo(
+  chainId: number,
+): { symbol: string; name: string; decimals: number; address: string } | null {
+  const entry = CHAIN_REGISTRY[chainId];
+  if (!entry) return null;
+  const { name, symbol, decimals } = entry.chain.nativeCurrency;
+  return {
+    symbol: entry.nativeSymbol || symbol,
+    name,
+    decimals,
+    address: NATIVE_PSEUDO_ADDRESS,
+  };
+}
+
+export function isNativeSymbolForChain(symbol: string, chainId: number): boolean {
+  const native = getNativeTokenInfo(chainId);
+  if (!native) return false;
+  return symbol.trim().toUpperCase() === native.symbol.toUpperCase();
+}
+
 export function getUsdcAddress(chainId: number): Address | null {
   const entry = CHAIN_REGISTRY[chainId];
   if (!entry?.usdcEnvKey) return null;

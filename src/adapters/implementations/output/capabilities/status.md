@@ -1,5 +1,40 @@
 # Capabilities Status
 
+## Native token auto-sign — 2026-05-04
+
+**What was done:**
+- `sendCapability.ts:191`: removed the `!fromToken.isNative` guard from the auto-sign branch. Native sends now go through the same `checkTokenDelegation` → `sign_calldata { autoSign: true }` flow as ERC-20.
+- `sendCapability.ts:239` (and the manual-path mirror): `awardPoints({ actionType })` now branches on `resolvedFrom.isNative` → `"send_native"` vs `"send_erc20"`.
+- `loyaltyCapability.ts`: registered `send_native` in `ACTION_LABELS` ("send (native)"). Loyalty point base/multiplier falls back to `actionDefaults` until a season explicitly prices it.
+
+**Why:**
+- The session-key validator on the SCA uses `toSudoPolicy({})` (`fe/privy-auth/src/utils/crypto.ts:154`) — the session key already has unrestricted on-chain authority over the SCA, including arbitrary value transfers. There's no additional on-chain delegation native sends were missing.
+- The "approval" flow in this codebase is **purely off-chain**: `/delegation/approval-params` → onboarding mini-app → `/delegation/grant` upserts a `tokenDelegations` row. No `approve()` ever gets called on-chain. Native plugs into this flow with `tokenAddress = NATIVE_PSEUDO_ADDRESS`. The estimator (`deterministic.executionEstimator.ts`) and `addSpent` (`signingRequest.usecase.ts:76`) both key on lowercased `tokenAddress`, so native works without any change to those.
+- Net result: the only thing blocking native auto-sign was the explicit guard.
+
+**New convention:**
+- `tokenDelegations` rows for native are valid and expected. They share schema with ERC-20 delegations (`tokenAddress = NATIVE_PSEUDO_ADDRESS`, `tokenSymbol = AVAX/ETH/POL/...`, `tokenDecimals = 18`). The "delegation" semantically means "off-chain spend budget", not "on-chain allowance".
+- `tryEmitDelegationRequest` (`sendCapability.ts:749`) still skips native — that path emits an ERC-20 `approve()` ZeroDev message via `delegationBuilder.buildErc20Spend`, which has no native equivalent. Native users always reach the auto-sign branch (or the onboarding flow if no delegation exists yet); they should never enter `tryEmitDelegationRequest`.
+
+## Native token support via synthesis — 2026-05-04
+
+**What was done:**
+- `helpers/chainConfig.ts`: added `NATIVE_PSEUDO_ADDRESS` (`0xEeee…EEeE`), `isNativeAddress`, `isNativeSymbolForChain`, and `getNativeTokenInfo(chainId)` — sourced from viem's `Chain.nativeCurrency` plus our registry's `nativeSymbol`.
+- `DbTokenRegistryService` (`adapters/.../tokenRegistry/db.tokenRegistry.ts`): all four service methods (`resolve`, `findByAddressAndChain`, `searchBySymbol`, `listByChain`) now synthesise an in-memory `ITokenRecord` for the chain's native token instead of reading it from the DB. `searchBySymbol` exact-matches the native symbol short-circuit to a single candidate so users typing `avax`/`eth`/`pol` are never asked to disambiguate against AVAX-suffixed ERC-20s.
+- `manifestSolver/stepExecutors.ts`: `executeErc20Transfer` branches on `isNativeAddress(tokenAddress)` and emits `{ to: recipient, data: "0x", value: amountRaw }` for native sends. ERC-20 path unchanged.
+- `drizzle/seed/tokenRegistry.ts`: removed the seeded native AVAX rows. Native tokens are no longer DB-resident.
+- `httpServer.ts` `GET /delegation/approval-params`: the previously hardcoded `NATIVE_ADDRESS` block now uses `getNativeTokenInfo(chainId)` for symbol/decimals; suggested limit scales with `native.decimals`.
+
+**Why:**
+- The intent parser ran a substring `ILIKE '%avax%'` query and never short-circuited on exact symbol match, so typing `/send 0.5 avax` returned a 10-token disambiguation list of *AVAX-suffixed ERC-20s with the native row buried or missing entirely (the seed's `(symbol, chainId)` upsert key is collision-prone with the indexer).
+- Synthesising native rows from chain config makes native support automatic for every registered chain (no per-chain seed maintenance) and makes the indexer collision impossible.
+- viem already encodes `nativeCurrency.{name,symbol,decimals}` per chain — single source of truth, no drift.
+
+**New convention (do not break):**
+- The canonical native pseudo-address is `0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE` (mixed-case checksum). Always compare via `isNativeAddress(addr)` (case-insensitive) — never `===`.
+- Never insert native rows into `tokenRegistry`. If you discover one (e.g. from a misbehaving indexer), drop it; `DbTokenRegistryService.searchBySymbol` / `listByChain` filter native-pseudo-address rows out of DB results before prepending the synth row, so a stray seed won't break things, but it's still wrong.
+- `executeErc20Transfer` is the single place that turns the native pseudo-address into a value send. Don't add a parallel `native_transfer` step kind unless you have a reason — the existing `transferToken` tool manifest works for both ERC-20 and native.
+
 ## Self-derived recipient SCA — 2026-05-03
 
 **What was done:**
