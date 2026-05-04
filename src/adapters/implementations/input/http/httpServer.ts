@@ -23,6 +23,9 @@ import type { ITelegramNotifier } from "../../../../use-cases/interface/output/t
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import type { ITransferHistoryUseCase } from "../../../../use-cases/interface/input/transferHistory.interface";
+import { isRateLimitedError } from "../../../../helpers/errors/rateLimitedError";
+import { isUnsupportedChainError } from "../../../../helpers/errors/unsupportedChainError";
 import { LOYALTY_ENV } from "../../../../helpers/env/loyaltyEnv";
 import type {
   MiniAppResponse,
@@ -113,6 +116,7 @@ export class HttpApiServer {
     private readonly yieldOptimizerUseCase?: IYieldOptimizerUseCase,
     private readonly loyaltyUseCase?: ILoyaltyUseCase,
     private readonly userDB?: IUserDB,
+    private readonly transferHistoryUseCase?: ITransferHistoryUseCase,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -170,6 +174,7 @@ export class HttpApiServer {
       "POST /auth/privy":               (req, res) => this.handlePrivyLogin(req, res),
       "GET /user/profile":              (req, res) => this.handleGetUserProfile(req, res),
       "GET /portfolio":                 (req, res) => this.handleGetPortfolio(req, res),
+      "GET /transfers":                 (req, res, url) => this.handleGetTransfers(req, res, url),
       "GET /tokens":                    (req, res, url) => this.handleGetTokens(req, res, url),
       "POST /tools":                    (req, res) => this.handlePostTools(req, res),
       "GET /tools":                     (req, res, url) => this.handleGetTools(req, res, url),
@@ -258,6 +263,62 @@ export class HttpApiServer {
     const result = await this.portfolioUseCase.getPortfolio(userId);
     if (!result) return this.sendJson(res, 404, { error: "No Smart Contract Account found" });
     return this.sendJson(res, 200, result);
+  }
+
+  private async handleGetTransfers(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.transferHistoryUseCase) {
+      return this.sendJson(res, 503, { error: "Transfer history service not available" });
+    }
+
+    const QuerySchema = z.object({
+      fromEpoch: z.coerce.number().int().nonnegative().optional(),
+      toEpoch: z.coerce.number().int().nonnegative().optional(),
+      direction: z.enum(["in", "out", "self"]).optional(),
+      limit: z.coerce.number().int().min(1).max(100).optional(),
+      cursor: z.string().min(1).max(2048).optional(),
+    });
+    const parsed = QuerySchema.safeParse({
+      fromEpoch: url.searchParams.get("fromEpoch") ?? undefined,
+      toEpoch: url.searchParams.get("toEpoch") ?? undefined,
+      direction: url.searchParams.get("direction") ?? undefined,
+      limit: url.searchParams.get("limit") ?? undefined,
+      cursor: url.searchParams.get("cursor") ?? undefined,
+    });
+    if (!parsed.success) {
+      return this.sendJson(res, 400, { error: "Invalid query", details: parsed.error.issues });
+    }
+
+    const start = Date.now();
+    try {
+      const page = await this.transferHistoryUseCase.getHistory({
+        userId,
+        fromEpoch: parsed.data.fromEpoch,
+        toEpoch: parsed.data.toEpoch,
+        direction: parsed.data.direction,
+        limit: parsed.data.limit,
+        cursor: parsed.data.cursor,
+      });
+      res.setHeader("Cache-Control", "private, max-age=30");
+      log.info(
+        { userId, route: "GET /transfers", durationMs: Date.now() - start, count: page.items.length },
+        "request-served",
+      );
+      return this.sendJson(res, 200, page);
+    } catch (err) {
+      if (isRateLimitedError(err)) {
+        log.warn({ userId, route: "GET /transfers", retryAfterSec: err.retryAfterSec }, "rate-limited");
+        res.setHeader("Retry-After", String(err.retryAfterSec));
+        return this.sendJson(res, 429, { error: "rate-limited", retryAfterSec: err.retryAfterSec });
+      }
+      if (isUnsupportedChainError(err)) {
+        log.warn({ userId, route: "GET /transfers", chainId: err.chainId }, "unsupported-chain");
+        return this.sendJson(res, 400, { error: "unsupported-chain", chainId: err.chainId });
+      }
+      log.error({ err, userId, route: "GET /transfers" }, "request-failed");
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
   }
 
   private async handleGetTokens(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
@@ -1065,6 +1126,7 @@ export class HttpApiServer {
       telegramNotifier: !!this.telegramNotifier,
       yieldOptimizer: !!this.yieldOptimizerUseCase,
       loyalty: !!this.loyaltyUseCase,
+      transferHistory: !!this.transferHistoryUseCase,
     };
 
     const now = newCurrentUTCEpoch();

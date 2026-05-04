@@ -110,6 +110,14 @@ import { RpcBalanceProvider } from "../implementations/output/balance/rpcBalance
 import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
 import type { IBalanceProvider } from "../../use-cases/interface/output/blockchain/balanceProvider.interface";
 import { getAnkrBlockchain } from "../../helpers/chainConfig";
+import { AnkrTransferHistoryProvider } from "../implementations/output/transferHistory/ankrTransferHistoryProvider";
+import { CachedTransferHistoryProvider } from "../implementations/output/transferHistory/cachedTransferHistoryProvider";
+import { RedisTransferHistoryCache } from "../implementations/output/cache/redis.transferHistory";
+import { TransferHistoryUseCaseImpl } from "../../use-cases/implementations/transferHistory.usecase";
+import type { ITransferHistoryUseCase } from "../../use-cases/interface/input/transferHistory.interface";
+import type { ITransferHistoryProvider } from "../../use-cases/interface/output/blockchain/transferHistoryProvider.interface";
+import type { ITransferHistoryCache } from "../../use-cases/interface/output/cache/transferHistory.cache";
+import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
 
 const log = createLogger("assistantDI");
 
@@ -159,6 +167,9 @@ export class AssistantInject {
   private _recipientNotificationUseCase: RecipientNotificationUseCase | null = null;
   private _balanceProvider: IBalanceProvider | null = null;
   private _fallbackProvider: IBalanceProvider | null = null;
+  private _ankrTransferHistory: ITransferHistoryProvider | null = null;
+  private _transferHistoryCache: ITransferHistoryCache | null = null;
+  private _transferHistoryUseCase: ITransferHistoryUseCase | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -598,9 +609,71 @@ export class AssistantInject {
         this.getIntentUseCase(),
         this.getWalletDataProvider(),
         this.getUserProfileCache(),
+        this.getTransferHistoryUseCase(),
+        this.getChainId(),
       );
     }
     return this._systemToolProvider;
+  }
+
+  getAnkrTransferHistoryProvider(): ITransferHistoryProvider {
+    if (!this._ankrTransferHistory) {
+      this._ankrTransferHistory = new AnkrTransferHistoryProvider({
+        apiKey: process.env.ANKR_API_KEY,
+      });
+    }
+    return this._ankrTransferHistory;
+  }
+
+  getTransferHistoryCache(): ITransferHistoryCache | undefined {
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    if (!this._transferHistoryCache) {
+      this._transferHistoryCache = new RedisTransferHistoryCache(redis);
+    }
+    return this._transferHistoryCache;
+  }
+
+  /**
+   * Returns a single use-case instance whose internal provider factory binds
+   * `userId` into a fresh CachedTransferHistoryProvider on each call. The
+   * Ankr adapter and Redis cache are process-singletons; only the cached
+   * decorator is per-user (so the per-user rate guard binds correctly).
+   * Returns undefined if Ankr cannot serve the configured chain.
+   */
+  getTransferHistoryUseCase(): ITransferHistoryUseCase | undefined {
+    if (this._transferHistoryUseCase) return this._transferHistoryUseCase;
+    const chainId = this.getChainId();
+    if (getAnkrBlockchain(chainId) == null) {
+      log.warn({ chainId }, "transfer-history disabled — chain not supported by Ankr");
+      return undefined;
+    }
+    const ankr = this.getAnkrTransferHistoryProvider();
+    const cache = this.getTransferHistoryCache();
+    const userProfileDB = this.getSqlDB().userProfiles;
+
+    const cfg = {
+      pageTtlSecRecent: TRANSFER_HISTORY_ENV.pageTtlSecRecent,
+      pageTtlSecOlder: TRANSFER_HISTORY_ENV.pageTtlSecOlder,
+      staleTtlSec: TRANSFER_HISTORY_ENV.staleTtlSec,
+      perUserRpm: TRANSFER_HISTORY_ENV.perUserRpm,
+      rpsGlobal: TRANSFER_HISTORY_ENV.rpsGlobal,
+    };
+
+    const factory = (userId: string): ITransferHistoryProvider => {
+      // Without Redis we degrade to no-cache and no rate guard — at <1k DAU
+      // this is safe; Ankr's own rate-limit will surface as adapter errors.
+      if (!cache) return ankr;
+      return new CachedTransferHistoryProvider(ankr, cache, userId, cfg);
+    };
+
+    this._transferHistoryUseCase = new TransferHistoryUseCaseImpl(
+      userProfileDB,
+      factory,
+      chainId,
+      this.getSqlDB().intentExecutions,
+    );
+    return this._transferHistoryUseCase;
   }
 
   getRelayClient(): IRelayClient {
@@ -973,6 +1046,7 @@ export class AssistantInject {
       this.getYieldOptimizerUseCase(),
       this.getLoyaltyUseCase(),
       this.getSqlDB().users,
+      this.getTransferHistoryUseCase(),
     );
   }
 }

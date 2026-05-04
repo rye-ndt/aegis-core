@@ -1,5 +1,28 @@
 # Capabilities Status
 
+## Ankr-backed transfer history — 2026-05-04
+
+**What was done:**
+- New port `ITransferHistoryProvider` (`use-cases/interface/output/blockchain/transferHistoryProvider.interface.ts`) — single contract for "list of past on-chain movements" queries. Implementations: `AnkrTransferHistoryProvider` (merges `ankr_getTransactionsByAddress` + `ankr_getTokenTransfers` on `(txHash, logIndex)`, native + ERC-20 in one page), wrapped by `CachedTransferHistoryProvider` (Redis cache + per-user/global rate guards).
+- New cache port `ITransferHistoryCache` + `RedisTransferHistoryCache` (`adapters/.../cache/redis.transferHistory.ts`). Three Redis-backed mechanisms: fresh page TTL, stale companion (served on global-gate refusal), per-user sliding-window counter, global per-second token bucket.
+- New use case `TransferHistoryUseCaseImpl` resolves SCA from `userProfileDB`, clamps `limit` to `[1, 100]`, calls a per-userId-bound provider via factory.
+- New HTTP route `GET /transfers` (Bearer-Privy auth) — query params `fromEpoch`, `toEpoch`, `direction`, `limit`, `cursor`. Maps `RateLimitedError` → 429 (with `Retry-After`), `UnsupportedChainError` → 400. Sets `Cache-Control: private, max-age=30`.
+- New agent tool `get_transfer_history` (registered in `SystemToolProviderConcrete`) — Markdown table output, tx hashes link to the chain explorer via `getExplorerTxUrl`. Time bounds via `fromEpoch`/`toEpoch` (unix seconds).
+- New env knobs in `helpers/env/transferHistoryEnv.ts` (`TRANSFER_HISTORY_RPM_USER`, `TRANSFER_HISTORY_RPS_GLOBAL`, `TRANSFER_HISTORY_PAGE_TTL_SEC`, `TRANSFER_HISTORY_PAGE_OLDER_TTL_SEC`, `TRANSFER_HISTORY_STALE_TTL_SEC`). Reuses existing `ANKR_API_KEY`. No DB migration.
+- New shared error types: `RateLimitedError` and `UnsupportedChainError` in `helpers/errors/`.
+
+**Why:**
+- Free-tier Ankr quota would be trivially exhausted by an open Activity tab + an over-eager agent loop without a shared cache layer. Day-bucketed cache keys mean the LLM's varying epochs for "last week" across turns hash to one slot. Per-user gate stops a runaway loop; global gate protects the shared key when traffic spikes; stale serve degrades gracefully instead of erroring under gate pressure.
+- Splitting "fetch" (adapter) from "rate guard + cache" (decorator) lets us swap to a future RPC ingester without touching the use case, HTTP route, or tool.
+
+**New conventions (do not break):**
+- `ITransferHistoryProvider` is the **single port** for any "list of past on-chain movements" query. Future RPC ingester or alt-vendor adapter must implement this interface — do not add a parallel port.
+- The `CachedXxxProvider(inner, cache, userId, cfg)` shape is the **template for per-user rate guards on free-tier external providers**. Reuse `acquireUserSlot(userId, rpm)` + `acquireGlobalSlot(rps)` semantics on any future free-tier integration; never inline rate-limit logic into adapters.
+- `RateLimitedError` is **generic**, not Ankr-specific. Use it for any provider-side rate-limit signal. HTTP layer maps it to 429 with `Retry-After`; agent tools map it to a graceful "try again" message via `error: "history-rate-limited"` (or equivalent).
+- `UnsupportedChainError` carries `chainId`. HTTP layer maps to 400; agent tools surface chain-not-supported rather than retrying.
+- Cursor is **opaque**; the Ankr adapter encodes a `{tx, token}` pair as JSON. Callers must pass it back unmodified.
+- New log scopes: `AnkrTransferHistoryProvider`, `CachedTransferHistoryProvider`, `redisTransferHistoryCache`, `transferHistoryUseCase`, `getTransferHistoryTool`. New metadata fields: `count` (page size), `choice: "hit"|"miss"` on cache lookups (already standard), `stale: boolean` on global-gate fallback events.
+
 ## Native token auto-sign — 2026-05-04
 
 **What was done:**

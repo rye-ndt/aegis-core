@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type {
   IIntentExecution,
@@ -58,6 +58,21 @@ export class DrizzleIntentExecutionRepo implements IIntentExecutionDB {
       .select()
       .from(intentExecutions)
       .where(eq(intentExecutions.intentId, intentId));
+    return rows.map((r) => this.toRecord(r));
+  }
+
+  async findByTxHashes(userId: string, txHashes: string[]): Promise<IIntentExecution[]> {
+    if (txHashes.length === 0) return [];
+    const lowered = txHashes.map((h) => h.toLowerCase());
+    const rows = await this.db
+      .select()
+      .from(intentExecutions)
+      .where(
+        and(
+          eq(intentExecutions.userId, userId),
+          inArray(sql`lower(${intentExecutions.txHash})`, lowered),
+        ),
+      );
     return rows.map((r) => this.toRecord(r));
   }
 

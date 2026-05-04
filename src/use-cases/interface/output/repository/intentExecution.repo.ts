@@ -37,4 +37,10 @@ export interface IIntentExecutionDB {
   update(id: string, fields: Partial<Omit<IIntentExecution, "id" | "createdAtEpoch">>): Promise<void>;
   findById(id: string): Promise<IIntentExecution | undefined>;
   findByIntentId(intentId: string): Promise<IIntentExecution[]>;
+  /**
+   * Batch lookup: return executions whose `txHash` matches any of the given
+   * (lowercased) hashes. Used by transfer-history enrichment to label rows
+   * that were produced by an Aegis intent flow.
+   */
+  findByTxHashes(userId: string, txHashes: string[]): Promise<IIntentExecution[]>;
 }
