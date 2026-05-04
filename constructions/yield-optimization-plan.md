@@ -1,5 +1,11 @@
 # Yield Optimization — Implementation Plan (Backend)
 
+> ⚠️ §3 (`yield_deposits` / `yield_withdrawals` audit log schema) is **stale**.
+> Those tables were dropped in `0026_stale_mandrill.sql` (2026-04-28). The yield
+> feature is now snapshot-based; principal comes from the Aave V3 subgraph.
+> See `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md` for the
+> current authoritative plan.
+
 > Authored: 2026-04-24
 > Status: Awaiting implementation
 > Feature: Proactive agent that scans idle USDC on Avalanche and optimizes it into the best Aave v3 pool, with Telegram-driven consent and daily PnL reports.

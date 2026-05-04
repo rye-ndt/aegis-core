@@ -102,6 +102,7 @@ import type { ICrossChainSwapPlanner } from "../../use-cases/interface/output/st
 import {
   YieldCapability,
   buildNudgeKeyboard,
+  buildRebalanceNudgeKeyboard,
 } from "../implementations/output/capabilities/yieldCapability";
 import { DelegationRequestBuilder } from "../implementations/output/delegation/delegationRequestBuilder";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
@@ -191,6 +192,7 @@ export class AssistantInject {
   private _relayClient: IRelayClient | null = null;
   private _relaySwapTool: RelaySwapTool | null = null;
   private _yieldProtocolRegistry: YieldProtocolRegistry | null = null;
+  private _subgraphPrincipalProvider: SubgraphPrincipalProvider | null = null;
   private _yieldOptimizerUseCase: IYieldOptimizerUseCase | null = null;
   private _yieldPoolScanJob: YieldPoolScanJob | null = null;
   private _userIdleScanJob: UserIdleScanJob | null = null;
@@ -213,6 +215,11 @@ export class AssistantInject {
   private _stockUseCase: IStockUseCase | null = null;
   /** Set true if boot-time `verifyStockCapability()` fails (fix #9 — soft fail). */
   private _stockCapabilityDisabled = false;
+  private _yieldJobsNoStartWarned = {
+    poolScan: false,
+    idleScan: false,
+    report: false,
+  };
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -979,6 +986,15 @@ export class AssistantInject {
     return this._yieldProtocolRegistry;
   }
 
+  getSubgraphPrincipalProvider(): SubgraphPrincipalProvider {
+    if (!this._subgraphPrincipalProvider) {
+      this._subgraphPrincipalProvider = new SubgraphPrincipalProvider(
+        YIELD_ENV.theGraphApiKey,
+      );
+    }
+    return this._subgraphPrincipalProvider;
+  }
+
   getYieldOptimizerUseCase(): IYieldOptimizerUseCase | undefined {
     const redis = this.getRedis();
     if (!redis) return undefined;
@@ -1001,6 +1017,37 @@ export class AssistantInject {
         );
       };
 
+      const sendRebalanceNudge = async (
+        _userId: string,
+        chatId: string,
+        params: {
+          chainId: number;
+          tokenAddress: string;
+          tokenSymbol: string;
+          fromProtocol: YIELD_PROTOCOL_ID;
+          toProtocol: YIELD_PROTOCOL_ID;
+          currentApy: number;
+          newApy: number;
+          balanceHuman: string;
+        },
+      ): Promise<void> => {
+        if (!bot) return;
+        const fromApyPct = (params.currentApy * 100).toFixed(2);
+        const toApyPct = (params.newApy * 100).toFixed(2);
+        const text =
+          `🔄 Better yield available — your ${params.balanceHuman} ${params.tokenSymbol} is ` +
+          `earning ~${fromApyPct}% APY on ${params.fromProtocol}, but ${params.toProtocol} ` +
+          `is now offering ~${toApyPct}%. Want me to move it?`;
+        await bot.api.sendMessage(Number(chatId), text, {
+          reply_markup: buildRebalanceNudgeKeyboard({
+            chainId: params.chainId,
+            tokenAddress: params.tokenAddress,
+            fromProtocol: params.fromProtocol,
+            toProtocol: params.toProtocol,
+          }),
+        });
+      };
+
       const protocolRegistry = this.getYieldProtocolRegistry();
       this._yieldOptimizerUseCase = new YieldOptimizerUseCase({
         protocolRegistry,
@@ -1011,11 +1058,15 @@ export class AssistantInject {
         redis,
         nudgeCooldownSec: YIELD_ENV.nudgeCooldownSec,
         idleThresholdUsd: YIELD_ENV.idleUsdcThresholdUsd,
-        principalProvider: new SubgraphPrincipalProvider(
-          YIELD_ENV.theGraphApiKey,
-        ),
+        // Sticky-winner TTL = 4× pool scan interval (auto-resets if scans stop).
+        winnerStreakTtlSec: Math.max(60, Math.floor((YIELD_ENV.poolScanIntervalMs * 4) / 1000)),
+        rebalanceStickyScans: YIELD_ENV.rebalanceStickyScans,
+        rebalanceMinDeltaBps: YIELD_ENV.rebalanceMinDeltaBps,
+        rebalanceNudgeCooldownSec: YIELD_ENV.rebalanceNudgeCooldownSec,
+        principalProvider: this.getSubgraphPrincipalProvider(),
         positionDiscovery: new OnChainPositionDiscovery({ protocolRegistry }),
         sendNudge,
+        sendRebalanceNudge,
       });
     }
     return this._yieldOptimizerUseCase;
@@ -1023,7 +1074,16 @@ export class AssistantInject {
 
   getYieldPoolScanJob(): YieldPoolScanJob | undefined {
     const optimizer = this.getYieldOptimizerUseCase();
-    if (!optimizer) return undefined;
+    if (!optimizer) {
+      if (!this._yieldJobsNoStartWarned.poolScan) {
+        this._yieldJobsNoStartWarned.poolScan = true;
+        log.warn(
+          { feature: "yield", reason: "redis-missing" },
+          "yieldPoolScanJob not started",
+        );
+      }
+      return undefined;
+    }
     if (!this._yieldPoolScanJob) {
       this._yieldPoolScanJob = new YieldPoolScanJob(
         optimizer,
@@ -1035,7 +1095,16 @@ export class AssistantInject {
 
   getUserIdleScanJob(): UserIdleScanJob | undefined {
     const optimizer = this.getYieldOptimizerUseCase();
-    if (!optimizer) return undefined;
+    if (!optimizer) {
+      if (!this._yieldJobsNoStartWarned.idleScan) {
+        this._yieldJobsNoStartWarned.idleScan = true;
+        log.warn(
+          { feature: "yield", reason: "redis-missing" },
+          "userIdleScanJob not started",
+        );
+      }
+      return undefined;
+    }
     if (!this._userIdleScanJob) {
       this._userIdleScanJob = new UserIdleScanJob(
         optimizer,
@@ -1049,7 +1118,16 @@ export class AssistantInject {
   getYieldReportJob(): YieldReportJob | undefined {
     const optimizer = this.getYieldOptimizerUseCase();
     const redis = this.getRedis();
-    if (!optimizer || !redis) return undefined;
+    if (!optimizer || !redis) {
+      if (!this._yieldJobsNoStartWarned.report) {
+        this._yieldJobsNoStartWarned.report = true;
+        log.warn(
+          { feature: "yield", reason: "redis-missing" },
+          "yieldReportJob not started",
+        );
+      }
+      return undefined;
+    }
     if (!this._yieldReportJob) {
       const sqlDB = this.getSqlDB();
       const bot = this.getBot();
@@ -1157,6 +1235,7 @@ export class AssistantInject {
           const session = await sqlDB.telegramSessions.findByUserId(userId);
           return session?.telegramChatId ?? null;
         },
+        () => sqlDB.telegramSessions.listActiveUserIds(),
       );
     }
     return this._yieldReportJob;
@@ -1217,6 +1296,7 @@ export class AssistantInject {
       this.getStockPriceOracle(),
       () => this.isStockCapabilityDisabled(),
       () => this.getStockUseCaseSync(),
+      this.getSubgraphPrincipalProvider(),
     );
   }
 

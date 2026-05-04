@@ -27,6 +27,7 @@ import type { ITransferHistoryUseCase } from "../../../../use-cases/interface/in
 import type { IStockPairRegistry } from "../../../../use-cases/interface/output/stocks/stockPair.interface";
 import type { IStockPriceOracle } from "../../../../use-cases/interface/output/stocks/stockPriceOracle.interface";
 import type { IStockUseCase } from "../../../../use-cases/interface/input/stock.interface";
+import type { SubgraphPrincipalProvider } from "../../output/yield/subgraphPrincipalProvider";
 import { isRateLimitedError } from "../../../../helpers/errors/rateLimitedError";
 import { isUnsupportedChainError } from "../../../../helpers/errors/unsupportedChainError";
 import { LOYALTY_ENV } from "../../../../helpers/env/loyaltyEnv";
@@ -126,6 +127,8 @@ export class HttpApiServer {
     private readonly isStockCapabilityDisabled?: () => boolean,
     /** Sync accessor — null until `verifyStockCapability` constructs it. */
     private readonly getStockUseCase?: () => IStockUseCase | null,
+    /** Optional — exposes subgraph health for /health response. */
+    private readonly subgraphPrincipalProvider?: SubgraphPrincipalProvider,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -1140,7 +1143,10 @@ export class HttpApiServer {
     const mem = process.memoryUsage();
     const toMb = (n: number) => Math.round((n / 1024 / 1024) * 100) / 100;
 
-    const services: Record<string, boolean> = {
+    const subgraphStatus = this.subgraphPrincipalProvider?.status() ?? "disabled";
+
+    const services: Record<string, boolean | string> = {
+      subgraph: subgraphStatus,
       auth: true,
       intent: !!this.intentUseCase,
       portfolio: !!this.portfolioUseCase,

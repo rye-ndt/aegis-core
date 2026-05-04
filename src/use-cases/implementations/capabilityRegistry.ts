@@ -24,8 +24,11 @@ export class CapabilityRegistry implements ICapabilityRegistry {
       this.byCommand.set(cmd, capability);
     }
     if (callbackPrefix) {
+      const prefixes = Array.isArray(callbackPrefix) ? callbackPrefix : [callbackPrefix];
+      for (const prefix of prefixes) {
+        this.byCallbackPrefix.push({ prefix, capability });
+      }
       // Longest-prefix-first so "buy_vip" wins over "buy" when both are registered.
-      this.byCallbackPrefix.push({ prefix: callbackPrefix, capability });
       this.byCallbackPrefix.sort((a, b) => b.prefix.length - a.prefix.length);
     }
   }

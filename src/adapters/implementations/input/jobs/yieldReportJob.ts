@@ -1,4 +1,5 @@
 import type Redis from "ioredis";
+import pLimit from "p-limit";
 import { isWorker } from "../../../../helpers/env/role";
 import type { IYieldOptimizerUseCase, DailyReport } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { IYieldRepository } from "../../../../use-cases/interface/yield/IYieldRepository";
@@ -9,6 +10,7 @@ const DEFAULT_TICK_INTERVAL_MS = 5 * 60 * 1000;
 const REPORT_DONE_TTL_SEC = 25 * 60 * 60;
 // 30 days — users with no snapshot in the last 30 days are excluded from daily reports
 const RECENT_SNAPSHOT_WINDOW_SEC = 30 * 24 * 60 * 60;
+const PER_USER_CONCURRENCY = 5;
 
 export class YieldReportJob {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -23,6 +25,13 @@ export class YieldReportJob {
     reportIntervalMs: number,
     private readonly sendReport: (userId: string, chatId: string, report: DailyReport) => Promise<void>,
     private readonly getChatId: (userId: string) => Promise<string | null>,
+    /**
+     * Active-user enumerator (telegram sessions). Unioned with
+     * `listUsersWithRecentSnapshots` so users who deposited before snapshot
+     * write was wired in — or whose `finalizeDeposit` failed — are not
+     * permanently excluded from the daily report population.
+     */
+    private readonly listActiveUserIds: () => Promise<string[]>,
   ) {
     this.intervalMode = reportIntervalMs > 0;
     this.tickIntervalMs = this.intervalMode ? reportIntervalMs : DEFAULT_TICK_INTERVAL_MS;
@@ -73,21 +82,33 @@ export class YieldReportJob {
     );
 
     const sinceEpoch = Math.floor(Date.now() / 1000) - RECENT_SNAPSHOT_WINDOW_SEC;
-    const userIds = await this.yieldRepo.listUsersWithRecentSnapshots(sinceEpoch);
+    const [withSnapshots, active] = await Promise.all([
+      this.yieldRepo.listUsersWithRecentSnapshots(sinceEpoch),
+      this.listActiveUserIds().catch((err) => {
+        log.warn({ err }, "listActiveUserIds failed — falling back to recent-snapshot users only");
+        return [] as string[];
+      }),
+    ]);
+    const userIds = Array.from(new Set([...withSnapshots, ...active]));
 
-    for (const userId of userIds) {
-      try {
-        const report: DailyReport | null = await this.optimizer.buildDailyReport(userId);
-        if (!report) continue;
+    const limit = pLimit(PER_USER_CONCURRENCY);
+    await Promise.all(
+      userIds.map((userId) =>
+        limit(async () => {
+          try {
+            const report: DailyReport | null = await this.optimizer.buildDailyReport(userId);
+            if (!report) return;
 
-        const chatId = await this.getChatId(userId);
-        if (!chatId) continue;
+            const chatId = await this.getChatId(userId);
+            if (!chatId) return;
 
-        await this.sendReport(userId, chatId, report);
-      } catch (err) {
-        log.error({ err, userId }, "per-user report error");
-      }
-    }
+            await this.sendReport(userId, chatId, report);
+          } catch (err) {
+            log.error({ err, userId }, "per-user report error");
+          }
+        }),
+      ),
+    );
 
     if (!this.intervalMode) {
       const doneKey = this.optimizer.reportDoneRedisKey(today);

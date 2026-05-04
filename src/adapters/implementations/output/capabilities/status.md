@@ -1,5 +1,162 @@
 # Capabilities Status
 
+## Yield auto-rebalance (minimal) — 2026-05-04
+
+Implemented Part B of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md`.
+
+**What was done:**
+- `runPoolScan` writes/updates `yield:winner_streak:{chainId}:{token}` per
+  scan (`{ protocolId, apy, count, lastTs }`). TTL = 4× pool-scan interval
+  so streaks self-heal if scans stall. Same protocol → increment count;
+  switch → reset to 1. This is the strong hysteresis filter.
+- New `IYieldOptimizerUseCase` methods:
+  - `scanRebalanceForUser(userId)` — gated by per-user cooldown +
+    pending-lock; iterates enabled `(chainId, token)` pairs, requires
+    `streak.count ≥ YIELD_REBALANCE_STICKY_SCANS`, discovers user's
+    on-chain positions, picks the largest non-winner position, fetches
+    current APY (via `adapter.getPoolStatus`), and only nudges when
+    `(winnerApy − currentApy) × 10_000 ≥ YIELD_REBALANCE_MIN_DELTA_BPS`.
+    Sets `yield:rebalance_pending:{userId}` (1h TTL) and
+    `yield:rebalance_cooldown:{userId}` (24h TTL).
+  - `buildRebalancePlan(userId, params)` — re-reads positions (paranoid;
+    user may have withdrawn since the nudge), emits
+    `withdrawAll(from) + supply(to)` tx steps. Returns `null` if the
+    source position vanished — capability surfaces a friendly message
+    and clears the pending lock.
+  - `finalizeRebalance(userId, params)` — `try/catch/finally`: snapshots
+    both `from` (likely 0) and `to` (new balance) protocols, then
+    always clears the pending lock. On-chain withdraw already
+    succeeded, so failures `warn` only.
+  - `clearRebalancePending(userId)` — used by the capability's "skip"
+    branch and abort/no-plan paths.
+- `userIdleScanJob` runs `scanRebalanceForUser` as a sibling to
+  `scanIdleForUser` per user (still `pLimit(5)` chunked). Both calls
+  have their own Redis cooldowns; co-locating them avoids a second
+  cron timer.
+- `TriggerSpec.callbackPrefix` widened to `string | string[]`. The
+  registry now expands array prefixes into multiple routing entries
+  (still longest-prefix-first). `YieldCapability` declares
+  `["yield", "rebalance"]` so `rebalance:y/n` callbacks route here.
+- `YieldCapability.runRebalance`:
+  - Plan re-build via `buildRebalancePlan`; on null returns "Looks
+    like you already withdrew — nothing to rebalance." and clears
+    pending.
+  - Markdown quote summary mentions both APYs and the move size.
+  - Reuses `executeSignSteps` with `kind: undefined` (mini app falls
+    back to its default sign confirm screen — the deposit/withdraw
+    confirm cards would mislabel the withdraw leg).
+  - Spend bookkeeping: `spendAmountRaw = plan.amountRaw` is set so the
+    LAST step (the supply call) is tagged with
+    `tokenAddress + amountRaw`. The withdraw leg burns aTokens → no
+    delegation consumption → untagged.
+  - On success: `finalizeRebalance` writes both snapshots and awards a
+    single `yield_deposit` loyalty action (the withdraw leg is NOT
+    awarded — would double-count).
+  - On abort/timeout: clears the pending lock so the user isn't stuck.
+- New `buildRebalanceNudgeKeyboard({ chainId, tokenAddress, fromProtocol, toProtocol })`
+  in `yieldCapability.ts` is shared with `assistant.di.ts`'s
+  `sendRebalanceNudge` callback. Yes/Skip buttons emit
+  `rebalance:y:<chainId>:<token>:<from>:<to>` and
+  `rebalance:n:<chainId>:<token>`.
+- Env (`helpers/env/yieldEnv.ts`): `rebalanceCheckIntervalMs`,
+  `rebalanceMinDeltaBps`, `rebalanceStickyScans`,
+  `rebalanceNudgeCooldownSec`. The DI computes
+  `winnerStreakTtlSec = max(60, 4 × poolScanIntervalMs / 1000)`.
+
+**Why this approach (vs. alternatives):**
+- *Why no opt-in flag?* The nudge is non-destructive and always asks
+  for explicit user consent before signing. Adding a flag now creates
+  a setup tax for a feature that is dormant in production until a
+  second adapter lands.
+- *Why fold into `userIdleScanJob` instead of a new cron?* Both scans
+  iterate the same active-user set, are idempotent, and have their
+  own Redis cooldowns. A second cron would duplicate the user fan-out.
+- *Why both sticky-scans AND min-delta-bps?* The streak gate is the
+  noise filter (winner must be stable across scans). The delta-bps
+  gate is the per-user "is the move worth it" check at nudge time —
+  the streak's APY is the winner's, not the user's current. Without
+  delta-bps, a sticky winner with a tiny uplift would still nudge.
+- *Why `kind: undefined` on rebalance sign requests?* The mini-app's
+  deposit/withdraw confirm screens are kind-routed; reusing one would
+  mislabel the other leg, and adding a new `yield_rebalance` kind
+  requires a lockstep FE change that's out of scope for the BE plan.
+  Default sign confirm is a clean fallback.
+
+**Conventions introduced (recorded for future agents):**
+- `TriggerSpec.callbackPrefix` may be `string | string[]`. Registry
+  expands arrays. One capability can own multiple prefix families
+  when they share signing infra.
+- Auto-rebalance Redis keys live under the `yield:` namespace — see
+  STATUS.md.
+
+## Yield bug-fix batch — 2026-05-04
+
+Implemented Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md` (audit fixes; no surface change).
+
+**What was done:**
+- A1: `SubgraphPrincipalProvider` boot-warns when `THEGRAPH_API_KEY`
+  is unset (was silently returning null and zero-ing lifetime PnL).
+  Exposes `status()` via `/health.services.subgraph` with values
+  `ok | degraded | disabled`. Auth-shaped failures (`401/403`) log
+  `warn` once-per-process; subsequent failures log `debug`.
+- A2: `yieldPoolRanker.computeScore` now uses a true EMA
+  (`α = 2/(N+1)`) on the newest-first history. Previous arithmetic
+  mean was harmless with one adapter but would diverge from the
+  documented formula the moment a second adapter ships. Exported
+  `computeEma` for unit testing.
+- A3: `scripts/verify-aave-apy.ts` reads raw `liquidityRate` via
+  `getReserveData` and prints both `rate/1e27` (no-compound APR)
+  and `(1 + APR/n)^n - 1` (production APY). Verified 2026-05-04 on
+  Avalanche USDC: rate = 5.7522% APR → 5.9208% APY. Cross-checked
+  against Aave's own formatter (`aave-utilities` →
+  `calculateCompoundedInterest` → `binomialApproximatedRayPow`,
+  exactly what `app.aave.com` uses). Formula confirmed, kept;
+  confirming comment added in `aaveV3Adapter.ts`. Companion
+  `scripts/flush-yield-apy-history.ts` staged but not run (formula
+  unchanged → ray-EMA history is still valid).
+- A4: `yieldReportJob` user enumeration now unions
+  `yieldRepo.listUsersWithRecentSnapshots` with
+  `telegramSessions.listActiveUserIds` so users who deposited before
+  the snapshot path was wired (or whose `finalizeDeposit` failed)
+  appear in the daily run. Per-user work runs under `pLimit(5)`.
+- A5: New `IYieldRepository.listSnapshotsBetween(userId, fromIncl,
+  toExcl)`. `yieldOptimizerUseCase.{getPositions,buildDailyReport}`
+  now query `[startOfYesterdayUtc, startOfTodayUtc)` instead of the
+  off-by-one `listSnapshots(_, yesterdayEpoch - 1)` (which leaked
+  today's snapshot into the yesterday delta calc).
+- A6: `finalizeWithdrawal` symmetric with `finalizeDeposit` —
+  re-discovers positions per chain and upserts a fresh snapshot
+  (typically `balanceRaw=0`) so the daily report reflects the
+  withdraw immediately. Wraps in try/catch — never rethrows since
+  the on-chain withdraw already succeeded.
+- A7: Yield-job DI getters in `assistant.di.ts` emit a one-shot
+  `feature:yield, reason:redis-missing` warn when they return
+  `undefined`. `workerCli.ts` logs a `jobs:{poolScan,idleScan,report}`
+  status line at boot, mirroring stock soft-fail.
+
+**Why this approach:**
+- Verify-first on A3 is non-negotiable — silently changing APY math
+  could inflate or deflate every prior daily report. The flush
+  script is staged (not run yet) for the same reason.
+- The bootstrap fix in A4 piggybacks on existing `buildDailyReport`:
+  it already writes today's snapshot per discovered position and
+  falls back to `prevBalance = currentBalance` when no yesterday
+  snapshot exists → delta=0 on bootstrap day. The only real gap was
+  user enumeration; the union closes it.
+- A5 uses an explicit window `[from, to)` rather than patching the
+  off-by-one, so the boundary is greppable in reviews.
+- A6 groups by `chainId` to amortise discovery RPC across positions.
+
+**New conventions to preserve:**
+- Subgraph health surfaces in `/health.services.subgraph` —
+  deployment dashboards may scrape it.
+- `IYieldRepository.listSnapshotsBetween(from, to)` is the canonical
+  way to ask for a UTC-day window. Do **not** add a second variant
+  on top of `listSnapshots(_, sinceEpoch)` for the same purpose.
+- Job-not-started warnings are gated by per-process booleans on the
+  DI instance — every other DI getter that returns `undefined`
+  should follow the same warn-once pattern.
+
 ## Stock close / SL-TP / `/positions` — 2026-05-04 (Phase 3)
 
 **What was done:**

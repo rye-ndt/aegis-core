@@ -60,12 +60,47 @@ export interface PositionsView {
   };
 }
 
+export interface RebalancePlan {
+  txSteps: TxStep[];
+  chainId: number;
+  tokenAddress: string;
+  fromProtocol: YIELD_PROTOCOL_ID;
+  toProtocol: YIELD_PROTOCOL_ID;
+  /** Position size at plan-build time, used for spend bookkeeping on the supply leg. */
+  amountRaw: string;
+  /** APY of the source protocol at plan-build time (decimal, e.g. 0.041). */
+  fromApy: number;
+  /** APY of the destination protocol at plan-build time. */
+  toApy: number;
+  userAddress: string;
+}
+
 export interface IYieldOptimizerUseCase {
   runPoolScan(): Promise<void>;
   scanIdleForUser(userId: string): Promise<ScanResult>;
+  scanRebalanceForUser(userId: string): Promise<ScanResult>;
   buildDepositPlan(userId: string, pct: number): Promise<DepositPlan | null>;
   finalizeDeposit(userId: string, txHash: string): Promise<void>;
   buildWithdrawAllPlan(userId: string): Promise<WithdrawPlan | null>;
+  buildRebalancePlan(
+    userId: string,
+    params: {
+      chainId: number;
+      tokenAddress: string;
+      fromProtocol: YIELD_PROTOCOL_ID;
+      toProtocol: YIELD_PROTOCOL_ID;
+    },
+  ): Promise<RebalancePlan | null>;
+  finalizeRebalance(
+    userId: string,
+    params: {
+      chainId: number;
+      tokenAddress: string;
+      fromProtocol: YIELD_PROTOCOL_ID;
+      toProtocol: YIELD_PROTOCOL_ID;
+    },
+  ): Promise<void>;
+  clearRebalancePending(userId: string): Promise<void>;
   finalizeWithdrawal(
     userId: string,
     withdrawals: Array<{

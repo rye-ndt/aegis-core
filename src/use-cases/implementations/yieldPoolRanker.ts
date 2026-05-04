@@ -11,12 +11,25 @@ const HIGH_UTILIZATION_PENALTY = 0.5;
 const EMA_WEIGHT = 0.7;
 const CURRENT_WEIGHT = 0.3;
 
-function computeScore(currentApy: number, history: number[]): number {
-  const ema =
-    history.length > 0
-      ? history.reduce((acc, v) => acc + v, 0) / history.length
-      : currentApy;
+/**
+ * Standard EMA smoothing factor `α = 2 / (N+1)`. With N samples, the most
+ * recent observation receives weight α and prior observations decay
+ * geometrically — close to the canonical financial-charting EMA.
+ */
+export function computeEma(history: number[]): number {
+  if (history.length === 0) return 0;
+  const alpha = 2 / (history.length + 1);
+  // history is stored newest-first (LPUSH) — seed EMA with the oldest sample
+  // (last index) and walk forward toward the newest at index 0.
+  let ema = history[history.length - 1]!;
+  for (let i = history.length - 2; i >= 0; i--) {
+    ema = alpha * history[i]! + (1 - alpha) * ema;
+  }
+  return ema;
+}
 
+function computeScore(currentApy: number, history: number[]): number {
+  const ema = history.length > 0 ? computeEma(history) : currentApy;
   return EMA_WEIGHT * ema + CURRENT_WEIGHT * currentApy;
 }
 

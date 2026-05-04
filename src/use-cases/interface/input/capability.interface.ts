@@ -15,9 +15,10 @@ export interface TriggerSpec {
   /**
    * Prefix used to route Telegram callback queries back to this capability.
    * E.g. "buy" matches callback data `buy:y:50`. The capability receives the
-   * full data string and parses the suffix itself.
+   * full data string and parses the suffix itself. May be a string or an
+   * array when one capability owns multiple prefix families (e.g. yield + rebalance).
    */
-  callbackPrefix?: string;
+  callbackPrefix?: string | string[];
   /**
    * Natural-language fallback weight. If no command/callback matches and the
    * dispatcher needs to route free text, it may consult these tags via RAG

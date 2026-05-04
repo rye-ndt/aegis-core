@@ -25,4 +25,12 @@ export const YIELD_ENV = {
   enabledChainIds: list("YIELD_ENABLED_CHAIN_IDS", [43114]),
   /** The Graph API key for the Messari Aave V3 subgraph principal queries. */
   theGraphApiKey: str("THEGRAPH_API_KEY", ""),
+  /** Per-user rebalance scan cadence; gated independently from idle USDC scan. */
+  rebalanceCheckIntervalMs: num("YIELD_REBALANCE_CHECK_INTERVAL_MS", 24 * 60 * 60 * 1000),
+  /** Minimum APY uplift in bps required to nudge (winner − current). 50 = 0.5%. */
+  rebalanceMinDeltaBps: num("YIELD_REBALANCE_MIN_DELTA_BPS", 50),
+  /** Winner must remain top for N consecutive pool scans before nudging — hysteresis. */
+  rebalanceStickyScans: num("YIELD_REBALANCE_STICKY_SCANS", 3),
+  /** Cooldown between rebalance nudges per user. */
+  rebalanceNudgeCooldownSec: num("YIELD_REBALANCE_NUDGE_COOLDOWN_SEC", 86_400),
 } as const;

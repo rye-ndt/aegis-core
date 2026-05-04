@@ -69,6 +69,13 @@ export class UserIdleScanJob {
         } catch (err) {
           log.error({ err, userId }, "per-user idle scan error");
         }
+        // Both scans are idempotent and gated by their own Redis cooldowns,
+        // so co-locating them here keeps job count flat without coupling them.
+        try {
+          await this.optimizer.scanRebalanceForUser(userId);
+        } catch (err) {
+          log.error({ err, userId }, "per-user rebalance scan error");
+        }
       },
       CONCURRENCY,
     );

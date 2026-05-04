@@ -7,8 +7,14 @@ const RAY = BigInt("1000000000000000000000000000"); // 1e27
 const SECONDS_PER_YEAR = 365 * 24 * 60 * 60;
 
 function rayToApy(rayRate: bigint): number {
-  // Aave V3 liquidityRate is APR-in-ray (1e27), not a per-second rate.
-  // Convert to APY via continuous compounding: (1 + APR/n)^n - 1.
+  // Aave V3 `liquidityRate` is APR-in-ray (1e27). The published supply
+  // APY on app.aave.com is `(1 + APR/n)^n - 1` with `n = SECONDS_PER_YEAR`
+  // — see `aave-utilities/packages/math-utils/src/pool-math.ts ::
+  // calculateCompoundedInterest` (the same formula Aave's own formatters
+  // use). Verified 2026-05-04 against live Avalanche USDC: rate=5.7522%
+  // APR → 5.9208% APY (matches Aave UI). Keep this in sync if the
+  // formatter ever switches off `binomialApproximatedRayPow`.
+  // See `scripts/verify-aave-apy.ts` for the verification harness.
   const apr = Number(rayRate) / Number(RAY);
   return Math.pow(1 + apr / SECONDS_PER_YEAR, SECONDS_PER_YEAR) - 1;
 }

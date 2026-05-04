@@ -49,6 +49,17 @@ const log = createLogger("workerCli");
   const yieldReportJob = inject.getYieldReportJob();
   yieldReportJob?.start();
 
+  log.info(
+    {
+      jobs: {
+        poolScan: !!yieldPoolScanJob,
+        idleScan: !!userIdleScanJob,
+        report: !!yieldReportJob,
+      },
+    },
+    "yield jobs status",
+  );
+
   const dispatcher = await inject.getCapabilityDispatcher();
   if (!dispatcher) {
     log.error("Capability dispatcher unavailable — bot cannot start.");

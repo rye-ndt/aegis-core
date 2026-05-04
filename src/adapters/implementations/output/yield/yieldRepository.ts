@@ -1,4 +1,4 @@
-import { and, eq, gt, sql } from "drizzle-orm";
+import { and, eq, gt, gte, lt, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newUuid } from "../../../../helpers/uuid";
 import type {
@@ -18,6 +18,24 @@ export class DrizzleYieldRepository implements IYieldRepository {
         and(
           eq(yieldPositionSnapshots.userId, userId),
           gt(yieldPositionSnapshots.snapshotAtEpoch, sinceEpoch),
+        ),
+      );
+    return rows.map(toSnapshotModel);
+  }
+
+  async listSnapshotsBetween(
+    userId: string,
+    fromEpochInclusive: number,
+    toEpochExclusive: number,
+  ): Promise<YieldPositionSnapshot[]> {
+    const rows = await this.db
+      .select()
+      .from(yieldPositionSnapshots)
+      .where(
+        and(
+          eq(yieldPositionSnapshots.userId, userId),
+          gte(yieldPositionSnapshots.snapshotAtEpoch, fromEpochInclusive),
+          lt(yieldPositionSnapshots.snapshotAtEpoch, toEpochExclusive),
         ),
       );
     return rows.map(toSnapshotModel);

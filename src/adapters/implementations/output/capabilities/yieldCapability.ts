@@ -21,6 +21,7 @@ import type {
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
 import type { TxStep } from "../../../../use-cases/interface/yield/IYieldProtocolAdapter";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import type { YIELD_PROTOCOL_ID } from "../../../../helpers/enums/yieldProtocolId.enum";
 
 const SIGN_REQUEST_TTL_SECONDS = 600;
 const SIGN_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -30,6 +31,16 @@ type YieldStage = "idle" | "await_custom_pct";
 interface YieldState {
   stage: YieldStage;
 }
+
+interface RebalanceParams {
+  rebalance: true;
+  chainId: number;
+  tokenAddress: string;
+  fromProtocol: string;
+  toProtocol: string;
+}
+
+type YieldRunParams = { pct: number } | { withdraw: true } | RebalanceParams;
 
 export interface YieldCapabilityDeps {
   optimizer: IYieldOptimizerUseCase;
@@ -53,11 +64,13 @@ function findStablecoin(chainId: number, tokenAddress: string) {
   return cfg.stablecoins.find((s) => s.address.toLowerCase() === needle) ?? null;
 }
 
-export class YieldCapability implements Capability<{ pct: number } | { withdraw: true }> {
+export class YieldCapability implements Capability<YieldRunParams> {
   readonly id = "intent_yield";
   readonly triggers: TriggerSpec = {
     command: INTENT_COMMAND.YIELD,
-    callbackPrefix: "yield",
+    // Owns both the deposit/withdraw `yield:` family and the auto-rebalance
+    // `rebalance:` family — the two share signing infra.
+    callbackPrefix: ["yield", "rebalance"],
   };
 
   constructor(private readonly deps: YieldCapabilityDeps) {}
@@ -65,12 +78,12 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
   async collect(
     ctx: CapabilityCtx,
     resuming?: Record<string, unknown>,
-  ): Promise<CollectResult<{ pct: number } | { withdraw: true }>> {
+  ): Promise<CollectResult<YieldRunParams>> {
     const input = ctx.input;
 
     // Handle callback inputs
     if (input.kind === "callback") {
-      return this.handleCallback(ctx, input.data);
+      return await this.handleCallback(ctx, input.data);
     }
 
     // Handle text inputs
@@ -106,9 +119,12 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
   }
 
   async run(
-    params: { pct: number } | { withdraw: true },
+    params: YieldRunParams,
     ctx: CapabilityCtx,
   ): Promise<Artifact> {
+    if ("rebalance" in params) {
+      return this.runRebalance(ctx, params);
+    }
     if ("withdraw" in params) {
       return this.runWithdraw(ctx);
     }
@@ -242,7 +258,7 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
     ctx: CapabilityCtx;
     steps: TxStep[];
     labelPrefix: string;
-    kind: SignKind;
+    kind?: SignKind;
     chainId?: number;
     protocolId?: string;
     tokenAddress?: string;
@@ -361,10 +377,13 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
     return { aborted: false, txHashes };
   }
 
-  private handleCallback(
-    _ctx: CapabilityCtx,
+  private async handleCallback(
+    ctx: CapabilityCtx,
     data: string,
-  ): CollectResult<{ pct: number } | { withdraw: true }> {
+  ): Promise<CollectResult<YieldRunParams>> {
+    if (data.startsWith("rebalance:")) {
+      return this.handleRebalanceCallback(ctx, data);
+    }
     const suffix = data.replace(/^yield:/, "");
 
     if (suffix === "skip") {
@@ -398,6 +417,168 @@ export class YieldCapability implements Capability<{ pct: number } | { withdraw:
       artifact: { kind: "chat", text: "Unknown yield action." },
     };
   }
+
+  private async handleRebalanceCallback(
+    ctx: CapabilityCtx,
+    data: string,
+  ): Promise<CollectResult<YieldRunParams>> {
+    // rebalance:y:<chainId>:<token>:<from>:<to>
+    // rebalance:n:<chainId>:<token>
+    const parts = data.split(":");
+    const verb = parts[1];
+
+    if (verb === "n") {
+      // Decline: clear the pending lock so future ticks aren't blocked. The
+      // 24h cooldown set at nudge-time still suppresses re-nudging.
+      await this.deps.optimizer.clearRebalancePending(ctx.userId);
+      return {
+        kind: "terminal",
+        artifact: {
+          kind: "chat",
+          text: "Got it — I'll check again later.",
+        },
+      };
+    }
+
+    if (verb === "y" && parts.length >= 6) {
+      const chainId = parseInt(parts[2] ?? "", 10);
+      const tokenAddress = parts[3] ?? "";
+      const fromProtocol = parts[4] ?? "";
+      const toProtocol = parts[5] ?? "";
+      if (Number.isFinite(chainId) && tokenAddress && fromProtocol && toProtocol) {
+        return {
+          kind: "ok",
+          params: {
+            rebalance: true,
+            chainId,
+            tokenAddress,
+            fromProtocol,
+            toProtocol,
+          },
+        };
+      }
+    }
+
+    return {
+      kind: "terminal",
+      artifact: { kind: "chat", text: "Unknown rebalance action." },
+    };
+  }
+
+  private async runRebalance(
+    ctx: CapabilityCtx,
+    params: RebalanceParams,
+  ): Promise<Artifact> {
+    if (!this.deps.signingRequestUseCase) {
+      return { kind: "chat", text: "Signing service unavailable. Please try again later." };
+    }
+
+    const plan = await this.deps.optimizer.buildRebalancePlan(ctx.userId, {
+      chainId: params.chainId,
+      tokenAddress: params.tokenAddress,
+      fromProtocol: params.fromProtocol as YIELD_PROTOCOL_ID,
+      toProtocol: params.toProtocol as YIELD_PROTOCOL_ID,
+    });
+    if (!plan) {
+      // Position vanished between nudge and tap. Clear the lock so the user
+      // isn't stuck pending forever.
+      await this.deps.optimizer.clearRebalancePending(ctx.userId);
+      return {
+        kind: "chat",
+        text: "Looks like you already withdrew — nothing to rebalance.",
+      };
+    }
+
+    const stablecoin = findStablecoin(plan.chainId, plan.tokenAddress);
+    const amountHuman = stablecoin
+      ? formatHumanAmount(BigInt(plan.amountRaw), stablecoin.decimals)
+      : plan.amountRaw;
+    const tokenSymbol = stablecoin?.symbol ?? "USDC";
+
+    await ctx.emit({
+      kind: "chat",
+      parseMode: "Markdown",
+      text: buildRebalanceQuoteSummary({
+        amountHuman,
+        tokenSymbol,
+        fromProtocol: plan.fromProtocol,
+        toProtocol: plan.toProtocol,
+        fromApy: plan.fromApy,
+        toApy: plan.toApy,
+        stepCount: plan.txSteps.length,
+      }),
+    });
+
+    const result = await this.executeSignSteps({
+      ctx,
+      steps: plan.txSteps,
+      labelPrefix: "Yield rebalance",
+      // No `kind` — mini app falls back to its default sign UI rather than the
+      // deposit/withdraw confirm screens (those would mislabel one of the legs).
+      kind: undefined,
+      chainId: plan.chainId,
+      protocolId: plan.toProtocol,
+      tokenAddress: plan.tokenAddress,
+      // Spend bookkeeping: tag ONLY the last step (the supply call). The
+      // withdraw leg burns aTokens and doesn't consume the user's USDC delegation.
+      spendAmountRaw: plan.amountRaw,
+      // Skip displayMeta for now — first step is a withdraw, so the
+      // deposit-styled confirm card would be wrong.
+      displayMeta: undefined,
+      buttonText: "Execute Rebalance",
+      promptText:
+        plan.txSteps.length === 1
+          ? "Tap the button below to execute the rebalance automatically."
+          : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
+    });
+
+    if (result.aborted) {
+      // Resolution failed — clear pending so we don't leave the user blocked.
+      await this.deps.optimizer.clearRebalancePending(ctx.userId);
+      return result.artifact;
+    }
+
+    await this.deps.optimizer.finalizeRebalance(ctx.userId, {
+      chainId: plan.chainId,
+      tokenAddress: plan.tokenAddress,
+      fromProtocol: plan.fromProtocol,
+      toProtocol: plan.toProtocol,
+    });
+
+    const usdValue = stablecoin
+      ? Number(BigInt(plan.amountRaw)) / Math.pow(10, stablecoin.decimals)
+      : undefined;
+    void this.deps.loyaltyUseCase
+      ?.awardPoints({
+        userId: ctx.userId,
+        actionType: "yield_deposit",
+        usdValue,
+      })
+      .catch(() => undefined);
+
+    return {
+      kind: "chat",
+      parseMode: "Markdown",
+      text: buildRebalanceSuccessMessage({
+        amountHuman,
+        tokenSymbol,
+        toProtocol: plan.toProtocol,
+        toApy: plan.toApy,
+        txHashes: result.txHashes,
+      }),
+    };
+  }
+}
+
+export function buildRebalanceNudgeKeyboard(args: {
+  chainId: number;
+  tokenAddress: string;
+  fromProtocol: string;
+  toProtocol: string;
+}): InlineKeyboard {
+  const yes = `rebalance:y:${args.chainId}:${args.tokenAddress.toLowerCase()}:${args.fromProtocol}:${args.toProtocol}`;
+  const no = `rebalance:n:${args.chainId}:${args.tokenAddress.toLowerCase()}`;
+  return new InlineKeyboard().text("Yes, move it", yes).text("Skip for now", no);
 }
 
 export function buildNudgeKeyboard(): InlineKeyboard {
@@ -462,6 +643,51 @@ function buildDepositSuccessMessage(pct: number, txHashes: string[]): string {
     ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
     "",
     "Your USDC is now earning yield on Aave v3. Use /withdraw to exit at any time.",
+  ];
+  return lines.join("\n");
+}
+
+function buildRebalanceQuoteSummary(args: {
+  amountHuman: string;
+  tokenSymbol: string;
+  fromProtocol: string;
+  toProtocol: string;
+  fromApy: number;
+  toApy: number;
+  stepCount: number;
+}): string {
+  const fromApyPct = (args.fromApy * 100).toFixed(2);
+  const toApyPct = (args.toApy * 100).toFixed(2);
+  const lines = [
+    "*Yield rebalance quote*",
+    "",
+    `Move ${args.amountHuman} *${args.tokenSymbol}*`,
+    `From: *${args.fromProtocol}* (~${fromApyPct}% APY)`,
+    `To: *${args.toProtocol}* (~${toApyPct}% APY)`,
+    `Steps: ${args.stepCount}`,
+    "",
+    args.stepCount === 1
+      ? "Tap the button below to execute the rebalance automatically."
+      : "Tap the button below — all steps will be signed in one mini-app session.",
+  ];
+  return lines.join("\n");
+}
+
+function buildRebalanceSuccessMessage(args: {
+  amountHuman: string;
+  tokenSymbol: string;
+  toProtocol: string;
+  toApy: number;
+  txHashes: string[];
+}): string {
+  const apyPct = (args.toApy * 100).toFixed(2);
+  const lines = [
+    `*Rebalance complete*`,
+    "",
+    `${args.amountHuman} *${args.tokenSymbol}* now earning ~${apyPct}% APY on *${args.toProtocol}*.`,
+    "",
+    "*Transaction hashes*",
+    ...args.txHashes.map((h, i) => `${i + 1}. \`${h}\``),
   ];
   return lines.join("\n");
 }
