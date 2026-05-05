@@ -40,6 +40,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     rejected?: boolean;
     errorCode?: string;
     errorMessage?: string;
+    errorRaw?: string;
   }): Promise<void> {
     const record = await this.cache.findById(params.requestId);
     if (!record) throw new Error("SIGNING_REQUEST_NOT_FOUND");
@@ -67,6 +68,20 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       },
       "signing request resolved",
     );
+    if (rejected && params.errorRaw) {
+      // Surface the raw on-chain revert reason at warn so failures with
+      // errorCode='unknown' are still investigable from logs alone.
+      log.warn(
+        {
+          step: "signing-request-rejected-raw",
+          requestId: params.requestId,
+          userId: params.userId,
+          errorCode: params.errorCode,
+          errorRaw: params.errorRaw,
+        },
+        "client-reported sign error",
+      );
+    }
 
     if (
       !rejected &&

@@ -91,6 +91,9 @@ export interface SignResponse extends BaseResponse {
   // /buy nudge). New codes must be added in lockstep on both sides.
   errorCode?: string;
   errorMessage?: string;
+  // Raw underlying error text (viem revert reason, etc.) the FE sends purely
+  // for BE diagnostic logs. Never persisted, never re-displayed to the user.
+  errorRaw?: string;
 }
 
 export interface DelegationRecord {

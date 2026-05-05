@@ -7,6 +7,13 @@ export interface IChatInput {
   message: string;
   /** Base64 data URL of an attached image, e.g. "data:image/jpeg;base64,..." */
   imageBase64Url?: string;
+  /**
+   * The input adapter's channel id (e.g. Telegram chat id stringified). Threaded
+   * through to the LLM tool registry so capability-bound tools (stock_open) can
+   * re-dispatch into ICapabilityDispatcher.handle, which binds the renderer's
+   * emit to the correct user-facing channel.
+   */
+  channelId: string;
 }
 
 export interface IChatResponse {

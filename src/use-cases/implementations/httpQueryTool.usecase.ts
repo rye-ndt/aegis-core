@@ -9,7 +9,7 @@ import type {
 } from "../interface/input/httpQueryTool.interface";
 
 const TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,62}$/;
-const RESERVED_NAMES = new Set(["web_search", "execute_intent", "get_portfolio"]);
+const RESERVED_NAMES = new Set(["web_search", "route_intent", "stock_open", "get_portfolio"]);
 
 export class HttpQueryToolUseCaseImpl implements IHttpQueryToolUseCase {
   constructor(

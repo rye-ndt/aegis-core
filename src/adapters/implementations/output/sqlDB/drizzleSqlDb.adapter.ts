@@ -7,7 +7,6 @@ import { DrizzleMessageRepo } from "./repositories/message.repo";
 import { DrizzleTelegramSessionRepo } from "./repositories/telegramSession.repo";
 import { DrizzleUserProfileRepo } from "./repositories/userProfile.repo";
 import { DrizzleTokenRegistryRepo } from "./repositories/tokenRegistry.repo";
-import { DrizzleIntentRepo } from "./repositories/intent.repo";
 import { DrizzleIntentExecutionRepo } from "./repositories/intentExecution.repo";
 import { DrizzleToolManifestRepo } from "./repositories/toolManifest.repo";
 import { DrizzleCommandToolMappingRepo } from "./repositories/commandToolMapping.repo";
@@ -19,6 +18,7 @@ import { DrizzleTokenDelegationRepo } from "./repositories/tokenDelegation.repo"
 import { DrizzleYieldRepository } from "../yield/yieldRepository";
 import { DrizzleLoyaltyRepo } from "./repositories/loyalty.repo";
 import { DrizzleRecipientNotificationRepo } from "./repositories/recipientNotification.repo";
+import { DrizzleStockPairRepo } from "./repositories/stockPair.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -27,7 +27,6 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly telegramSessions: DrizzleTelegramSessionRepo;
   readonly userProfiles: DrizzleUserProfileRepo;
   readonly tokenRegistry: DrizzleTokenRegistryRepo;
-  readonly intents: DrizzleIntentRepo;
   readonly intentExecutions: DrizzleIntentExecutionRepo;
   readonly toolManifests: DrizzleToolManifestRepo;
   readonly feeRecords: DrizzleFeeRecordRepo;
@@ -39,6 +38,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly yieldRepo: DrizzleYieldRepository;
   readonly loyaltyRepo: DrizzleLoyaltyRepo;
   readonly recipientNotifications: DrizzleRecipientNotificationRepo;
+  readonly stockPairs: DrizzleStockPairRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -48,7 +48,6 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.telegramSessions = new DrizzleTelegramSessionRepo(this.db);
     this.userProfiles = new DrizzleUserProfileRepo(this.db);
     this.tokenRegistry = new DrizzleTokenRegistryRepo(this.db);
-    this.intents = new DrizzleIntentRepo(this.db);
     this.intentExecutions = new DrizzleIntentExecutionRepo(this.db);
     this.toolManifests = new DrizzleToolManifestRepo(this.db);
     this.feeRecords = new DrizzleFeeRecordRepo(this.db);
@@ -60,6 +59,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.yieldRepo = new DrizzleYieldRepository(this.db);
     this.loyaltyRepo = new DrizzleLoyaltyRepo(this.db);
     this.recipientNotifications = new DrizzleRecipientNotificationRepo(this.db);
+    this.stockPairs = new DrizzleStockPairRepo(this.db);
   }
 
 }

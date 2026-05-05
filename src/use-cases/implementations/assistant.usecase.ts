@@ -23,7 +23,11 @@ import type {
 
 const log = createLogger("assistantUseCase");
 const DEFAULT_SYSTEM_PROMPT =
-  `You are an AI trading assistant on ${CHAIN_CONFIG.name}. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.`;
+  `You are an AI trading assistant on ${CHAIN_CONFIG.name}. Help users understand DeFi, token prices, and on-chain actions. Be concise and precise.
+
+For ANY on-chain or money request the user expresses in natural language — swap, send/transfer, buy crypto, top up, sell, convert, DCA, earn/deposit/withdraw yield (use \`/yield\` for both directions; the capability shows a deposit/withdraw menu), or open/short/close a tokenized stock position — call the \`route_intent\` tool with the matching slash command and pass the user's verbatim remainder as \`rest\`. Do not attempt to construct calldata, fetch quotes, or describe the action yourself; the capability layer renders the user-facing UI (mini-app modal, result card). After \`route_intent\` returns, write at most one short sentence acknowledging the flow has started — do not repeat the receipt the user already saw.
+
+For read-only questions (balances, positions, price quotes, transaction history, portfolio summary), use the dedicated read tools (\`get_portfolio\`, \`get_transfer_history\`, \`get_stock_quote\`, \`get_stock_positions\`, \`wallet_balances\`, \`transaction_status\`, etc.). Never call \`route_intent\` for a read-only question.`;
 const DEFAULT_MAX_TOOL_ROUNDS = 10;
 const MAX_TOOL_ROUNDS = parseInt(
   process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS),
@@ -42,7 +46,7 @@ interface IToolResult {
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly orchestrator: ILLMOrchestrator,
-    private readonly registryFactory: (userId: string, conversationId: string) => Promise<IToolRegistry>,
+    private readonly registryFactory: (userId: string, conversationId: string, channelId: string) => Promise<IToolRegistry>,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
   ) {}
@@ -75,7 +79,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
     const systemPrompt = DEFAULT_SYSTEM_PROMPT;
 
-    const toolRegistry = await this.registryFactory(input.userId, conversationId);
+    const toolRegistry = await this.registryFactory(input.userId, conversationId, input.channelId);
     const availableTools = toolRegistry.getAll().map((t) => t.definition());
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";

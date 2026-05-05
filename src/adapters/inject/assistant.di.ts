@@ -52,7 +52,6 @@ import type { ITransferHistoryCache } from "../../use-cases/interface/output/cac
 import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
 import type { IDelegationRequestBuilder } from "../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
 import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
-import { INTENT_ACTION } from "../../use-cases/interface/output/intentParser.interface";
 import type { IPendingCollectionStore } from "../../use-cases/interface/output/pendingCollectionStore.interface";
 import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
 import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
@@ -106,8 +105,6 @@ import {
 import { DelegationRequestBuilder } from "../implementations/output/delegation/delegationRequestBuilder";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
 import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
-import { OpenAIIntentClassifier } from "../implementations/output/intentParser/openai.intentClassifier";
-import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
 import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
 import { OpenAIIntentInterpreter } from "../implementations/output/intentInterpreter/openai.intentInterpreter";
@@ -120,7 +117,6 @@ import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/priv
 import { RelayClient } from "../implementations/output/relay/relayClient";
 import { ResolverEngineImpl } from "../implementations/output/resolver/resolverEngine";
 import { SolverRegistry } from "../implementations/output/solver/solverRegistry";
-import { ClaimRewardsSolver } from "../implementations/output/solver/static/claimRewards.solver";
 import { DrizzleSqlDB } from "../implementations/output/sqlDB/drizzleSqlDb.adapter";
 import { SystemToolProviderConcrete } from "../implementations/output/systemToolProvider.concrete";
 import { BotTelegramNotifier } from "../implementations/output/telegram/botNotifier";
@@ -129,11 +125,12 @@ import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pan
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
 import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
-import { ExecuteIntentTool } from "../implementations/output/tools/executeIntent.tool";
 import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.tool";
+import { RouteIntentTool } from "../implementations/output/tools/routeIntent.tool";
 import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
 import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
+import { StockOpenTool } from "../implementations/output/tools/stockOpen.tool";
 import { AnkrTransferHistoryProvider } from "../implementations/output/transferHistory/ankrTransferHistoryProvider";
 import { CachedTransferHistoryProvider } from "../implementations/output/transferHistory/cachedTransferHistoryProvider";
 import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
@@ -145,7 +142,11 @@ import { SubgraphPrincipalProvider } from "../implementations/output/yield/subgr
 import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
 import { ASTER_ENV } from "../../helpers/env/asterEnv";
 import { AsterDiamondClient } from "../implementations/output/aster/asterDiamond.client";
-import { AsterPairRegistry } from "../implementations/output/aster/asterPairRegistry";
+import { DbStockPairRegistry } from "../implementations/output/stocks/dbStockPairRegistry";
+import { AsterStockPairCrawler } from "../implementations/output/aster/asterStockPairCrawler";
+import { StockPairIngestionUseCase } from "../../use-cases/implementations/stockPairIngestion.usecase";
+import type { IStockPairIngestionUseCase } from "../../use-cases/interface/input/stockPairIngestion.interface";
+import { StockPairCrawlerJob } from "../implementations/input/jobs/stockPairCrawlerJob";
 import {
   AsterPriceOracle,
   CachedStockPriceOracle,
@@ -171,12 +172,11 @@ export class AssistantInject {
   private _bot: Bot | null = null;
   private _viemClient: ViemClientAdapter | null = null;
   private _solverRegistry: SolverRegistry | null = null;
-  private _intentParser: OpenAIIntentParser | null = null;
-  private _intentClassifier: OpenAIIntentClassifier | null = null;
   private _schemaCompiler: OpenAISchemaCompiler | null = null;
   private _toolRegistrationUseCase: IToolRegistrationUseCase | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
+  private _stockPairCrawlerJob: StockPairCrawlerJob | null = null;
   private _embeddingService: OpenAIEmbeddingService | null = null;
   private _toolVectorStore: PineconeVectorStore | null = null;
   private _toolIndexService: IToolIndexService | null = null;
@@ -291,10 +291,6 @@ export class AssistantInject {
         [],
         this.getSqlDB().toolManifests,
       );
-      this._solverRegistry.register(
-        INTENT_ACTION.CLAIM_REWARDS,
-        new ClaimRewardsSolver(process.env.REWARD_CONTROLLER_ADDRESS ?? ""),
-      );
     }
     return this._solverRegistry;
   }
@@ -379,24 +375,6 @@ export class AssistantInject {
     return this._intentInterpreter;
   }
 
-  getIntentParser(): OpenAIIntentParser {
-    if (!this._intentParser) {
-      this._intentParser = new OpenAIIntentParser(
-        process.env.OPENAI_API_KEY ?? "",
-      );
-    }
-    return this._intentParser;
-  }
-
-  getIntentClassifier(): OpenAIIntentClassifier {
-    if (!this._intentClassifier) {
-      this._intentClassifier = new OpenAIIntentClassifier(
-        process.env.OPENAI_API_KEY ?? "",
-      );
-    }
-    return this._intentClassifier;
-  }
-
   getSchemaCompiler(): OpenAISchemaCompiler {
     if (!this._schemaCompiler) {
       this._schemaCompiler = new OpenAISchemaCompiler(
@@ -411,16 +389,12 @@ export class AssistantInject {
       const chainId = this.getChainId();
       const db = this.getSqlDB();
       this._intentUseCase = new IntentUseCaseImpl(
-        this.getIntentParser(),
         this.getTokenRegistryService(),
         this.getSolverRegistry(),
-        db.intents,
         db.userProfiles,
-        db.messages,
         chainId,
         db.toolManifests,
         this.getToolIndexService(),
-        this.getIntentClassifier(),
         this.getSchemaCompiler(),
         db.commandToolMappings,
       );
@@ -443,7 +417,6 @@ export class AssistantInject {
       );
 
       const chainId = this.getChainId();
-      const intentUseCase = this.getIntentUseCase();
       const userProfileDB = sqlDB.userProfiles;
       const userProfileCache = this.getUserProfileCache();
       const balanceProvider = this.getBalanceProvider();
@@ -452,13 +425,11 @@ export class AssistantInject {
       const registryFactory = async (
         userId: string,
         conversationId: string,
+        channelId: string,
       ): Promise<IToolRegistry> => {
         const r = new ToolRegistryConcrete();
 
         r.register(new WebSearchTool(webSearchService));
-        r.register(
-          new ExecuteIntentTool(userId, conversationId, intentUseCase),
-        );
         r.register(
           new GetPortfolioTool(
             userId,
@@ -493,6 +464,34 @@ export class AssistantInject {
               orchestrator,
               encryptionKey,
             ),
+          );
+        }
+
+        // route_intent + stock_open — both re-enter the capability dispatcher
+        // with a synthesized slash command. Lazy-resolve to break the
+        // construction-time cycle:
+        //   getCapabilityDispatcher → getUseCase (this factory) → getCapabilityDispatcher
+        // (safe because this lambda runs per-message, after both are constructed).
+        // route_intent is the unified NL → slash-command bridge: free-text
+        // "swap …", "send …", "deposit into yield" all funnel back through
+        // the same capability execution path as their /-prefixed counterparts.
+        const dispatcher = await this.getCapabilityDispatcher();
+        if (dispatcher) {
+          r.register(
+            new RouteIntentTool({
+              userId,
+              channelId,
+              conversationId,
+              dispatcher,
+            }),
+          );
+          r.register(
+            new StockOpenTool({
+              userId,
+              channelId,
+              dispatcher,
+              isDisabled: () => this.isStockCapabilityDisabled(),
+            }),
           );
         }
 
@@ -727,7 +726,6 @@ export class AssistantInject {
   getSystemToolProvider(): ISystemToolProvider {
     if (!this._systemToolProvider) {
       this._systemToolProvider = new SystemToolProviderConcrete(
-        this.getIntentUseCase(),
         this.getWalletDataProvider(),
         this.getUserProfileCache(),
         this.getTransferHistoryUseCase(),
@@ -953,6 +951,7 @@ export class AssistantInject {
           new StockCapability({
             stockUseCase,
             signingRequestUseCase: this._signingRequestUseCase,
+            stockPairRegistry: this.getStockPairRegistry(),
             miniAppRequestCache: this.getMiniAppRequestCache(),
             loyaltyUseCase: this.getLoyaltyUseCase(),
             isStockCapabilityDisabled: () => this.isStockCapabilityDisabled(),
@@ -1415,9 +1414,51 @@ export class AssistantInject {
 
   getStockPairRegistry(): IStockPairRegistry {
     if (!this._stockPairRegistry) {
-      this._stockPairRegistry = new AsterPairRegistry(this.getAsterDiamondClient());
+      // DB-backed; the in-memory snapshot is empty until `refresh()` runs.
+      // `verifyStockCapability` calls `refresh()` once at boot, and the
+      // crawler job (`getStockPairCrawlerJob`) refreshes after every tick.
+      this._stockPairRegistry = new DbStockPairRegistry(
+        this.getSqlDB().stockPairs,
+        this.getAsterBrokerVenueChainId(),
+      );
     }
     return this._stockPairRegistry;
+  }
+
+  /** Aster's venue chain id (BSC = 56). Sourced from the broker provider's
+   * `venueChainId` getter once it's been constructed; before that, falls back
+   * to the well-known constant 56. The fallback is intentional — at boot the
+   * registry is built before the broker (the broker depends on the registry)
+   * so we cannot transitively read `broker.venueChainId` here. */
+  getAsterBrokerVenueChainId(): number {
+    return this._stockBrokerProvider?.venueChainId ?? 56;
+  }
+
+  getStockPairCrawlerJob(): StockPairCrawlerJob {
+    if (!this._stockPairCrawlerJob) {
+      const intervalMs = parseInt(
+        process.env.STOCK_PAIR_CRAWLER_INTERVAL_MS ?? String(60 * 60 * 1000),
+        10,
+      );
+      const ingestion = new StockPairIngestionUseCase(
+        new AsterStockPairCrawler(this.getAsterDiamondClient()),
+        this.getSqlDB().stockPairs,
+      );
+      // Wrap so the registry's in-memory snapshot follows DB state without
+      // a second timer.
+      const wrapped: IStockPairIngestionUseCase = {
+        ingest: async (chainId: number) => {
+          await ingestion.ingest(chainId);
+          await this.getStockPairRegistry().refresh();
+        },
+      };
+      this._stockPairCrawlerJob = new StockPairCrawlerJob(
+        wrapped,
+        this.getAsterBrokerVenueChainId(),
+        intervalMs,
+      );
+    }
+    return this._stockPairCrawlerJob;
   }
 
   getStockPriceOracle(): IStockPriceOracle {
@@ -1524,16 +1565,47 @@ export class AssistantInject {
    */
   async verifyStockCapability(): Promise<void> {
     try {
-      await this.getStockPairRegistry().verifyAgainstChain();
-      // Eagerly construct the broker + use-case so collateral decimals
-      // are available synchronously to `getStockPositionsProvider`
-      // (sync factory) and the HTTP routes can hand off to a ready
-      // use-case via `getStockUseCaseSync()`.
+      // 1. Eagerly construct the broker + use-case so collateral decimals
+      //    are available synchronously to `getStockPositionsProvider`
+      //    (sync factory) and the HTTP routes can hand off to a ready
+      //    use-case via `getStockUseCaseSync()`.
       await this.getStockUseCase();
-      log.info({ step: "succeeded" }, "stock capability verified");
+
+      // 2. Always run a fresh ingest at boot. Upserts are idempotent and
+      //    cheap (~1–2s for one chain read + a few dozen rows). Doing it
+      //    unconditionally — instead of "only when empty" — means stale
+      //    rows from a prior partial run can't shadow the live pair list,
+      //    and a chain-side delisting is caught on restart instead of
+      //    waiting for the next cron tick. Subsequent refreshes follow the
+      //    crawler tick.
+      const registry = this.getStockPairRegistry();
+      log.info({ step: "bootstrap-ingest" }, "running stock_pairs ingest");
+      const ingestion = new StockPairIngestionUseCase(
+        new AsterStockPairCrawler(this.getAsterDiamondClient()),
+        this.getSqlDB().stockPairs,
+      );
+      await ingestion.ingest(this.getAsterBrokerVenueChainId());
+      await registry.refresh();
+
+      if (registry.symbols().length === 0) {
+        throw new Error(
+          "stock_pairs still empty after bootstrap ingest — check that the " +
+            "0029_stock_pairs migration ran and that the BSC RPC + SEC EDGAR " +
+            "are reachable",
+        );
+      }
+
+      log.info(
+        { step: "succeeded", count: registry.symbols().length },
+        "stock capability verified",
+      );
     } catch (err) {
       this._stockCapabilityDisabled = true;
-      log.error({ err }, "stock capability disabled — boot verification failed");
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg },
+        "stock capability disabled — boot verification failed",
+      );
     }
   }
 }

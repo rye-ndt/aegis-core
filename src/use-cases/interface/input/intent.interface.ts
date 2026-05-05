@@ -1,6 +1,4 @@
-import type { INTENT_STATUSES } from "../../../helpers/enums/intentStatus.enum";
 import type { USER_INTENT_TYPE } from "../../../helpers/enums/userIntentType.enum";
-import type { IntentPackage } from "../output/intentParser.interface";
 import type { ToolManifest } from "../output/toolManifest.types";
 import type { ITokenRecord } from "../output/repository/tokenRegistry.repo";
 import type { CompileResult } from "../output/schemaCompiler.interface";
@@ -8,29 +6,18 @@ import type { CompileResult } from "../output/schemaCompiler.interface";
 export type { ToolManifest };
 export type { ITokenRecord };
 export type { CompileResult };
-export { MissingFieldsError, InvalidFieldError, ConversationLimitError } from './intent.errors';
 export { DisambiguationRequiredError } from '../output/resolver.interface';
 export type { ResolvedPayload } from '../output/resolver.interface';
 
-export interface IntentExecutionResult {
-  intentId: string;
-  status: INTENT_STATUSES;
-  calldata?: { to: string; data: string; value: string };
-  humanSummary: string;
-  requiresConfirmation: boolean;
-}
-
+/**
+ * Schema-compilation + manifest-driven calldata service consumed by
+ * capabilities. The legacy NL→solver `parseAndExecute` entry point and its
+ * supporting types (IntentExecutionResult, intent statuses, conversation-limit
+ * errors) were removed when the LLM `route_intent` tool unified natural
+ * language into the slash-command capability dispatcher.
+ */
 export interface IIntentUseCase {
-  parseAndExecute(params: {
-    userId: string;
-    conversationId: string;
-    messageId: string;
-    rawInput: string;
-  }): Promise<IntentExecutionResult>;
-
   searchTokens(symbol: string, chainId: number): Promise<ITokenRecord[]>;
-
-  classifyIntent(messages: string[]): Promise<USER_INTENT_TYPE>;
 
   selectTool(
     intentType: USER_INTENT_TYPE,

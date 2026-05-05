@@ -101,6 +101,11 @@ export class TelegramAssistantHandler {
       }
     });
 
+    bot.command("welcome", async (ctx) => {
+      log.info({ chatId: ctx.chat.id }, "welcome-command");
+      await ctx.reply(this.buildWelcomeMessage(), { parse_mode: "Markdown" });
+    });
+
     bot.command("logout", async (ctx) => {
       const chatId = ctx.chat.id;
       await this.telegramSessions.deleteByChatId(String(chatId));
@@ -139,6 +144,22 @@ export class TelegramAssistantHandler {
         await ctx.reply("Sorry, something went wrong. Please try again.");
       }
     });
+  }
+
+  private buildWelcomeMessage(): string {
+    return [
+      "👋 *Welcome to Aegis!*",
+      "",
+      "Your personal finance assistant - just talk to it like a person. No commands to memorize, no crypto knowledge needed, and *you never hand over your keys*. Just delegate a fixed amount and Aegis handles the rest.",
+      "",
+      "_\"Send $50 to @john\"_ · _\"Buy $100 of Bitcoin\"_ · _\"How much do I have?\"_",
+      "",
+      "*Quick commands*",
+      "/positions · /buy · /sell · /swap · /stock · /send · /topup · /withdraw · /points · /leaderboard",
+      "",
+      "*🔮 Works while you're away*",
+      "Aegis watches the market, auto-collects your earnings, and quietly moves your money to where it earns the most. Like a financial advisor who never sleeps.",
+    ].join("\n");
   }
 
   private async sendWelcomeWithLoginButton(chatId: number): Promise<void> {

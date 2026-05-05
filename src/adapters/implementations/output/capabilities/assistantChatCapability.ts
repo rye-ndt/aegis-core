@@ -63,6 +63,7 @@ export class AssistantChatCapability implements Capability<AssistantParams> {
       userId: ctx.userId,
       conversationId: params.conversationId ?? undefined,
       message: params.message,
+      channelId: ctx.channelId,
     });
     this.conversations.set(ctx.channelId, response.conversationId);
 

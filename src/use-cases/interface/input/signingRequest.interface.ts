@@ -36,6 +36,10 @@ export interface ISigningRequestUseCase {
     rejected?: boolean;
     errorCode?: string;
     errorMessage?: string;
+    /** Raw error (viem revert text) for BE logs only — never persisted or
+     * shown to the user. Used to surface on-chain revert reasons that the FE
+     * interpreter mapped to `errorCode: 'unknown'`. */
+    errorRaw?: string;
   }): Promise<void>;
 
   /**

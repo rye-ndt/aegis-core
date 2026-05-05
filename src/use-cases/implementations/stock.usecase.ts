@@ -168,13 +168,7 @@ export class StockUseCaseImpl implements IStockUseCase {
       kind: input.isShort ? "short" : "buy",
       symbol,
       steps,
-      quoteSummary: buildOpenQuoteSummary({
-        symbol,
-        amountUsd: input.amountUsd,
-        markPriceUsd: mark.priceUsd,
-        isShort: !!input.isShort,
-        stepCount: steps.length,
-      }),
+      markPriceUsd: mark.priceUsd,
     };
   }
 
@@ -219,7 +213,11 @@ export class StockUseCaseImpl implements IStockUseCase {
       kind: "close",
       symbol: match.symbol,
       steps,
-      quoteSummary: `*Closing ${match.symbol} ${match.side}* — collateral $${match.collateralUsd}, P&L ${match.unrealizedPnlUsd} USD.`,
+      closeContext: {
+        side: match.side,
+        collateralUsd: match.collateralUsd,
+        unrealizedPnlUsd: match.unrealizedPnlUsd,
+      },
     };
   }
 
@@ -265,7 +263,6 @@ export class StockUseCaseImpl implements IStockUseCase {
       kind: "set_exits",
       symbol: match.symbol,
       steps,
-      quoteSummary: `Updating exits for ${match.symbol} (SL ${finalSlHuman}, TP ${finalTpHuman})…`,
     };
   }
 
@@ -328,7 +325,6 @@ export class StockUseCaseImpl implements IStockUseCase {
       kind: "recovery",
       symbol: "",
       steps,
-      quoteSummary: "Returning your funds to the home chain…",
     };
   }
 
@@ -363,23 +359,3 @@ export class StockUseCaseImpl implements IStockUseCase {
   }
 }
 
-function buildOpenQuoteSummary(args: {
-  symbol: string;
-  amountUsd: string;
-  markPriceUsd: string;
-  isShort: boolean;
-  stepCount: number;
-}): string {
-  const verb = args.isShort ? "Short" : "Buy";
-  const lines = [
-    `*${verb} ${args.symbol}*`,
-    "",
-    `Notional: $${args.amountUsd}`,
-    `Mark: $${args.markPriceUsd}`,
-    `Leverage: 1×`,
-    `Steps: ${args.stepCount} (cross-chain bridge → open)`,
-    "",
-    "Tap below — all steps will be signed in one mini-app session.",
-  ];
-  return lines.join("\n");
-}

@@ -1,236 +1,45 @@
-import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
-import { toErrorMessage } from "../../helpers/errors/toErrorMessage";
-import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { extractAddressFields } from "../../helpers/schema/addressFields";
-import { newUuid } from "../../helpers/uuid";
-import { INTENT_STATUSES } from "../../helpers/enums/intentStatus.enum";
-import { INTENT_ACTION } from "../../helpers/enums/intentAction.enum";
-import { USER_INTENT_TYPE } from "../../helpers/enums/userIntentType.enum";
 import { toRaw } from "../../helpers/bigint";
-import type {
-  IIntentUseCase,
-  IntentExecutionResult,
-} from "../interface/input/intent.interface";
+import type { IIntentUseCase } from "../interface/input/intent.interface";
 import type { IntentPackage } from "../interface/output/intentParser.interface";
-import type { IIntentParser } from "../interface/output/intentParser.interface";
 import type { ITokenRecord } from "../interface/output/repository/tokenRegistry.repo";
 import type { ITokenRegistryService } from "../interface/output/tokenRegistry.interface";
 import type { ISolverRegistry } from "../interface/output/solver/solverRegistry.interface";
-import type { IIntentDB } from "../interface/output/repository/intent.repo";
 import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
-import type { IMessageDB } from "../interface/output/repository/message.repo";
-import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
-import { MissingFieldsError, ConversationLimitError, InvalidFieldError } from "../interface/input/intent.errors";
-import { validateIntent } from "./validateIntent";
+import type { USER_INTENT_TYPE } from "../../helpers/enums/userIntentType.enum";
 import type { IToolManifestDB, IToolManifestRecord } from "../interface/output/repository/toolManifest.repo";
 import type { IToolIndexService } from "../interface/output/toolIndex.interface";
 import { deserializeManifest, type ToolManifest } from "../interface/output/toolManifest.types";
-import type { IIntentClassifier } from "../interface/output/intentClassifier.interface";
 import type { ISchemaCompiler, CompileResult } from "../interface/output/schemaCompiler.interface";
 import type { ICommandToolMappingDB } from "../interface/output/repository/commandToolMapping.repo";
 
 import { createLogger } from "../../helpers/observability/logger";
 
 const log = createLogger("intentUseCase");
-const CONFIDENCE_THRESHOLD = 0.7;
 
+/**
+ * Schema-compilation + manifest-driven calldata service. Used by capabilities
+ * (sendCapability, swapCapability) for token search, parameter compilation,
+ * and ERC-20 transfer calldata via manifest solvers.
+ *
+ * The legacy `parseAndExecute` / NL→solver entry point was removed when the
+ * LLM `route_intent` tool unified natural-language intents into the
+ * slash-command capability dispatcher. Capabilities are the only callers now.
+ */
 export class IntentUseCaseImpl implements IIntentUseCase {
   constructor(
-    private readonly intentParser: IIntentParser,
     private readonly tokenRegistryService: ITokenRegistryService,
     private readonly solverRegistry: ISolverRegistry,
-    private readonly intentDB: IIntentDB,
     private readonly userProfileDB: IUserProfileDB,
-    private readonly messageDB: IMessageDB,
     private readonly chainId: number,
     private readonly toolManifestDB: IToolManifestDB,
     private readonly toolIndexService: IToolIndexService | undefined,
-    private readonly intentClassifier: IIntentClassifier,
     private readonly schemaCompiler: ISchemaCompiler,
     private readonly commandToolMappingDB?: ICommandToolMappingDB,
   ) {}
 
-  async parseAndExecute(params: {
-    userId: string;
-    conversationId: string;
-    messageId: string;
-    rawInput: string;
-  }): Promise<IntentExecutionResult> {
-    const now = newCurrentUTCEpoch();
-    const intentId = newUuid();
-
-    // 1. Build sliding window of last 10 user messages for this conversation.
-    const priorMessages = await this.messageDB.findByConversationId(
-      params.conversationId,
-    );
-    const priorUserContent = priorMessages
-      .filter((m) => m.role === MESSAGE_ROLE.USER)
-      .slice(-9)
-      .map((m) => m.content);
-    const messages = [...priorUserContent, params.rawInput];
-
-    // 2. Discover relevant dynamic tools and parse intent
-    log.info({ step: "parse-start", userId: params.userId, inputPreview: params.rawInput.slice(0, 80) }, "parseAndExecute");
-    const relevantManifests = await this.discoverRelevantTools(params.rawInput);
-
-    let intent: IntentPackage | null;
-    try {
-      log.debug({ choice: "intent-parse", messageCount: messages.length, manifestCount: relevantManifests.length }, "calling intentParser");
-      intent = await this.intentParser.parse(messages, params.userId, relevantManifests);
-      log.info({ step: "intent-parsed", action: intent?.action ?? null, confidence: intent?.confidence ?? null }, "intent parsed");
-
-      let manifest: ToolManifest | undefined;
-      if (intent !== null && !Object.values(INTENT_ACTION).includes(intent.action as INTENT_ACTION)) {
-        manifest = relevantManifests.find((m) => m.toolId === intent!.action);
-      }
-      if (intent !== null) validateIntent(intent, messages.length, manifest);
-    } catch (err) {
-      if (err instanceof ConversationLimitError) {
-        await this.messageDB.deleteByConversationId(params.conversationId);
-        return {
-          intentId,
-          status: INTENT_STATUSES.REJECTED,
-          humanSummary:
-            err.message +
-            "\n\nYour conversation has been reset. Please send a new complete request.",
-          requiresConfirmation: false,
-        };
-      }
-      if (
-        err instanceof MissingFieldsError ||
-        err instanceof InvalidFieldError
-      ) {
-        return {
-          intentId,
-          status: INTENT_STATUSES.REJECTED,
-          humanSummary: err.prompt,
-          requiresConfirmation: false,
-        };
-      }
-      throw err;
-    }
-
-    if (intent === null) {
-      return {
-        intentId,
-        status: INTENT_STATUSES.REJECTED,
-        humanSummary: "No on-chain action detected in your message.",
-        requiresConfirmation: false,
-      };
-    }
-
-    // 3. Confidence check
-    log.debug({ choice: "confidence-check", confidence: intent.confidence, threshold: CONFIDENCE_THRESHOLD, action: intent.action }, "confidence check");
-    if (
-      intent.confidence < CONFIDENCE_THRESHOLD ||
-      intent.action === INTENT_ACTION.UNKNOWN
-    ) {
-      await this.intentDB.create({
-        id: intentId,
-        userId: params.userId,
-        conversationId: params.conversationId,
-        messageId: params.messageId,
-        rawInput: params.rawInput,
-        parsedJson: JSON.stringify(intent),
-        status: INTENT_STATUSES.REJECTED,
-        rejectionReason: "Low confidence or unrecognized intent",
-        createdAtEpoch: now,
-        updatedAtEpoch: now,
-      });
-      return {
-        intentId,
-        status: INTENT_STATUSES.REJECTED,
-        humanSummary: `I couldn't understand that intent clearly (confidence: ${Math.round(intent.confidence * 100)}%). Could you rephrase? For example: "Swap 100 USDC for ${CHAIN_CONFIG.nativeSymbol}" or "Claim my rewards".`,
-        requiresConfirmation: false,
-      };
-    }
-
-    // 4. Get solver
-    log.debug({ choice: "solver-lookup", action: intent.action }, "looking up solver");
-    const solver = await this.solverRegistry.getSolverAsync(intent.action);
-    log.debug({ choice: "solver-result", action: intent.action, found: !!solver }, "solver resolved");
-    if (!solver) {
-      await this.intentDB.create({
-        id: intentId,
-        userId: params.userId,
-        conversationId: params.conversationId,
-        messageId: params.messageId,
-        rawInput: params.rawInput,
-        parsedJson: JSON.stringify(intent),
-        status: INTENT_STATUSES.REJECTED,
-        rejectionReason: `No solver for action: ${intent.action}`,
-        createdAtEpoch: now,
-        updatedAtEpoch: now,
-      });
-      return {
-        intentId,
-        status: INTENT_STATUSES.REJECTED,
-        humanSummary: `This action (${intent.action}) is not yet supported. Supported actions: swap, claim_rewards.`,
-        requiresConfirmation: false,
-      };
-    }
-
-    // 5. Get user's address (EOA from profile if available)
-    const profile = await this.userProfileDB.findByUserId(params.userId);
-    const userAddress = profile?.eoaAddress ?? "";
-
-    // 6. Build calldata
-    log.debug({ choice: "build-calldata", userAddress }, "building calldata");
-    let calldata: { to: string; data: string; value: string };
-    try {
-      calldata = await solver.buildCalldata(intent, userAddress);
-      log.info({ step: "calldata-built", to: calldata.to, value: calldata.value, dataLen: calldata.data.length }, "calldata built");
-    } catch (err) {
-      const reason = toErrorMessage(err);
-      await this.intentDB.create({
-        id: intentId,
-        userId: params.userId,
-        conversationId: params.conversationId,
-        messageId: params.messageId,
-        rawInput: params.rawInput,
-        parsedJson: JSON.stringify(intent),
-        status: INTENT_STATUSES.REJECTED,
-        rejectionReason: reason,
-        createdAtEpoch: now,
-        updatedAtEpoch: now,
-      });
-      return {
-        intentId,
-        status: INTENT_STATUSES.REJECTED,
-        humanSummary: `Couldn't build transaction: ${reason}`,
-        requiresConfirmation: false,
-      };
-    }
-
-    // 7. Save intent record
-    await this.intentDB.create({
-      id: intentId,
-      userId: params.userId,
-      conversationId: params.conversationId,
-      messageId: params.messageId,
-      rawInput: params.rawInput,
-      parsedJson: JSON.stringify(intent),
-      status: INTENT_STATUSES.AWAITING_CONFIRMATION,
-      createdAtEpoch: now,
-      updatedAtEpoch: now,
-    });
-
-    const humanSummary = this.buildCalldataSummary(intent, calldata);
-    return {
-      intentId,
-      status: INTENT_STATUSES.AWAITING_CONFIRMATION,
-      calldata,
-      humanSummary,
-      requiresConfirmation: false,
-    };
-  }
-
   async searchTokens(symbol: string, chainId: number): Promise<ITokenRecord[]> {
     return this.tokenRegistryService.searchBySymbol(symbol, chainId);
-  }
-
-  async classifyIntent(messages: string[]): Promise<USER_INTENT_TYPE> {
-    return this.intentClassifier.classify(messages);
   }
 
   async selectTool(
@@ -410,36 +219,5 @@ export class IntentUseCaseImpl implements IIntentUseCase {
     }
 
     return resolved.slice(0, 8).map(deserializeManifest);
-  }
-
-  private buildCalldataSummary(
-    intent: IntentPackage,
-    calldata: { to: string; data: string; value: string },
-  ): string {
-    const lines: string[] = ["⚡ Transaction Ready", ""];
-
-    const actionLabel: Record<string, string> = {
-      [INTENT_ACTION.SWAP]: "Swap",
-      [INTENT_ACTION.STAKE]: "Stake",
-      [INTENT_ACTION.UNSTAKE]: "Unstake",
-      [INTENT_ACTION.CLAIM_REWARDS]: "Claim Rewards",
-      [INTENT_ACTION.TRANSFER]: "Transfer",
-      [INTENT_ACTION.UNKNOWN]: "Unknown",
-    };
-    lines.push(`Action: ${actionLabel[intent.action] ?? intent.action}`);
-
-    if (intent.fromTokenSymbol) {
-      lines.push(`You send: ${intent.amountHuman ?? "?"} ${intent.fromTokenSymbol}`);
-    }
-    if (intent.toTokenSymbol) {
-      lines.push(`You receive: ~? ${intent.toTokenSymbol} (est.)`);
-    }
-
-    lines.push(`Contract: ${calldata.to}`);
-    lines.push(`Value: ${calldata.value}`);
-    lines.push("");
-    lines.push("Open the Aegis app to sign and execute this transaction.");
-
-    return lines.join("\n");
   }
 }

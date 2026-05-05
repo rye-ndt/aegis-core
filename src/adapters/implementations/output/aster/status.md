@@ -1,5 +1,72 @@
 # Aster (tokenized stocks) — adapter notes
 
+## DB-backed pair registry + SEC-EDGAR enrichment — 2026-05-05
+
+**What was done:**
+- New `stock_pairs` table (`schema.ts` + migration `0029_stock_pairs.sql`).
+  Columns: `symbol`, `name`, `chainId`, `pairBase`, `pairType`, `isActive`,
+  timestamps. Unique on `(symbol, chainId)`.
+- Replaced the hardcoded `AsterPairRegistry` with `DbStockPairRegistry`
+  (`adapters/.../stocks/dbStockPairRegistry.ts`). Sync read API
+  (`resolve` / `symbols` / `list`) is preserved via an in-memory snapshot;
+  `refresh()` rebuilds the snapshot from the DB. New `resolveByQuery(word)`
+  ranks matches: exact symbol → first-word-of-name → whole-word-of-name.
+- New crawler chain: `IStockPairCrawler` port + `AsterStockPairCrawler`
+  reads `pairsV4()` and joins each ticker against SEC EDGAR's free
+  `company_tickers.json` (24h in-memory TTL). Pairs Aster lists with no SEC
+  match (forex/crypto) are still stored — their `name` stays equal to the
+  symbol and the registry's name-based ranking ignores them.
+- `StockPairIngestionUseCase` two-phase upsert: `upsertChainFields`
+  preserves any existing `name`; `setName` is only called when the crawler
+  has an enriched name, so a transient SEC outage cannot blank out a row.
+- New cron `StockPairCrawlerJob` (worker-only, default 1h interval, env
+  `STOCK_PAIR_CRAWLER_INTERVAL_MS`). DI wraps the ingestion call so the
+  registry's snapshot refreshes after every successful tick — no second
+  timer.
+- `verifyStockCapability` no longer calls a chain-verification method on
+  the registry. Boot sequence: build broker + use-case, hydrate registry
+  from DB, and if the table is empty, run a one-shot ingest synchronously
+  so cold-start `/stock buy` works. Soft-disable still flips on if no
+  rows exist after the bootstrap ingest.
+- Deleted `asterPairRegistry.ts`. `scripts/verify-aster-pairs.ts` rewritten
+  to call the crawler directly (CI sentinel for ABI drift).
+
+**Why this approach:**
+- The previous registry hardcoded six tickers. Every new symbol Aster
+  listed required a code change. Pulling the live list from `pairsV4()`
+  makes the supported set track upstream automatically.
+- SEC EDGAR is the cheapest non-LLM source of company names: free, no
+  API key, stable URL, covers every US-listed equity Aster realistically
+  ships. Failure is graceful — rows still ingest, just without
+  natural-language matching for that ticker.
+- `parseAmountSymbol` no longer leans on regex-only ticker shape +
+  positional guessing. It hands each non-amount, non-stop-word token to
+  `registry.resolveByQuery`. "Apple", "tesla", "alphabet" all resolve
+  deterministically; "of" is filtered as a stop word; "$5" parses as the
+  amount. No LLM in this path.
+
+**New conventions (do not break):**
+- The `stock_pairs` table is the single source of truth for what Aster
+  supports. Any new code that needs the symbol list MUST read from
+  `IStockPairRegistry` (sync snapshot) — never re-add a hardcoded list.
+- The `IStockPairRegistry` snapshot is refreshed by the crawler tick.
+  Code paths that need a guaranteed-fresh read should call `refresh()`
+  explicitly; otherwise the in-memory snapshot is the contract.
+- `resolveByQuery` ranking precedence is fixed: exact-symbol →
+  first-word-of-name → whole-word-of-name. Don't add a substring
+  fallback — substring matches across 10k+ SEC tickers will produce
+  ambiguous hits (`"apple"` would match Pineapple Inc.).
+- SEC EDGAR fetches require a descriptive `User-Agent`. Default is set
+  in `secCompanyTickers.ts`; override via `SEC_USER_AGENT`. Browser-style
+  spoofing is forbidden by SEC's fair-access policy — don't change the
+  default to mimic a browser.
+- New env: `STOCK_PAIR_CRAWLER_INTERVAL_MS` (default 1h). Pair list
+  changes infrequently — don't poll faster without a reason.
+- New log scopes: `dbStockPairRegistry`, `asterStockPairCrawler`,
+  `secCompanyTickers`, `stockPairIngestion`, `stockPairCrawlerJob`.
+
+
+
 **Status:** Phase 2 — full read + execute (open / close / SL-TP / recovery + agent tools + HTTP read routes)
 **Companion plan:** `be/constructions/2026-05-04-aster-stocks-impl.md`
 
@@ -43,10 +110,7 @@
   `/stocks/pairs` and `/stocks/quote` then return 503 with
   `error: "stocks_unavailable"`. The rest of the backend boots cleanly.
   Plan fix #9.
-- **Read-only agent tools.** `get_stock_quote` and `get_stock_positions`
-  ship in Phase 2 as read tools only. Execution stays gated behind the
-  `/stock` capability's confirmed mini-app flow — agents never trigger
-  trades directly (fix #10).
+- **Agent tools.** `get_stock_quote` and `get_stock_positions` are read-only. `stock_open` is the one execution-side tool — it builds a `/stock buy|short …` slash and re-enters the capability dispatcher, so the user still confirms via the mini-app modal. The agent never bypasses confirmed signing. `/stock close`, `/stock sl`, and `/stock tp` remain slash-command-only (no LLM tool) because they need a position-disambiguation prompt on multi-position users — exposing them as tools would force the LLM to hallucinate a `tradeHash`.
 
 ## ABI source of truth
 
@@ -131,6 +195,8 @@ in CI before any merge that touches `asterAbi.ts` or `asterPairRegistry.ts`.
 on the resolved leg of a recovery flow rather than the generic
 "transaction submitted" line. Set in `stockCapability.emitRecoveryMiniApp`
 on every queued recovery step.
+
+Subsequent change: `stock_open` LLM tool — see `be/constructions/2026-05-05-stock-open-llm-tool.md`.
 
 ## Out of scope (Phase 3+)
 

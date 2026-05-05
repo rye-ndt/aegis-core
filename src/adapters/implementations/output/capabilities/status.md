@@ -1,5 +1,125 @@
 # Capabilities Status
 
+## /stock — preview-only summary, no chat preamble — 2026-05-05
+
+**What was done:**
+- Removed the `await ctx.emit({ kind: "chat", text: plan.quoteSummary })`
+  preamble from all three `/stock` flows (open, close, set_exits). The
+  previous behaviour duplicated the "Tap below — all steps will be
+  signed in one mini-app session." prompt (once in the chat preamble,
+  once in the `mini_app` `promptText`) and leaked raw quote internals
+  (Notional / Mark / Leverage / Steps) into the chat transcript instead
+  of inside the mini-app modal.
+- Dropped `quoteSummary` from `StockExecutionPlan` entirely (and the
+  `buildOpenQuoteSummary` helper from `stock.usecase.ts`). Replaced with
+  structured fields the capability uses to enrich the per-step preview:
+  `markPriceUsd?: string` on open, `closeContext?: { side, collateralUsd,
+  unrealizedPnlUsd }` on close.
+- Open preview's first step now includes Notional / Mark / Leverage so
+  that information is still available to the user, but rendered cleanly
+  inside the mini-app modal instead of leaking into chat.
+- Close preview's first step now includes Side / Collateral / P&L, again
+  surfaced inside the modal.
+
+**Why this approach:**
+- Other intents (`send`, `swap`, `buy`) emit only the `mini_app` artifact
+  and rely on `preview` (an `IntentResult`) for the human-readable
+  summary. `/stock` was the outlier — a chat preamble plus a mini-app
+  prompt produced a two-message UX with overlapping copy. Matching the
+  established pattern is the simplest fix and removes the dead
+  `quoteSummary` field from the use-case interface.
+
+**New conventions (do not break):**
+- Capabilities MUST NOT emit a separate `chat` artifact summarising the
+  about-to-be-signed plan. Pack the summary into `IntentResult` via
+  `buildPreview` and attach it to the first step's signing record. The
+  FE renders previews inside the mini-app modal at session start.
+- Plan structs returned by the use case carry data, not pre-rendered
+  copy. Any free-text the user sees is constructed in the capability
+  layer (which owns the UX surface).
+
+## /stock buy — deterministic symbol resolution — 2026-05-05
+
+**What was done:**
+- `parseAmountSymbol` rewritten to be deterministic and LLM-free. Each
+  non-amount token is filtered against a `STOP_WORDS` set ("of", "the",
+  "for", "worth", "stock", "shares", …) and then handed to
+  `IStockPairRegistry.resolveByQuery`. First successful resolve wins.
+  Tickers ("AAPL"), company names ("apple"), and aliases the SEC name
+  exposes ("alphabet" → GOOG via "Alphabet Inc.") all resolve.
+- `/stock close` and `/stock sl|tp` symbol arguments now also pass
+  through `resolveByQuery`, so `/stock close apple` works the same way
+  as `/stock close AAPL`.
+- `StockCapabilityDeps` gained `stockPairRegistry: IStockPairRegistry`.
+  The capability owns the registry handle directly rather than reaching
+  through the use case — keeps the use case's port set unchanged.
+
+**Why this approach:**
+- The previous parser matched any 1–5-letter token as a ticker, then
+  let the use case validate. So `"buy $5 of apple"` extracted `"APPLE"`
+  (a non-existent ticker) and the use case rejected it with "unsupported
+  symbol APPLE", which surfaced as a generic failure card. The user's
+  bug report on 2026-05-05 was exactly this path.
+- Going through the registry's ranked match means the capability
+  rejects ambiguous input at parse time (`usageHint`) rather than after
+  the use case has done partial work. The DB is the single source of
+  truth for "what's supported".
+- Stop words are stripped to handle natural phrasings without an LLM
+  parser. The list is closed and small — adding to it is a deliberate
+  decision, not an LLM hallucination.
+
+**New conventions (do not break):**
+- Capabilities that take a stock symbol from free-text input MUST go
+  through `IStockPairRegistry.resolveByQuery` — never `string.toUpperCase()`
+  + regex shape check. The shape check passed "OF" and "APPLE" alike;
+  the registry pass rejects both correctly.
+- Stop-word lists live next to the parser they protect. Don't centralise
+  them — different verbs filter different fillers.
+
+
+
+## stock_open LLM tool — 2026-05-05
+
+**What was done:**
+- New `tools/stockOpen.tool.ts` registered in the per-message LLM tool registry
+  alongside `ExecuteIntentTool` / `GetPortfolioTool`. Builds a `/stock buy|short
+  $X SYM` string and re-enters `ICapabilityDispatcher.handle` so the user sees
+  the same mini-app modal as the explicit slash command. Soft-disabled when
+  `verifyStockCapability()` fails at boot — surfaces a friendly error from
+  inside `execute()` (matches read-only sibling tools' policy).
+- `IChatInput` gained `channelId: string`. Threaded through
+  `AssistantUseCaseImpl.chat → registryFactory(userId, conversationId,
+  channelId)` so capability-bound tools have the renderer routing key.
+  `AssistantChatCapability.run` passes `ctx.channelId` at the call site.
+- `INTENT_ACTION.STOCK_TRADE` is still enum-only and intentionally unused.
+  Reserved for a future intent-parser route; do not delete without auditing
+  the parser fixtures.
+
+**Why this approach:**
+- The `/stock` capability dispatch path is the only execution surface that
+  emits the mini-app modal. Calling it via the dispatcher (rather than calling
+  `IStockUseCase` or `IIntentUseCase.parseAndExecute`) reuses the entire
+  preview / signing / recovery / loyalty / error-catalog plumbing for free.
+- `parseAndExecute` is the dynamic-tool/solver pipeline (`/send`-style); it
+  has no path that ends in a Capability. Mirroring `transferErc20.tool.ts`
+  would have silently misrouted to the swap solver.
+
+**New conventions (do not break):**
+- LLM tools that need to invoke a slash-command capability MUST go through
+  `ICapabilityDispatcher.handle({ userId, channelId, input: { kind:"text",
+  text:"/cmd ..." } })`, not `IIntentUseCase.parseAndExecute`. The latter is
+  for solver-backed actions (swap, send-token).
+- `IChatInput.channelId` is required; new free-text entry points must supply it.
+- Capability-bound LLM tools (any tool that calls `ICapabilityDispatcher.handle`)
+  must lazy-resolve the dispatcher inside `registryFactory`'s per-message lambda
+  to avoid the `getCapabilityDispatcher → getUseCase → registryFactory` cycle
+  triggering during construction.
+- Recursive dispatch on the same `channelId` is intentional and supported
+  (LLM tool re-enters the dispatcher mid-LLM-round). Capabilities that write
+  pending state must continue to scope their pending keys to a `(channelId,
+  capabilityId)` pair so a recursive dispatch can't read the outer capability's
+  state.
+
 ## Result-card framework — review-feedback closure — 2026-05-05
 
 Closes the gaps surfaced by the post-implementation review agent (true-positive

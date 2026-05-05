@@ -20,6 +20,7 @@ import type {
   IStockUseCase,
   StockExecutionStep,
 } from "../../../../use-cases/interface/input/stock.interface";
+import type { IStockPairRegistry } from "../../../../use-cases/interface/output/stocks/stockPair.interface";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
@@ -64,6 +65,12 @@ type StockParams = StockOpenParams | StockCloseParams | StockExitsParams;
 export interface StockCapabilityDeps {
   stockUseCase: IStockUseCase;
   signingRequestUseCase: ISigningRequestUseCase;
+  /**
+   * Used by `parseAmountSymbol` to resolve free-text symbol/company name
+   * (e.g. "apple", "tesla") into a canonical ticker. Replaces the LLM-based
+   * extraction we used to lean on for /stock buy.
+   */
+  stockPairRegistry: IStockPairRegistry;
   miniAppRequestCache?: IMiniAppRequestCache;
   loyaltyUseCase?: ILoyaltyUseCase;
   isStockCapabilityDisabled?: () => boolean;
@@ -109,7 +116,20 @@ export class StockCapability implements Capability<StockParams> {
     const verb = (tokens[0] ?? "").toLowerCase() as StockVerb | "";
 
     if (verb === "buy" || verb === "short") {
-      const parsed = parseAmountSymbol(tokens.slice(1));
+      // Hard-fail fast when the registry hasn't loaded yet — otherwise the
+      // user gets a misleading "try /stock buy $100 AAPL" hint when the real
+      // problem is that the DB hasn't been seeded by the crawler.
+      if (this.deps.stockPairRegistry.symbols().length === 0) {
+        log.warn(
+          { step: "failed", reason: "registry-empty" },
+          "stock catalogue not loaded — refusing /stock buy",
+        );
+        return this.terminal(
+          "Stock catalogue is still loading — try again in a minute. " +
+            "If this persists, ask an admin to verify the stock_pairs migration ran.",
+        );
+      }
+      const parsed = parseAmountSymbol(tokens.slice(1), this.deps.stockPairRegistry);
       if (!parsed) return this.usageHint();
       return {
         kind: "ok",
@@ -123,18 +143,22 @@ export class StockCapability implements Capability<StockParams> {
     }
 
     if (verb === "close" || verb === "sell") {
-      const symbol = tokens[1]?.toUpperCase();
-      if (!symbol) return this.usageHint();
+      const raw = tokens[1];
+      if (!raw) return this.usageHint();
+      const resolved = this.deps.stockPairRegistry.resolveByQuery(raw);
+      const symbol = resolved?.symbol ?? raw.toUpperCase();
       return { kind: "ok", params: { kind: "close", symbol } };
     }
 
     if (verb === "sl" || verb === "tp") {
       // /stock sl AAPL 150
-      const symbol = tokens[1]?.toUpperCase();
+      const raw = tokens[1];
       const priceUsd = tokens[2];
-      if (!symbol || !priceUsd || !/^\d+(\.\d+)?$/.test(priceUsd)) {
+      if (!raw || !priceUsd || !/^\d+(\.\d+)?$/.test(priceUsd)) {
         return this.usageHint();
       }
+      const resolved = this.deps.stockPairRegistry.resolveByQuery(raw);
+      const symbol = resolved?.symbol ?? raw.toUpperCase();
       return {
         kind: "ok",
         params: { kind: "exits", verb, symbol, priceUsd },
@@ -220,27 +244,25 @@ export class StockCapability implements Capability<StockParams> {
       },
       "open plan quoted",
     );
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: plan.quoteSummary,
-    });
 
     const verb = "stock_buy" as const;
+    const openVerbLabel = params.verb === "short" ? "Short" : "Buy";
     const headlineForOpen = (stepLabel: string) =>
-      `${stepLabel} — ${params.verb === "short" ? "Short" : "Buy"} $${params.amountUsd} ${plan.symbol}`;
+      `${stepLabel} — ${openVerbLabel} $${params.amountUsd} ${plan.symbol}`;
     const previewsForOpen = plan.steps.map((s, i) =>
       buildPreview({
         verb,
         headline:
           plan.steps.length === 1
-            ? params.verb === "short"
-              ? `Short $${params.amountUsd} of ${plan.symbol}`
-              : `Buy $${params.amountUsd} of ${plan.symbol}`
+            ? `${openVerbLabel} $${params.amountUsd} of ${plan.symbol}`
             : headlineForOpen(s.label),
         fields: [
           { label: "Symbol", value: plan.symbol, emphasis: "primary" },
-          { label: "Size", value: `$${params.amountUsd}` },
+          { label: "Notional", value: `$${params.amountUsd}` },
+          ...(plan.markPriceUsd
+            ? [{ label: "Mark", value: `$${plan.markPriceUsd}` }]
+            : []),
+          { label: "Leverage", value: "1×", emphasis: "muted" as const },
           ...(plan.steps.length > 1
             ? [
                 {
@@ -408,11 +430,7 @@ export class StockCapability implements Capability<StockParams> {
       userId: ctx.userId,
       tradeHash,
     });
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: plan.quoteSummary,
-    });
+    const closeCtx = plan.closeContext;
     const previewsForClose = plan.steps.map((s, i) =>
       buildPreview({
         verb: "stock_close",
@@ -422,6 +440,22 @@ export class StockCapability implements Capability<StockParams> {
             : `${s.label} — Close ${plan.symbol}`,
         fields: [
           { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+          ...(closeCtx
+            ? [
+                {
+                  label: "Side",
+                  value: closeCtx.side === "short" ? "Short" : "Long",
+                },
+                {
+                  label: "Collateral",
+                  value: `$${closeCtx.collateralUsd}`,
+                },
+                {
+                  label: "P&L",
+                  value: `${closeCtx.unrealizedPnlUsd} USD`,
+                },
+              ]
+            : []),
           ...(plan.steps.length > 1
             ? [
                 {
@@ -577,11 +611,6 @@ export class StockCapability implements Capability<StockParams> {
       tradeHash,
       stopLossUsd: params.verb === "sl" ? params.priceUsd : undefined,
       takeProfitUsd: params.verb === "tp" ? params.priceUsd : undefined,
-    });
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: plan.quoteSummary,
     });
     const result = await this.executeSignSteps({
       ctx,
@@ -988,25 +1017,42 @@ export class StockCapability implements Capability<StockParams> {
 }
 
 /**
- * Parse `["$100", "AAPL"]` or `["AAPL", "$100"]` into `{ amountUsd, symbol }`.
- * Accepts a leading `$`. Returns null when neither token is a number or
- * when neither is a 1-5 letter ticker.
+ * Common English fillers. Skipped during symbol resolution so phrasings like
+ * "$5 of apple" or "buy $10 worth of tsla" don't get treated as ticker
+ * candidates. Compared lowercase, alphanumeric only.
+ */
+const STOP_WORDS = new Set([
+  "of", "a", "an", "the", "in", "for", "on", "at", "to",
+  "with", "and", "or", "worth", "stock", "shares", "share",
+]);
+
+/**
+ * Parse `["$100", "AAPL"]`, `["AAPL", "$100"]`, or `["$5", "of", "apple"]`
+ * into `{ amountUsd, symbol }`. Symbol resolution goes through the DB-backed
+ * registry's `resolveByQuery` — so tickers ("AAPL"), company names ("apple"),
+ * and aliases ("alphabet" → GOOG) all work. No LLM. Stop words are skipped.
+ *
+ * Returns null when no amount is present or when no token resolves to a
+ * known symbol.
  */
 function parseAmountSymbol(
   tokens: string[],
+  registry: IStockPairRegistry,
 ): { amountUsd: string; symbol: string } | null {
   let amount: string | undefined;
   let symbol: string | undefined;
   for (const t of tokens) {
     if (!t) continue;
     const cleanedAmt = t.replace(/^\$/, "");
-    if (/^\d+(\.\d+)?$/.test(cleanedAmt)) {
+    if (!amount && /^\d+(\.\d+)?$/.test(cleanedAmt)) {
       amount = cleanedAmt;
       continue;
     }
-    if (/^[A-Z]{1,5}$/i.test(t)) {
-      symbol = t.toUpperCase();
-      continue;
+    const lower = t.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (!lower || STOP_WORDS.has(lower)) continue;
+    if (!symbol) {
+      const resolved = registry.resolveByQuery(t);
+      if (resolved) symbol = resolved.symbol;
     }
   }
   if (!amount || !symbol) return null;

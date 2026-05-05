@@ -45,8 +45,14 @@ export interface StockExecutionPlan {
   /** Symbol the plan refers to. For "recovery" with no associated symbol, use "". */
   symbol: string;
   steps: StockExecutionStep[];
-  /** Markdown body the capability emits as a `chat` artifact before sign. */
-  quoteSummary: string;
+  /** Mark price the open leg sized against. Only set on open plans. */
+  markPriceUsd?: string;
+  /** Snapshot of the position being closed — surfaced inside the mini-app preview. */
+  closeContext?: {
+    side: "long" | "short";
+    collateralUsd: string;
+    unrealizedPnlUsd: string;
+  };
 }
 
 export type PositionResolution =
