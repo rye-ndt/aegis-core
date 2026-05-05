@@ -650,3 +650,38 @@ Implemented Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalanc
 - Any future "external party should know about a thing that happened to them" feature should reuse `RecipientNotificationUseCase` rather than rolling its own pathway.
 - The log scope `recipientNotificationUseCase` uses metadata field `id` = notification row PK.
 - `senderHandle` is currently always `null` (sender's Telegram username is not available at dispatch time). This is v1 acceptable — the message falls back to "someone". Future improvement: thread sender username through `CapabilityCtx.meta`.
+
+---
+
+## 2026-05-05 — `/delegation/approval-params` cross-chain override fix
+
+**What changed:** `httpServer.ts:handleGetDelegationApprovalParams` no longer **synthesises** a row when the `?tokenAddress=…&amountRaw=…` override doesn't match any token resolved on the target `chainId`. It now silently skips with a debug log (`choice: 'skipped-not-on-chain'`).
+
+**Why:** Multi-chain onboarding (`ApprovalOnboarding` in FE) calls `/delegation/approval-params` once per onboarding chain, forwarding the same `(tokenAddress, amountRaw)` pair from the request. The address only exists on the source chain, so on every other chain the override fell through to the `else { resolved.push(...) }` branch and pushed `{ tokenSymbol: "", tokenDecimals: 18, ... }`. That broke setup two ways: (1) blank token chip with a microscopic raw-at-18-decimals amount in the UI, (2) the FE then POSTed that empty-symbol row to `/delegation/grant`, which 400s on `tokenSymbol.min(1)` zod validation, surfacing as `grant-post-failed`.
+
+**Convention:** `?tokenAddress`/`?amountRaw` are an **override on existing rows**, not an injector. They never add new tokens to a chain's resolved set. If the override address isn't in the chain's registry, the request is treated as if the override weren't passed. The FE is also defensive — it filters out any blank-symbol/empty-address rows before display and before POST `/delegation/grant`.
+
+---
+
+## 2026-05-05 — Cancel in-flight `waitFor` on new user command
+
+**What changed:** `SigningRequestUseCaseImpl` now tracks every active `waitFor` by `requestId` and indexes them by `userId`. The new `cancelActiveForUser(userId)` method (added to `ISigningRequestUseCase`) fires every active waiter for that user, which races a cancel-promise inside the poll loop and returns `{ status: "expired" }` immediately. The Telegram input adapter (`telegram/handler.ts`) calls it at the top of every text-message and callback-query branch, *before* dispatching to the capability layer.
+
+**Why:** Capabilities like swap/stock/yield call `await signingRequestUseCase.waitFor(requestId, 10 * 60 * 1000)` to chain multi-step signing flows. grammy serialises updates per chat by default, so if a user fired off an intent and then sent a new command without opening the mini-app, the new command was queued behind the prior 10-minute waiter — observed in logs as a long stream of `signingRequestCache:hit` lookups for one stale `id`, with no progress. Pre-empting the waiter unblocks grammy's queue immediately. The previously-running capability still gets a clean return (`status: "expired"`) and emits its mid-flow timeout artifact, which is the right UX: the user sees that the abandoned flow was discarded and then the response to their new command.
+
+**Conventions introduced:**
+- `cancelActiveForUser` is the canonical pre-emption hook. Any future input adapter that processes user commands must call it before dispatch (or accept that fresh commands may queue behind prior waiters).
+- Cancellation surfaces as `step: "waitFor-cancelled"` (info) on the `signingRequest` logger and `pre-empted in-flight signing waits` on `telegramHandler`. Metadata: `userId`, `cancelled` (count), `source: 'text' | 'callback'`.
+- `waitFor` is the only place that mutates `cancelByRequestId` / `requestsByUserId`. Any future code path that adds a different blocking wait must register/deregister with the same maps or expose its own cancel hook.
+
+---
+
+## Fallback chat scope restriction
+
+**What:** Tightened `DEFAULT_SYSTEM_PROMPT` in `be/src/use-cases/implementations/assistant.usecase.ts` (the prompt used by `AssistantChatCapability` — the dispatcher's default fallback) with an explicit `SCOPE — STRICT` section. The LLM is now instructed to refuse anything not related to crypto / DeFi / blockchain / on-chain actions / tokens / trading / tokenized stocks / wallets / portfolios with a short polite line ("Sorry, I can only help with crypto and on-chain questions."), and to treat prompt-injection / jailbreak / "ignore previous instructions" attempts the same way.
+
+**Why:** The fallback path forwards arbitrary free text to the LLM. Without a scope rule the assistant would happily answer general-knowledge, coding, translation, role-play, etc. — wasted tokens and an exploitation surface. System-prompt hardening was chosen over a pre-flight classifier (option B) because the tool registry is already crypto-only, so the marginal value of a second LLM call did not justify the added latency/cost. If exploit traffic appears, layer in a classifier ahead of the chat loop.
+
+**Convention introduced:**
+- The fallback chat capability is **scope-locked to crypto/on-chain topics**. Any future change to `DEFAULT_SYSTEM_PROMPT` must preserve the `SCOPE — STRICT` paragraph (or replace it with an equivalent guard). Do not loosen it without an explicit product decision recorded here.
+- Refusal phrasing is intentionally short and tool-free — the LLM must not call `route_intent` or any read tool when refusing.

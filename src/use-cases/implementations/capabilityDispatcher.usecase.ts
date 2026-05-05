@@ -115,4 +115,49 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
     log.info({ step: "capability-done", capabilityId: capability.id, kind: "ok" }, "capability complete");
     return { handled: true };
   }
+
+  async resume(input: {
+    capabilityId: string;
+    params: Record<string, unknown>;
+    ctx: Omit<CapabilityCtx, "emit" | "input">;
+  }): Promise<IDispatchResult> {
+    const capability = this.registry.byId(input.capabilityId);
+    if (!capability) {
+      log.warn(
+        { step: "resume-skipped", capabilityId: input.capabilityId, channelId: input.ctx.channelId },
+        "capability not registered — cannot resume",
+      );
+      return { handled: false };
+    }
+
+    const ctx: CapabilityCtx = {
+      ...input.ctx,
+      // Synthetic input — `run()` does not consult `ctx.input`, but the type
+      // requires the field. Mark it as a callback so any code that does peek
+      // sees a non-text source.
+      input: { kind: "callback", data: `resume:${input.capabilityId}` },
+      emit: (artifact) => this.renderer.render(artifact, ctx),
+    };
+
+    log.info(
+      { step: "resume-invoke", capabilityId: capability.id, channelId: ctx.channelId },
+      "resuming capability",
+    );
+    let artifact;
+    try {
+      artifact = await capability.run(input.params as never, ctx);
+    } catch (err) {
+      log.error(
+        { err, capabilityId: capability.id, channelId: ctx.channelId },
+        "capability.run threw on resume",
+      );
+      throw err;
+    }
+    await this.renderer.render(artifact, ctx);
+    log.info(
+      { step: "capability-done", capabilityId: capability.id, kind: "resumed" },
+      "resume complete",
+    );
+    return { handled: true };
+  }
 }

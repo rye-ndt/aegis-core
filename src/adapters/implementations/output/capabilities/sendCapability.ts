@@ -19,6 +19,7 @@ import {
 import type { CapabilityManifest } from "../../../../helpers/types/manifest";
 import { getUsdcAddress, isNativeAddress } from "../../../../helpers/chainConfig";
 import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
+import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
@@ -130,6 +131,7 @@ export interface SendCapabilityDeps {
   delegationBuilder?: IDelegationRequestBuilder;
   chainId: number;
   loyaltyUseCase?: ILoyaltyUseCase;
+  pendingIntentStore?: IPendingIntentStore;
 }
 
 /**
@@ -302,6 +304,36 @@ export class SendCapability implements Capability<SendParams> {
         }
         log.debug({ userId: ctx.userId }, "skip delegation prompt — existing delegation covers spend");
         return { kind: "noop" };
+      }
+
+      // Persist the resolved intent keyed by the approval requestId so the
+      // http-server's approval handler can auto-resume this /send once the
+      // user approves the missing delegation. Stored params skip the entire
+      // collect/resolve/disambiguate pipeline on resume.
+      if (this.deps.pendingIntentStore) {
+        try {
+          await this.deps.pendingIntentStore.save({
+            approvalRequestId: guard.reapprovalRequest.requestId,
+            capabilityId: this.id,
+            params: JSON.parse(JSON.stringify(params)) as Record<string, unknown>,
+            userId: ctx.userId,
+            channelId: ctx.channelId,
+            expiresAt: guard.reapprovalRequest.expiresAt,
+          });
+          log.info(
+            {
+              step: "approval-required",
+              userId: ctx.userId,
+              approvalRequestId: guard.reapprovalRequest.requestId,
+            },
+            "pending intent stored for post-approval resume",
+          );
+        } catch (err) {
+          log.error(
+            { err, approvalRequestId: guard.reapprovalRequest.requestId },
+            "failed to persist pending intent",
+          );
+        }
       }
 
       return {

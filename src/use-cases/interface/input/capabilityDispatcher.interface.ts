@@ -14,4 +14,16 @@ export interface IDispatchResult {
  */
 export interface ICapabilityDispatcher {
   handle(ctx: Omit<CapabilityCtx, "emit">): Promise<IDispatchResult>;
+  /**
+   * Skip collect() and re-enter `capability.run()` directly with already-
+   * resolved params. Used by the Aegis-Guard approval flow to auto-resume the
+   * original /send or /swap once the user approves the missing delegation.
+   *
+   * Returns `{ handled: false }` if no capability with that id is registered.
+   */
+  resume(input: {
+    capabilityId: string;
+    params: Record<string, unknown>;
+    ctx: Omit<CapabilityCtx, "emit" | "input">;
+  }): Promise<IDispatchResult>;
 }

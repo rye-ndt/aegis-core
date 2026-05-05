@@ -18,6 +18,8 @@ import type { IUserDB } from "../../../../use-cases/interface/output/repository/
 import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/repository/telegramSession.repo";
 import type { ITelegramNotifier } from "../../../../use-cases/interface/output/telegramNotifier.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
+import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ITransferHistoryUseCase } from "../../../../use-cases/interface/input/transferHistory.interface";
@@ -123,6 +125,15 @@ export class HttpApiServer {
     private readonly getStockUseCase?: () => IStockUseCase | null,
     /** Optional — exposes subgraph health for /health response. */
     private readonly subgraphPrincipalProvider?: SubgraphPrincipalProvider,
+    /** Optional — keyed by approval requestId; populated by /send and /swap when guard fails. */
+    private readonly pendingIntentStore?: IPendingIntentStore,
+    /**
+     * Lazy accessor for the dispatcher. The HTTP-only replica (`httpCli`) has
+     * no dispatcher and skips post-approval resume; the telegram replica
+     * builds the dispatcher after the http server starts so we can't take it
+     * directly in the constructor.
+     */
+    private readonly getCapabilityDispatcher?: () => Promise<ICapabilityDispatcher | undefined>,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -618,6 +629,9 @@ export class HttpApiServer {
         await this.telegramNotifier?.sendMessage(chatIdStr, 'Setup cancelled.');
       }
       await this.miniAppRequestCache!.delete(body.requestId);
+      // Drop any stashed pending intent so it doesn't auto-resume on a stale
+      // approval requestId after the user explicitly cancelled.
+      await this.pendingIntentStore?.delete(body.requestId).catch(() => undefined);
       return this.sendJson(res, 200, { requestId: body.requestId, ok: true });
     }
 
@@ -625,7 +639,7 @@ export class HttpApiServer {
       const err = await this.applySessionKeyApproval(userId, body.delegationRecord, chatIdStr);
       if (err) return this.sendJson(res, err.status, { error: err.message });
     } else if (body.subtype === 'aegis_guard' && body.aegisGrant) {
-      await this.applyAegisGuardApproval(userId, chatIdStr);
+      await this.applyAegisGuardApproval(userId, chatIdStr, body.requestId);
     }
 
     await this.miniAppRequestCache!.delete(body.requestId);
@@ -679,13 +693,92 @@ export class HttpApiServer {
   private async applyAegisGuardApproval(
     userId: string,
     chatIdStr: string | null,
+    approvalRequestId: string,
   ): Promise<void> {
     if (this.userPreferencesRepo) {
       await this.userPreferencesRepo.upsert(userId, { aegisGuardEnabled: true });
     }
-    if (chatIdStr) {
-      await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
+
+    // Auto-resume the original /send or /swap that triggered this approval,
+    // if one was stashed under this approvalRequestId. The user is notified
+    // before the resumed run emits its own mini-app prompt.
+    const pending = this.pendingIntentStore
+      ? await this.pendingIntentStore.get(approvalRequestId).catch((err) => {
+          log.error({ err, approvalRequestId }, "pending-intent lookup failed");
+          return null;
+        })
+      : null;
+
+    if (!pending) {
+      if (chatIdStr) {
+        await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
+      }
+      return;
     }
+
+    const dispatcher = this.getCapabilityDispatcher
+      ? await this.getCapabilityDispatcher().catch(() => undefined)
+      : undefined;
+    if (!dispatcher) {
+      // No dispatcher in this replica — surface the approval and bail out.
+      // The user retains the cached intent until it expires; they can re-issue
+      // the command manually.
+      log.warn(
+        { approvalRequestId, capabilityId: pending.capabilityId },
+        "approval landed without a dispatcher — cannot auto-resume",
+      );
+      if (chatIdStr) {
+        await this.telegramNotifier?.sendMessage(chatIdStr, 'Aegis Guard enabled.');
+      }
+      await this.pendingIntentStore?.delete(approvalRequestId).catch(() => undefined);
+      return;
+    }
+
+    if (chatIdStr) {
+      await this.telegramNotifier?.sendMessage(
+        chatIdStr,
+        'Aegis Guard enabled. Resuming your previous request…',
+      );
+    }
+
+    log.info(
+      { step: "approval-resumed", userId, approvalRequestId, capabilityId: pending.capabilityId },
+      "auto-resuming intent after approval",
+    );
+
+    // Fire-and-forget: /swap re-runs `capability.run` which awaits each step's
+    // signing response (up to SIGN_WAIT_TIMEOUT_MS = 10 min). If we awaited it
+    // here, the FE's POST /response would hang for the entire user-signing
+    // session and the mini-app would never close cleanly. The resume path
+    // emits its own Telegram artifacts via the renderer, so the user sees
+    // progress through the bot even though the HTTP call has already returned.
+    void (async () => {
+      try {
+        await dispatcher.resume({
+          capabilityId: pending.capabilityId,
+          params: pending.params,
+          ctx: {
+            userId: pending.userId,
+            channelId: pending.channelId,
+          },
+        });
+      } catch (err) {
+        log.error(
+          { err, approvalRequestId, capabilityId: pending.capabilityId, userId },
+          "resume after approval failed",
+        );
+        if (chatIdStr) {
+          await this.telegramNotifier
+            ?.sendMessage(
+              chatIdStr,
+              'Approval succeeded, but I could not resume your previous request automatically. Please re-send the command.',
+            )
+            .catch(() => undefined);
+        }
+      } finally {
+        await this.pendingIntentStore?.delete(approvalRequestId).catch(() => undefined);
+      }
+    })();
   }
 
   private async resolveChatId(userId: string): Promise<string | null> {
@@ -806,23 +899,30 @@ export class HttpApiServer {
 
     const resolved = tokens.filter((t) => !!t.tokenAddress);
 
+    // The (tokenAddress, amountRaw) pair is a *filter/override* on the chain's
+    // resolved set, not an injector. The FE forwards a single (addr, amount)
+    // pair to every onboarding chain even though the address only exists on
+    // one chain — so on the other chain(s) the address won't match anything.
+    // Synthesising a row in that case would yield tokenSymbol="" / decimals=18,
+    // which (a) renders as a blank chip with a microscopic amount in the UI
+    // and (b) fails zod validation at POST /delegation/grant. Drop silently.
     const overrideAddress = url.searchParams.get("tokenAddress");
     const overrideAmount  = url.searchParams.get("amountRaw");
     if (overrideAddress && overrideAmount) {
       const idx = resolved.findIndex(
         (t) => t.tokenAddress.toLowerCase() === overrideAddress.toLowerCase(),
       );
-      const override = {
-        tokenAddress: overrideAddress,
-        tokenSymbol: "",
-        tokenDecimals: 18,
-        suggestedLimitRaw: overrideAmount,
-        validUntil: validUntil30Days,
-      };
       if (idx >= 0) {
         resolved[idx]!.suggestedLimitRaw = overrideAmount;
+        log.debug(
+          { chainId, overrideAddress, choice: "applied" },
+          "approval-params override applied",
+        );
       } else {
-        resolved.push(override);
+        log.debug(
+          { chainId, overrideAddress, choice: "skipped-not-on-chain" },
+          "approval-params override skipped — token not resolvable on chain",
+        );
       }
     }
 

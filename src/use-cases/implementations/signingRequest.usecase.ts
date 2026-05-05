@@ -15,6 +15,14 @@ const log = createLogger("signingRequest");
 const POLL_INTERVAL_MS = 1500;
 
 export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
+  // Per-request cancel hooks installed by `waitFor`. Calling the fn flips the
+  // poll loop into `expired` on its next iteration (or sooner — the loop also
+  // races a cancel-promise so the await unblocks immediately).
+  private readonly cancelByRequestId = new Map<string, () => void>();
+  // Reverse index so `cancelActiveForUser` can find every in-flight requestId
+  // for a user without scanning the whole map.
+  private readonly requestsByUserId = new Map<string, Set<string>>();
+
   constructor(
     private readonly cache: ISigningRequestCache,
     private readonly onResolved: (event: SigningResolutionEvent) => void,
@@ -137,54 +145,128 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       { choice: "waitFor-start", requestId, timeoutMs },
       "waiting for signing request",
     );
-    while (Date.now() < deadline) {
-      const record = await this.cache.findById(requestId);
-      if (!record) {
-        log.info(
-          { step: "waitFor-expired", requestId },
-          "signing request not found — expired",
-        );
-        return { status: "expired" };
+
+    // Install a cancel hook indexed by both requestId and userId. The userId
+    // index lets the Telegram input adapter break the poll when a fresh user
+    // command arrives, instead of letting grammy's per-chat queue stall behind
+    // a 10-minute waitFor.
+    let cancelled = false;
+    let cancelResolve: () => void = () => {};
+    const cancelPromise = new Promise<void>((resolve) => {
+      cancelResolve = resolve;
+    });
+    const cancelFn = () => {
+      cancelled = true;
+      cancelResolve();
+    };
+    this.cancelByRequestId.set(requestId, cancelFn);
+
+    // Resolve userId from the cache once for indexing. If the record is
+    // already gone, fall through to the loop's "not found" branch.
+    let indexedUserId: string | undefined;
+    try {
+      const initial = await this.cache.findById(requestId);
+      if (initial) {
+        indexedUserId = initial.userId;
+        if (!this.requestsByUserId.has(indexedUserId)) {
+          this.requestsByUserId.set(indexedUserId, new Set());
+        }
+        this.requestsByUserId.get(indexedUserId)!.add(requestId);
       }
-      if (record.status === "approved") {
-        log.info(
-          { step: "waitFor-approved", requestId },
-          "signing request approved",
-        );
-        return { status: "approved", txHash: record.txHash };
-      }
-      if (record.status === "rejected") {
-        log.info(
-          { step: "waitFor-rejected", requestId, errorCode: record.errorCode },
-          "signing request rejected",
-        );
-        return {
-          status: "rejected",
-          errorCode: record.errorCode,
-          errorMessage: record.errorMessage,
-        };
-      }
-      if (record.status === "expired") {
-        log.info(
-          { step: "waitFor-expired", requestId },
-          "signing request expired",
-        );
-        return { status: "expired" };
-      }
-      if (record.expiresAt <= newCurrentUTCEpoch()) {
-        log.info(
-          { step: "waitFor-timeout", requestId },
-          "signing request past expiresAt",
-        );
-        return { status: "expired" };
-      }
-      await sleep(POLL_INTERVAL_MS);
+    } catch {
+      // Ignore — the loop below will retry and surface the proper error.
     }
-    log.info(
-      { step: "waitFor-timeout", requestId, timeoutMs },
-      "waitFor timed out",
-    );
-    return { status: "expired" };
+
+    try {
+      while (Date.now() < deadline) {
+        if (cancelled) {
+          log.info(
+            { step: "waitFor-cancelled", requestId, userId: indexedUserId },
+            "waitFor cancelled by new user command",
+          );
+          return { status: "expired" };
+        }
+        const record = await this.cache.findById(requestId);
+        if (!record) {
+          log.info(
+            { step: "waitFor-expired", requestId },
+            "signing request not found — expired",
+          );
+          return { status: "expired" };
+        }
+        if (record.status === "approved") {
+          log.info(
+            { step: "waitFor-approved", requestId },
+            "signing request approved",
+          );
+          return { status: "approved", txHash: record.txHash };
+        }
+        if (record.status === "rejected") {
+          log.info(
+            { step: "waitFor-rejected", requestId, errorCode: record.errorCode },
+            "signing request rejected",
+          );
+          return {
+            status: "rejected",
+            errorCode: record.errorCode,
+            errorMessage: record.errorMessage,
+          };
+        }
+        if (record.status === "expired") {
+          log.info(
+            { step: "waitFor-expired", requestId },
+            "signing request expired",
+          );
+          return { status: "expired" };
+        }
+        if (record.expiresAt <= newCurrentUTCEpoch()) {
+          log.info(
+            { step: "waitFor-timeout", requestId },
+            "signing request past expiresAt",
+          );
+          return { status: "expired" };
+        }
+        // Race the poll-tick sleep with the cancel signal so cancellation is
+        // observed within ms instead of waiting up to POLL_INTERVAL_MS.
+        await Promise.race([sleep(POLL_INTERVAL_MS), cancelPromise]);
+      }
+      log.info(
+        { step: "waitFor-timeout", requestId, timeoutMs },
+        "waitFor timed out",
+      );
+      return { status: "expired" };
+    } finally {
+      this.cancelByRequestId.delete(requestId);
+      if (indexedUserId) {
+        const set = this.requestsByUserId.get(indexedUserId);
+        if (set) {
+          set.delete(requestId);
+          if (set.size === 0) this.requestsByUserId.delete(indexedUserId);
+        }
+      }
+    }
+  }
+
+  cancelActiveForUser(userId: string): number {
+    const ids = this.requestsByUserId.get(userId);
+    if (!ids || ids.size === 0) return 0;
+    let cancelled = 0;
+    // Snapshot the set — `cancelFn` runs the waitFor finalizer which mutates
+    // the same set, so iterating directly would skip entries.
+    for (const id of Array.from(ids)) {
+      const fn = this.cancelByRequestId.get(id);
+      if (fn) {
+        fn();
+        cancelled++;
+      }
+    }
+    if (cancelled > 0) {
+      log.info(
+        { step: "cancel-active-for-user", userId, cancelled },
+        "cancelled in-flight waitFor for user",
+      );
+    }
+    return cancelled;
   }
 }
 

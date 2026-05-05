@@ -75,6 +75,7 @@ const log = createLogger("workerCli");
     dispatcher,
     inject.getMiniAppRequestCache(),
     recipientNotificationUseCase,
+    signingRequestUseCase,
   );
 
   const bot = new TelegramBot(rawBot, handler);

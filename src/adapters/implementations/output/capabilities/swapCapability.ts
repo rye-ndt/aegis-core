@@ -31,6 +31,7 @@ import type { CapabilityManifest } from "../../../../helpers/types/manifest";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
 import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
@@ -79,6 +80,13 @@ interface SwapParams {
   fromChainId: number;
   toChainId: number;
   userAddress: string;
+  /**
+   * Set when this run is a post-approval auto-resume. Quotes are time-sensitive,
+   * so a resumed swap always re-fetches a fresh Relay route (the quote step in
+   * `run` is unconditional today, but this flag makes the contract explicit and
+   * lights up resume-path telemetry).
+   */
+  forceRequote?: boolean;
 }
 
 export interface SwapCapabilityDeps {
@@ -87,6 +95,7 @@ export interface SwapCapabilityDeps {
   relaySwapTool: RelaySwapTool;
   signingRequestUseCase: ISigningRequestUseCase;
   miniAppRequestCache?: IMiniAppRequestCache;
+  pendingIntentStore?: IPendingIntentStore;
   tokenDelegationDB?: ITokenDelegationDB;
   userProfileRepo: IUserProfileDB;
   chainId: number;
@@ -139,6 +148,7 @@ export class SwapCapability implements Capability<SwapParams> {
         fromChainId: params.fromChainId,
         toChainId: params.toChainId,
         userAddress: params.userAddress,
+        mode: params.forceRequote ? "resumed" : "fresh",
       },
       "swap run started",
     );
@@ -156,6 +166,34 @@ export class SwapCapability implements Capability<SwapParams> {
         tokenDelegationDB: this.deps.tokenDelegationDB,
       });
       if (!guard.ok) {
+        if (this.deps.pendingIntentStore) {
+          try {
+            // Persist a resume-ready snapshot. `forceRequote: true` makes the
+            // post-approval run() re-fetch a fresh Relay quote.
+            const resumeParams: SwapParams = { ...params, forceRequote: true };
+            await this.deps.pendingIntentStore.save({
+              approvalRequestId: guard.reapprovalRequest.requestId,
+              capabilityId: this.id,
+              params: JSON.parse(JSON.stringify(resumeParams)) as Record<string, unknown>,
+              userId: ctx.userId,
+              channelId: ctx.channelId,
+              expiresAt: guard.reapprovalRequest.expiresAt,
+            });
+            log.info(
+              {
+                step: "approval-required",
+                userId: ctx.userId,
+                approvalRequestId: guard.reapprovalRequest.requestId,
+              },
+              "pending intent stored for post-approval resume",
+            );
+          } catch (err) {
+            log.error(
+              { err, approvalRequestId: guard.reapprovalRequest.requestId },
+              "failed to persist pending intent",
+            );
+          }
+        }
         return {
           kind: "mini_app",
           request: guard.reapprovalRequest,

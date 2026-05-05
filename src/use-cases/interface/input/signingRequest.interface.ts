@@ -55,4 +55,14 @@ export interface ISigningRequestUseCase {
    * simple poll of the underlying cache — no pub/sub required.
    */
   waitFor(requestId: string, timeoutMs: number): Promise<ResolvedSigningRequest>;
+
+  /**
+   * Cancel every in-flight `waitFor` for the given user — they resolve
+   * immediately with `{ status: 'expired' }`. Used by the Telegram input
+   * adapter when a user issues a new command while a prior signing flow is
+   * still polling: grammy serialises updates, so the new command would hang
+   * behind the prior `await waitFor(…)` (which has a 10-minute timeout).
+   * Returns the number of cancelled awaits for observability.
+   */
+  cancelActiveForUser(userId: string): number;
 }

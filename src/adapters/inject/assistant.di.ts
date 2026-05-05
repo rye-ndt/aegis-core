@@ -106,6 +106,8 @@ import { getResultCardEnv } from "../../helpers/env/resultCardEnv";
 import type { IIntentInterpreter } from "../../use-cases/interface/output/intentInterpreter.interface";
 import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
 import { RedisPendingCollectionStore } from "../implementations/output/pendingCollectionStore/redis";
+import { RedisPendingIntentStore } from "../implementations/output/cache/redis.pendingIntent";
+import type { IPendingIntentStore } from "../../use-cases/interface/output/cache/pendingIntent.cache";
 import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
 import { RelayClient } from "../implementations/output/relay/relayClient";
 import { ResolverEngineImpl } from "../implementations/output/resolver/resolverEngine";
@@ -186,6 +188,7 @@ export class AssistantInject {
   private _intentInterpreter: IIntentInterpreter | null = null;
   private _intentInterpreterChecked = false;
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
+  private _pendingIntentStore: IPendingIntentStore | null = null;
   private _relayClient: IRelayClient | null = null;
   private _relaySwapTool: RelaySwapTool | null = null;
   private _yieldProtocolRegistry: YieldProtocolRegistry | null = null;
@@ -799,6 +802,7 @@ export class AssistantInject {
       delegationBuilder: this.getDelegationRequestBuilder(),
       chainId: this.getChainId(),
       loyaltyUseCase: this.getLoyaltyUseCase(),
+      pendingIntentStore: this.getPendingIntentStore(),
     };
 
     // One SendCapability instance per INTENT_COMMAND (except BUY and SWAP,
@@ -829,6 +833,7 @@ export class AssistantInject {
           relaySwapTool: this.getRelaySwapTool(),
           signingRequestUseCase: this._signingRequestUseCase,
           miniAppRequestCache: this.getMiniAppRequestCache(),
+          pendingIntentStore: this.getPendingIntentStore(),
           tokenDelegationDB: this.getTokenDelegationRepo(),
           userProfileRepo: sqlDB.userProfiles,
           chainId: this.getChainId(),
@@ -1289,6 +1294,14 @@ export class AssistantInject {
     return this._recipientNotificationUseCase;
   }
 
+  getPendingIntentStore(): IPendingIntentStore | undefined {
+    if (this._pendingIntentStore) return this._pendingIntentStore;
+    const redis = this.getRedis();
+    if (!redis) return undefined;
+    this._pendingIntentStore = new RedisPendingIntentStore(redis);
+    return this._pendingIntentStore;
+  }
+
   getHttpApiServer(
     signingRequestUseCase?: ISigningRequestUseCase,
   ): HttpApiServer {
@@ -1317,6 +1330,8 @@ export class AssistantInject {
       () => this.isStockCapabilityDisabled(),
       () => this.getStockUseCaseSync(),
       this.getSubgraphPrincipalProvider(),
+      this.getPendingIntentStore(),
+      () => this.getCapabilityDispatcher(),
     );
   }
 
