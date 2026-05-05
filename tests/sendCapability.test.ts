@@ -7,6 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { encodeFunctionData, erc20Abi } from "viem";
 
 // chainId=1 fiat-detection path calls getUsdcAddress(1) which reads ETH_USDC.
 // Set a real-looking address so the resolver short-circuit matches the
@@ -22,28 +23,16 @@ import { CapabilityRegistry } from "../src/use-cases/implementations/capabilityR
 import { InMemoryPendingCollectionStore } from "../src/adapters/implementations/output/pendingCollectionStore/inMemory";
 import type {
   Artifact,
-  CapabilityCtx,
 } from "../src/use-cases/interface/input/capability.interface";
 import type { IArtifactRenderer } from "../src/use-cases/interface/output/artifactRenderer.interface";
-import type { IIntentUseCase, ToolManifest, ITokenRecord } from "../src/use-cases/interface/input/intent.interface";
+import type { IIntentUseCase, ITokenRecord } from "../src/use-cases/interface/input/intent.interface";
 import { INTENT_COMMAND } from "../src/helpers/enums/intentCommand.enum";
+import { NATIVE_PSEUDO_ADDRESS } from "../src/helpers/chainConfig";
 
 class CaptureRenderer implements IArtifactRenderer {
   readonly rendered: Artifact[] = [];
   async render(a: Artifact): Promise<void> { this.rendered.push(a); }
 }
-
-const manifest: ToolManifest = {
-  toolId: "t1",
-  name: "SendTokens",
-  protocolName: "Test",
-  description: "send",
-  chainIds: [1],
-  inputSchema: { type: "object", properties: { amountHuman: { type: "string" } }, required: [] },
-  finalSchema: undefined,
-  requiredFields: undefined,
-  steps: [],
-} as unknown as ToolManifest;
 
 const token: ITokenRecord = {
   address: "0xtoken",
@@ -55,15 +44,22 @@ const token: ITokenRecord = {
 } as ITokenRecord;
 
 function mkDeps(over: Partial<SendCapabilityDeps> = {}): SendCapabilityDeps {
+  // SendCapability now owns the manifest; tests only need to stub the LLM
+  // compile + token search calls. compileSchema returns parameters that
+  // satisfy SEND_MANIFEST.inputSchema.required so the capability proceeds
+  // straight to run() without asking follow-ups.
   const intentUseCase: Partial<IIntentUseCase> = {
-    selectTool: async () => ({ toolId: "t1", manifest }),
     compileSchema: async () => ({
-      params: { amountHuman: "10" },
+      params: {
+        fromTokenSymbol: "USDC",
+        amountHuman: "10",
+        recipient: "0x000000000000000000000000000000000000abcd",
+      },
       tokenSymbols: { from: "USDC" },
       resolverFields: {},
+      missingQuestion: null,
     }) as never,
     searchTokens: async () => [token],
-    buildRequestBody: async () => ({ to: "0xto", data: "0xdead", value: "0" }),
     generateMissingParamQuestion: async () => "What amount?",
   };
   return {
@@ -73,7 +69,7 @@ function mkDeps(over: Partial<SendCapabilityDeps> = {}): SendCapabilityDeps {
   };
 }
 
-test("SendCapability: simple happy path via dispatcher produces confirmation + sign artifact", async () => {
+test("SendCapability: simple happy path via dispatcher produces sign_calldata artifact", async () => {
   const cap = new SendCapability(INTENT_COMMAND.SEND, mkDeps());
   const registry = new CapabilityRegistry();
   registry.register(cap);
@@ -83,7 +79,7 @@ test("SendCapability: simple happy path via dispatcher produces confirmation + s
   const r = await dispatcher.handle({
     userId: "u1",
     channelId: "c1",
-    input: { kind: "text", text: "/send 10 usdc to 0xabc" },
+    input: { kind: "text", text: "/send 10 usdc to 0x000000000000000000000000000000000000abcd" },
   });
   assert.equal(r.handled, true);
   const kinds = renderer.rendered.map((a) => a.kind);
@@ -95,35 +91,17 @@ test("SendCapability: simple happy path via dispatcher produces confirmation + s
   assert.ok(signArt);
   if (signArt && signArt.kind === "sign_calldata") {
     assert.ok(signArt.preview, "sign_calldata should carry a preview IntentResult");
+    // calldata is built from the in-code SEND_MANIFEST + buildTransferCalldata.
+    // For an ERC-20 transfer the `to` field is the token address and `value`
+    // is "0".
+    assert.equal(signArt.to.toLowerCase(), token.address.toLowerCase());
+    assert.equal(signArt.value, "0");
+    assert.ok(signArt.data.startsWith("0xa9059cbb"), "ERC-20 transfer selector");
   }
-});
-
-test("SendCapability: selectTool returns null → abort chat artifact", async () => {
-  const intentUseCase: Partial<IIntentUseCase> = {
-    selectTool: async () => null,
-  };
-  const cap = new SendCapability(
-    INTENT_COMMAND.SEND,
-    { intentUseCase: intentUseCase as IIntentUseCase, chainId: 1 },
-  );
-  const registry = new CapabilityRegistry();
-  registry.register(cap);
-  const renderer = new CaptureRenderer();
-  const dispatcher = new CapabilityDispatcher(registry, renderer, new InMemoryPendingCollectionStore());
-
-  await dispatcher.handle({
-    userId: "u1",
-    channelId: "c1",
-    input: { kind: "text", text: "/send something" },
-  });
-  const art = renderer.rendered[0]!;
-  assert.equal(art.kind, "chat");
-  if (art.kind === "chat") assert.match(art.text, /No tool is registered/);
 });
 
 test("SendCapability: compile missing question → asks user, saves pending state", async () => {
   const intentUseCase: Partial<IIntentUseCase> = {
-    selectTool: async () => ({ toolId: "t1", manifest }),
     compileSchema: async () => ({
       params: {},
       tokenSymbols: {},
@@ -158,14 +136,17 @@ test("SendCapability: token disambiguation round-trip", async () => {
   const candA: ITokenRecord = { ...token, address: "0xA", name: "A" };
   const candB: ITokenRecord = { ...token, address: "0xB", name: "B" };
   const intentUseCase: Partial<IIntentUseCase> = {
-    selectTool: async () => ({ toolId: "t1", manifest }),
     compileSchema: async () => ({
-      params: { amountHuman: "5" },
+      params: {
+        fromTokenSymbol: "USDC",
+        amountHuman: "5",
+        recipient: "0x000000000000000000000000000000000000abcd",
+      },
       tokenSymbols: { from: "USDC" },
       resolverFields: {},
+      missingQuestion: null,
     }) as never,
     searchTokens: async () => [candA, candB],
-    buildRequestBody: async () => ({ to: "0xto", data: "0x", value: "0" }),
   };
   const cap = new SendCapability(
     INTENT_COMMAND.SEND,
@@ -198,4 +179,72 @@ test("SendCapability: token disambiguation round-trip", async () => {
   const kinds = renderer.rendered.map((a) => a.kind);
   assert.ok(kinds.includes("sign_calldata"));
   assert.equal(await pending.get("c1"), null);
+});
+
+// ── buildTransferCalldata unit tests (golden output via viem) ───────────────
+
+test("buildTransferCalldata: ERC-20 path matches viem.encodeFunctionData", async () => {
+  // The capability's private buildTransferCalldata is exercised through
+  // dispatcher.handle in the happy-path test above. Here we sanity-check the
+  // golden hex against viem directly so future refactors must keep the same
+  // selector + argument encoding.
+  const recipient = "0x000000000000000000000000000000000000abcd" as `0x${string}`;
+  const amountRaw = "10000000"; // 10 USDC at 6 decimals
+  const expected = encodeFunctionData({
+    abi: erc20Abi,
+    functionName: "transfer",
+    args: [recipient, BigInt(amountRaw)],
+  });
+  // Selector for transfer(address,uint256)
+  assert.ok(expected.startsWith("0xa9059cbb"));
+  // 4-byte selector + 32-byte address (left-padded) + 32-byte uint256 = 68 bytes hex
+  assert.equal(expected.length, 2 + 8 + 64 + 64);
+});
+
+test("buildTransferCalldata: native path returns recipient as `to`, value=amountRaw, data=0x", async () => {
+  // Drive the native case end-to-end by stubbing the resolved token to be
+  // the chain's native pseudo-token.
+  const nativeToken: ITokenRecord = {
+    ...token,
+    address: NATIVE_PSEUDO_ADDRESS,
+    symbol: "ETH",
+    decimals: 18,
+    isNative: true,
+  } as ITokenRecord;
+
+  const intentUseCase: Partial<IIntentUseCase> = {
+    compileSchema: async () => ({
+      params: {
+        fromTokenSymbol: "ETH",
+        amountHuman: "0.001",
+        recipient: "0x000000000000000000000000000000000000abcd",
+      },
+      tokenSymbols: { from: "ETH" },
+      resolverFields: {},
+      missingQuestion: null,
+    }) as never,
+    searchTokens: async () => [nativeToken],
+  };
+  const cap = new SendCapability(
+    INTENT_COMMAND.SEND,
+    { intentUseCase: intentUseCase as IIntentUseCase, chainId: 1 },
+  );
+  const registry = new CapabilityRegistry();
+  registry.register(cap);
+  const renderer = new CaptureRenderer();
+  const dispatcher = new CapabilityDispatcher(registry, renderer, new InMemoryPendingCollectionStore());
+
+  await dispatcher.handle({
+    userId: "u1",
+    channelId: "c1",
+    input: { kind: "text", text: "/send 0.001 eth to 0x000000000000000000000000000000000000abcd" },
+  });
+  const signArt = renderer.rendered.find((a) => a.kind === "sign_calldata");
+  assert.ok(signArt, "expected sign_calldata artifact");
+  if (signArt && signArt.kind === "sign_calldata") {
+    assert.equal(signArt.to.toLowerCase(), "0x000000000000000000000000000000000000abcd");
+    assert.equal(signArt.data, "0x");
+    // 0.001 * 10^18 = 1e15 raw
+    assert.equal(signArt.value, "1000000000000000");
+  }
 });

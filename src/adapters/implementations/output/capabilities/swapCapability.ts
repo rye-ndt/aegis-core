@@ -11,6 +11,7 @@ import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { MAX_TOOL_ROUNDS } from "../../../../helpers/env/assistantEnv";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
@@ -24,15 +25,14 @@ import type {
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import {
   type ITokenRecord,
-  type ToolManifest,
   DisambiguationRequiredError,
 } from "../../../../use-cases/interface/input/intent.interface";
+import type { CapabilityManifest } from "../../../../helpers/types/manifest";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
-import type { IExecutionEstimator } from "../../../../use-cases/interface/output/executionEstimator.interface";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
@@ -45,11 +45,7 @@ import { getMissingRequiredFields, pickCandidateByInput } from "./send.utils";
 
 const log = createLogger("swapCapability");
 
-const DEFAULT_MAX_COMPILE_TURNS = 10;
-const MAX_COMPILE_TURNS = parseInt(
-  process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_COMPILE_TURNS),
-  10,
-);
+const MAX_COMPILE_TURNS = MAX_TOOL_ROUNDS;
 const MAX_DISAMBIG_TURNS = 10;
 const SIGN_REQUEST_TTL_SECONDS = 600;
 const SIGN_WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -92,7 +88,6 @@ export interface SwapCapabilityDeps {
   signingRequestUseCase: ISigningRequestUseCase;
   miniAppRequestCache?: IMiniAppRequestCache;
   tokenDelegationDB?: ITokenDelegationDB;
-  executionEstimator?: IExecutionEstimator;
   userProfileRepo: IUserProfileDB;
   chainId: number;
   loyaltyUseCase?: ILoyaltyUseCase;
@@ -151,8 +146,7 @@ export class SwapCapability implements Capability<SwapParams> {
     // Aegis-Guard delegation check on the origin token.
     if (
       !params.fromToken.isNative &&
-      this.deps.tokenDelegationDB &&
-      this.deps.executionEstimator
+      this.deps.tokenDelegationDB
     ) {
       const guard = await checkTokenDelegation({
         userId: ctx.userId,
@@ -160,7 +154,6 @@ export class SwapCapability implements Capability<SwapParams> {
         amountHuman: params.amountHuman,
         amountRaw: params.amountRaw,
         tokenDelegationDB: this.deps.tokenDelegationDB,
-        executionEstimator: this.deps.executionEstimator,
       });
       if (!guard.ok) {
         return {
@@ -828,23 +821,14 @@ function isUsdcSymbol(s?: string): boolean {
 
 /**
  * Seeded manifest used only to drive the LLM compile loop + resolver.
- * /swap never reaches `buildRequestBody` / the solver registry — Relay
- * supplies the calldata. The empty `steps: []` is intentional; it would
- * violate `ToolManifestSchema.min(1)` if we tried to persist it, but we
- * never do — this object lives in memory and is not validated.
+ * /swap never reaches a calldata-builder — Relay supplies the calldata.
  */
-const SWAP_MANIFEST: ToolManifest = {
+const SWAP_MANIFEST: CapabilityManifest = {
   toolId: "system-relay-swap",
   category: TOOL_CATEGORY.SWAP,
   name: "Relay Swap",
   description:
     "Swap one token for another on the same chain or across chains via relay.link.",
-  protocolName: "Relay",
-  tags: ["swap", "relay", "cross-chain"],
-  priority: 0,
-  isDefault: true,
-  chainIds: RELAY_SUPPORTED_CHAIN_IDS,
-  steps: [],
   inputSchema: {
     type: "object",
     properties: {

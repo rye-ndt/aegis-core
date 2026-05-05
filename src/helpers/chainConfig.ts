@@ -285,6 +285,24 @@ export function getExplorerTxUrl(chainId: number, txHash: string): string | null
  */
 export const NATIVE_PSEUDO_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE";
 
+/**
+ * Zero-address sentinel used by Relay & Ankr to denote a chain's native asset
+ * in their request/response payloads. NOT interchangeable with
+ * `NATIVE_PSEUDO_ADDRESS` — that is the EVM-canonical 0xEee… pseudo-address
+ * used internally for token registry / delegation lookups. External APIs
+ * (Relay quote/swap, Ankr balance/transfer-history) speak the 0x000… form
+ * exclusively, so adapters bridging to those APIs use this constant.
+ */
+export const RELAY_NATIVE_SENTINEL = "0x0000000000000000000000000000000000000000" as const;
+
+/**
+ * Default Aster Diamond proxy address on BSC (chain id 56) — entrypoint for
+ * the perpetuals venue used by `/stock` capabilities. Held here rather than
+ * inline in `helpers/env/asterEnv.ts` because it is a chain-pinned on-chain
+ * address. Override via `ASTER_DIAMOND_ADDRESS_BSC` env at runtime.
+ */
+export const ASTER_DIAMOND_DEFAULT_BSC = "0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0" as const;
+
 export function isNativeAddress(address: string | null | undefined): boolean {
   if (!address) return false;
   return address.toLowerCase() === NATIVE_PSEUDO_ADDRESS.toLowerCase();
@@ -327,10 +345,6 @@ export function getUsdcAddress(chainId: number): Address | null {
   if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) return null;
   return raw as Address;
 }
-
-export const CAIP2_BY_PRIVY_NETWORK: Record<string, string> = Object.fromEntries(
-  Object.entries(CHAIN_REGISTRY).map(([id, entry]) => [entry.privyNetwork, `eip155:${id}`]),
-);
 
 export const RELAY_SUPPORTED_CHAIN_IDS: number[] = Object.entries(CHAIN_REGISTRY)
   .filter(([, entry]) => entry.relayEnabled)

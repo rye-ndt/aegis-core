@@ -1,7 +1,8 @@
+import { encodeFunctionData, erc20Abi } from "viem";
 import { toRaw } from "../../../../helpers/bigint";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
-import { USER_INTENT_TYPE } from "../../../../helpers/enums/userIntentType.enum";
+import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
 import type {
   Artifact,
   Capability,
@@ -13,11 +14,11 @@ import type { IIntentUseCase } from "../../../../use-cases/interface/input/inten
 import {
   type ITokenRecord,
   type ResolvedPayload,
-  type ToolManifest,
   DisambiguationRequiredError,
 } from "../../../../use-cases/interface/input/intent.interface";
+import type { CapabilityManifest } from "../../../../helpers/types/manifest";
+import { getUsdcAddress, isNativeAddress } from "../../../../helpers/chainConfig";
 import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
-import type { IExecutionEstimator } from "../../../../use-cases/interface/output/executionEstimator.interface";
 import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
@@ -28,7 +29,7 @@ import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/out
 import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
 import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import { createLogger } from "../../../../helpers/observability/logger";
-import { getUsdcAddress } from "../../../../helpers/chainConfig";
+import { MAX_TOOL_ROUNDS } from "../../../../helpers/env/assistantEnv";
 import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
 import { interpretError } from "../../../../helpers/errors/errorCatalog";
 import { newUuid } from "../../../../helpers/uuid";
@@ -46,11 +47,7 @@ import {
 } from "./send.utils";
 
 const log = createLogger("sendCapability");
-const DEFAULT_MAX_COMPILE_TURNS = 10;
-const MAX_COMPILE_TURNS = parseInt(
-  process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_COMPILE_TURNS),
-  10,
-);
+const MAX_COMPILE_TURNS = MAX_TOOL_ROUNDS;
 const MAX_DISAMBIG_TURNS = 10;
 
 interface DisambiguationState {
@@ -61,10 +58,44 @@ interface DisambiguationState {
   toCandidates: ITokenRecord[];
 }
 
+const SEND_MANIFEST: CapabilityManifest = {
+  toolId: "transfer",
+  // Required: consumed by sendCapability autoSign description copy + Telegram
+  // confirmations (`Autonomous execution for ${manifest.name}`).
+  name: "ERC-20 Token Transfer",
+  category: TOOL_CATEGORY.ERC20_TRANSFER,
+  description:
+    "Send tokens to a recipient address or telegram handle",
+  // Verbatim from drizzle/0023_seed_send_tool.sql:36 (and 0024_seed_send_tool_fix.sql:32).
+  // Preserve exact field names, descriptions, and required[] so that
+  // OpenAISchemaCompiler extracts identically across capability instances.
+  inputSchema: {
+    type: "object",
+    required: ["fromTokenSymbol", "amountHuman", "recipient"],
+    properties: {
+      fromTokenSymbol: {
+        type: "string",
+        description: "Symbol of the token to transfer, e.g. USDC, WAVAX",
+      },
+      amountHuman: {
+        type: "string",
+        description: 'Amount in human-readable units, e.g. "10.5"',
+      },
+      recipient: {
+        type: "string",
+        description:
+          "Recipient Ethereum address (0x...) or Telegram username (@handle)",
+      },
+    },
+  },
+  // requiredFields intentionally omitted — seed has NULL → usesDualSchema()
+  // returns false → legacy single-schema resolver path.
+};
+
 interface SessionState {
   stage: "compile" | "token_disambig";
   messages: string[];
-  manifest: ToolManifest;
+  manifest: CapabilityManifest;
   partialParams: Record<string, unknown>;
   tokenSymbols: { from?: string; to?: string };
   resolverFields: Partial<Record<string, string>>;
@@ -77,7 +108,7 @@ interface SessionState {
 }
 
 interface SendParams {
-  manifest: ToolManifest;
+  manifest: CapabilityManifest;
   partialParams: Record<string, unknown>;
   resolved?: ResolvedPayload;
   resolvedFrom: ITokenRecord | null;
@@ -92,7 +123,6 @@ export interface SendCapabilityDeps {
   resolverEngine?: IResolverEngine;
   tokenRegistryService?: ITokenRegistryService;
   tokenDelegationDB?: ITokenDelegationDB;
-  executionEstimator?: IExecutionEstimator;
   telegramHandleResolver?: ITelegramHandleResolver;
   privyAuthService?: IPrivyAuthService;
   userProfileRepo?: IUserProfileDB;
@@ -145,30 +175,40 @@ export class SendCapability implements Capability<SendParams> {
       return this.abort("Session error. Please start over.");
     }
 
-    // Fresh entry.
-    const toolResult = await this.deps.intentUseCase.selectTool(
-      this.command as unknown as USER_INTENT_TYPE,
-      [text],
-    );
-    if (!toolResult) {
-      return this.abort(`No tool is registered for ${this.command}. Contact the admin.`);
-    }
-
-    log.info({ step: "tool-selected", command: this.command, toolId: toolResult.toolId }, "compiling schema");
-    return this.initSessionFromTool(ctx, text, toolResult);
+    // Fresh entry. Every command bound to SendCapability shares the same
+    // in-code transfer manifest — the dynamic-tool-registry path was retired.
+    log.info({ step: "tool-selected", command: this.command, toolId: SEND_MANIFEST.toolId }, "compiling schema");
+    return this.initSessionFromTool(ctx, text, { toolId: SEND_MANIFEST.toolId, manifest: SEND_MANIFEST });
   }
 
   async run(params: SendParams, ctx: CapabilityCtx): Promise<Artifact> {
     let calldata: { to: string; data: string; value: string };
     try {
-      calldata = await this.deps.intentUseCase.buildRequestBody({
-        manifest: params.manifest,
-        params: params.partialParams,
-        resolvedFrom: params.resolvedFrom,
-        resolvedTo: params.resolvedTo,
-        userId: ctx.userId,
-        amountHuman: params.partialParams.amountHuman as string | undefined,
+      const fromToken = params.resolvedFrom;
+      if (!fromToken) {
+        throw new Error("transfer: missing resolved source token");
+      }
+      const recipient = params.partialParams.recipient as string | undefined;
+      if (!recipient) {
+        throw new Error("transfer: missing recipient address");
+      }
+      const amountHumanStr = params.partialParams.amountHuman as string | undefined;
+      const partialRaw = params.partialParams.amountRaw as string | undefined;
+      const amountRaw =
+        partialRaw ??
+        (amountHumanStr ? toRaw(amountHumanStr, fromToken.decimals) : undefined);
+      if (!amountRaw) {
+        throw new Error("transfer: missing amount");
+      }
+      calldata = this.buildTransferCalldata({
+        tokenAddress: fromToken.address,
+        recipient,
+        amountRaw,
       });
+      log.info(
+        { step: "calldata-built", toolId: SEND_MANIFEST.toolId },
+        "transfer-calldata-ready",
+      );
     } catch (err) {
       log.error({ err }, "buildRequestBody failed");
       const interpreted = interpretError(err, {
@@ -204,7 +244,6 @@ export class SendCapability implements Capability<SendParams> {
       isNative: fromToken?.isNative,
       symbol: fromToken?.symbol,
       hasTokenDelegationDB: !!this.deps.tokenDelegationDB,
-      hasExecutionEstimator: !!this.deps.executionEstimator,
       usesDualSchema: params.usesDualSchema,
     }, "autosign guard check");
 
@@ -215,8 +254,7 @@ export class SendCapability implements Capability<SendParams> {
     // in shape to ERC-20 delegations. No on-chain approve() exists or is needed.
     if (
       fromToken &&
-      this.deps.tokenDelegationDB &&
-      this.deps.executionEstimator
+      this.deps.tokenDelegationDB
     ) {
       const guard = await checkTokenDelegation({
         userId: ctx.userId,
@@ -224,7 +262,6 @@ export class SendCapability implements Capability<SendParams> {
         amountHuman: (params.partialParams.amountHuman as string) ?? "0",
         amountRaw: (params.partialParams.amountRaw as string) ?? "0",
         tokenDelegationDB: this.deps.tokenDelegationDB,
-        executionEstimator: this.deps.executionEstimator,
       });
       if (guard.ok) {
         log.info({ step: "auto-sign", userId: ctx.userId }, "delegation sufficient — pushing auto-sign request");
@@ -312,7 +349,7 @@ export class SendCapability implements Capability<SendParams> {
   private async initSessionFromTool(
     ctx: CapabilityCtx,
     text: string,
-    toolResult: { toolId: string; manifest: ToolManifest },
+    toolResult: { toolId: string; manifest: CapabilityManifest },
   ): Promise<CollectResult<SendParams>> {
     const compileResult = await this.deps.intentUseCase.compileSchema({
       manifest: toolResult.manifest,
@@ -687,7 +724,29 @@ export class SendCapability implements Capability<SendParams> {
 
   // ── Shared helpers ────────────────────────────────────────────────────────
 
-  private usesDualSchema(manifest: ToolManifest): boolean {
+  /**
+   * In-code ERC-20 / native calldata builder. Mirrors the legacy
+   * `executeErc20Transfer` step executor (stepExecutors.ts) so calldata is
+   * byte-identical to pre-refactor. Native sends use the SCA session-key
+   * sudo policy; ERC-20 sends use viem's standard `transfer(address,uint256)`.
+   */
+  private buildTransferCalldata(input: {
+    tokenAddress: string;
+    recipient: string;
+    amountRaw: string;
+  }): { to: string; data: string; value: string } {
+    if (isNativeAddress(input.tokenAddress)) {
+      return { to: input.recipient, data: "0x", value: input.amountRaw };
+    }
+    const data = encodeFunctionData({
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [input.recipient as `0x${string}`, BigInt(input.amountRaw)],
+    });
+    return { to: input.tokenAddress, data, value: "0" };
+  }
+
+  private usesDualSchema(manifest: CapabilityManifest): boolean {
     return (
       manifest.requiredFields !== undefined &&
       Object.keys(manifest.requiredFields).length > 0 &&

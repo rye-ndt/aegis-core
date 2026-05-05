@@ -67,8 +67,3 @@ export interface ITool {
   execute(input: IToolInput): Promise<IToolOutput>;
 }
 
-export interface IToolRegistry {
-  register(tool: ITool): void;
-  getAll(): ITool[];
-  getByName(name: string): ITool | undefined;
-}

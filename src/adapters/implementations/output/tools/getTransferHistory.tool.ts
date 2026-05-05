@@ -119,8 +119,8 @@ export class GetTransferHistoryTool implements ITool {
       }
 
       const rows: string[] = [
-        "When | Direction | Token | Amount | Counterparty | Label | Tx",
-        "-----|-----------|-------|--------|--------------|-------|----",
+        "When | Direction | Token | Amount | Counterparty | Tx",
+        "-----|-----------|-------|--------|--------------|----",
       ];
       for (const it of page.items) {
         const counterparty =
@@ -130,9 +130,8 @@ export class GetTransferHistoryTool implements ITool {
         const txUrl = getExplorerTxUrl(it.chainId, it.txHash);
         const txCell = txUrl ? `[${shortHash(it.txHash)}](${txUrl})` : shortHash(it.txHash);
         const symbol = it.tokenSymbol || (it.isNative ? "(native)" : "(unknown)");
-        const label = it.label ?? "—";
         rows.push(
-          `${fmtTimestamp(it.timestampEpoch)} | ${it.direction} | ${symbol} | ${it.amountFormatted} | ${shortAddr(counterparty)} | ${label} | ${txCell}`,
+          `${fmtTimestamp(it.timestampEpoch)} | ${it.direction} | ${symbol} | ${it.amountFormatted} | ${shortAddr(counterparty)} | ${txCell}`,
         );
       }
 
@@ -161,7 +160,6 @@ export class GetTransferHistoryTool implements ITool {
             timestampEpoch: it.timestampEpoch,
             txHash: it.txHash,
             chainId: it.chainId,
-            label: it.label ?? null,
           })),
           nextCursor: page.nextCursor ?? null,
         },

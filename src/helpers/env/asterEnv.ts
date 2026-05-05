@@ -1,11 +1,10 @@
+import { ASTER_DIAMOND_DEFAULT_BSC } from "../chainConfig";
 import { createLogger } from "../observability/logger";
 
 const log = createLogger("asterEnv");
 
-const DEFAULT_DIAMOND = "0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0";
-
 const rawDiamond = (
-  process.env.ASTER_DIAMOND_ADDRESS_BSC ?? DEFAULT_DIAMOND
+  process.env.ASTER_DIAMOND_ADDRESS_BSC ?? ASTER_DIAMOND_DEFAULT_BSC
 ).trim() as `0x${string}`;
 
 if (!/^0x[0-9a-fA-F]{40}$/.test(rawDiamond)) {

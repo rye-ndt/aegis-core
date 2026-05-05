@@ -9,9 +9,9 @@ import type { AuthRequest } from "../../../../use-cases/interface/output/cache/m
 import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
 import type { RecipientNotificationUseCase } from "../../../../use-cases/implementations/recipientNotification.useCase";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
 
 const log = createLogger("telegramHandler");
-const MINI_APP_URL = process.env.MINI_APP_URL;
 
 /**
  * Thin Telegram input adapter. Authentication gate + mini-app login prompt

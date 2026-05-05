@@ -16,12 +16,6 @@ export type TransferRecord = {
   amountRaw: string;
   amountFormatted: string;
   usdValue: number | null;
-  /**
-   * Optional human label sourced from `intent_executions` when this tx was
-   * produced by an Aegis intent flow (e.g. "swap via RelaySwap", "send via
-   * SendToHandle"). Null when the tx originated outside Aegis.
-   */
-  label?: string | null;
 };
 
 export type TransferHistoryQuery = {

@@ -3,6 +3,7 @@ import { newUuid } from "../../helpers/uuid";
 import { CHAIN_CONFIG } from "../../helpers/chainConfig";
 import { CONVERSATION_STATUSES } from "../../helpers/enums/statuses.enum";
 import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
+import { MAX_TOOL_ROUNDS } from "../../helpers/env/assistantEnv";
 import { createLogger } from "../../helpers/observability/logger";
 import type {
   IAssistantUseCase,
@@ -14,7 +15,7 @@ import type {
   IOrchestratorMessage,
   IToolCall,
 } from "../interface/output/orchestrator.interface";
-import type { IToolRegistry } from "../interface/output/tool.interface";
+import type { ITool } from "../interface/output/tool.interface";
 import type { IConversationDB } from "../interface/output/repository/conversation.repo";
 import type {
   IMessageDB,
@@ -27,12 +28,7 @@ const DEFAULT_SYSTEM_PROMPT =
 
 For ANY on-chain or money request the user expresses in natural language — swap, send/transfer, buy crypto, top up, sell, convert, DCA, earn/deposit/withdraw yield (use \`/yield\` for both directions; the capability shows a deposit/withdraw menu), or open/short/close a tokenized stock position — call the \`route_intent\` tool with the matching slash command and pass the user's verbatim remainder as \`rest\`. Do not attempt to construct calldata, fetch quotes, or describe the action yourself; the capability layer renders the user-facing UI (mini-app modal, result card). After \`route_intent\` returns, write at most one short sentence acknowledging the flow has started — do not repeat the receipt the user already saw.
 
-For read-only questions (balances, positions, price quotes, transaction history, portfolio summary), use the dedicated read tools (\`get_portfolio\`, \`get_transfer_history\`, \`get_stock_quote\`, \`get_stock_positions\`, \`wallet_balances\`, \`transaction_status\`, etc.). Never call \`route_intent\` for a read-only question.`;
-const DEFAULT_MAX_TOOL_ROUNDS = 10;
-const MAX_TOOL_ROUNDS = parseInt(
-  process.env.MAX_TOOL_ROUNDS ?? String(DEFAULT_MAX_TOOL_ROUNDS),
-  10,
-);
+For read-only questions (balances, positions, price quotes, transaction history, portfolio summary), use the dedicated read tools (\`get_portfolio\`, \`get_transfer_history\`, \`get_stock_quote\`, \`get_stock_positions\`, \`transaction_status\`). Never call \`route_intent\` for a read-only question.`;
 const MESSAGE_HISTORY_LIMIT = Number(process.env.MESSAGE_HISTORY_LIMIT ?? 30);
 
 interface IToolResult {
@@ -46,7 +42,7 @@ interface IToolResult {
 export class AssistantUseCaseImpl implements IAssistantUseCase {
   constructor(
     private readonly orchestrator: ILLMOrchestrator,
-    private readonly registryFactory: (userId: string, conversationId: string, channelId: string) => Promise<IToolRegistry>,
+    private readonly registryFactory: (userId: string, conversationId: string, channelId: string) => Promise<Map<string, ITool>>,
     private readonly conversationRepo: IConversationDB,
     private readonly messageRepo: IMessageDB,
   ) {}
@@ -80,7 +76,7 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
     const systemPrompt = DEFAULT_SYSTEM_PROMPT;
 
     const toolRegistry = await this.registryFactory(input.userId, conversationId, input.channelId);
-    const availableTools = toolRegistry.getAll().map((t) => t.definition());
+    const availableTools = Array.from(toolRegistry.values()).map((t) => t.definition());
     const toolsUsed: IToolResult[] = [];
     let finalReply = "";
 
@@ -209,10 +205,10 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
 
   private async executeTool(
     call: IToolCall,
-    toolRegistry: IToolRegistry,
+    toolRegistry: Map<string, ITool>,
   ): Promise<IToolResult> {
     const start = Date.now();
-    const tool = toolRegistry.getByName(call.toolName);
+    const tool = toolRegistry.get(call.toolName);
 
     if (!tool) {
       return {

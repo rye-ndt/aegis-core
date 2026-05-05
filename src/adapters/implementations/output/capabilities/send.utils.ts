@@ -1,5 +1,6 @@
 import { extractAddressFields } from "../../../../helpers/schema/addressFields";
-import type { ITokenRecord, ToolManifest } from "../../../../use-cases/interface/input/intent.interface";
+import type { ITokenRecord } from "../../../../use-cases/interface/input/intent.interface";
+import type { CapabilityManifest } from "../../../../helpers/types/manifest";
 
 // Detection pattern — used for the guard check only (address injection).
 // Matches: "$5", "$5.00", "$ 5", "5 dollars", "5.5 bucks", "10 usd", "3.50 usdc".
@@ -44,7 +45,7 @@ export function pickCandidateByInput(
 }
 
 export function getMissingRequiredFields(
-  manifest: ToolManifest,
+  manifest: CapabilityManifest,
   partialParams: Record<string, unknown>,
 ): string[] {
   const inputSchema = manifest.inputSchema as Record<string, unknown>;

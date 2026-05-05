@@ -3,7 +3,6 @@ import type { IConversationDB } from "./repository/conversation.repo";
 import type { IMessageDB } from "./repository/message.repo";
 import type { IUserProfileDB } from "./repository/userProfile.repo";
 import type { ITokenRegistryDB } from "./repository/tokenRegistry.repo";
-import type { IIntentExecutionDB } from "./repository/intentExecution.repo";
 import type { IToolManifestDB } from "./repository/toolManifest.repo";
 import type { IFeeRecordDB } from "./repository/feeRecord.repo";
 import type { IUserPreferencesDB } from "./repository/userPreference.repo";
@@ -20,7 +19,6 @@ export interface ISqlDB extends IPostgresDB {
   messages?: IMessageDB;
   userProfiles?: IUserProfileDB;
   tokenRegistry?: ITokenRegistryDB;
-  intentExecutions?: IIntentExecutionDB;
   toolManifests?: IToolManifestDB;
   feeRecords?: IFeeRecordDB;
   userPreferences?: IUserPreferencesDB;

@@ -13,10 +13,10 @@ import type { IIntentInterpreter } from "../../../../use-cases/interface/output/
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
 import { renderResultCard } from "./resultCard.render";
 
 const log = createLogger("telegramArtifactRenderer");
-const MINI_APP_URL = process.env.MINI_APP_URL;
 const SIGN_REQUEST_TTL_SECONDS = 600;
 const STATUS_TICK_MS = 400;
 const STATUS_MAX_DOTS = 3;

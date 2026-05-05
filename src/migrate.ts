@@ -1,3 +1,7 @@
+// Sanctioned `console.*` use: this script runs before the pino logger / app
+// boot — see `helpers/observability/logger.ts`. Documented exception per
+// `be/constructions/2026-05-05-architecture-cleanup-plan.md` Phase 7.
+
 import "dotenv/config";
 import path from "path";
 import { drizzle } from "drizzle-orm/node-postgres";

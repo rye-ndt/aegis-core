@@ -8,9 +8,9 @@ import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import { normalizeFiatAmount } from "../capabilities/send.utils";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { OPENAI_MODEL } from "../../../../helpers/env/openaiEnv";
 
 const log = createLogger("schemaCompiler");
-const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
 
 const CompileSchema = z.object({
   paramsJson:           z.string(),

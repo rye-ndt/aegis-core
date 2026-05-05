@@ -7,13 +7,10 @@ import { newUuid } from "../../../../helpers/uuid";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
 import type { IIntentUseCase } from "../../../../use-cases/interface/input/intent.interface";
 import type { IPortfolioUseCase } from "../../../../use-cases/interface/input/portfolio.interface";
-import type { IToolRegistrationUseCase } from "../../../../use-cases/interface/input/toolRegistration.interface";
 import type { ISessionDelegationUseCase } from "../../../../use-cases/interface/input/sessionDelegation.interface";
 import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
-import type { ICommandMappingUseCase } from "../../../../use-cases/interface/input/commandMapping.interface";
 import type { IUserProfileCache } from "../../../../use-cases/interface/output/cache/userProfile.cache";
-import type { IHttpQueryToolUseCase } from "../../../../use-cases/interface/input/httpQueryTool.interface";
 import type { IUserPreferencesDB } from "../../../../use-cases/interface/output/repository/userPreference.repo";
 import type { ITokenDelegationDB, NewTokenDelegation } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
@@ -40,7 +37,6 @@ import type {
   DelegationRecord as MiniAppDelegationRecord,
 } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { DelegationRecord as SessionDelegationRecord } from "../../../../use-cases/interface/output/cache/sessionDelegation.cache";
-import { ToolManifestSchema } from "../../../../use-cases/interface/output/toolManifest.types";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
 import { createLogger } from "../../../../helpers/observability/logger";
@@ -105,14 +101,11 @@ export class HttpApiServer {
     private readonly port: number,
     private readonly intentUseCase?: IIntentUseCase,
     private readonly portfolioUseCase?: IPortfolioUseCase,
-    private readonly toolRegistrationUseCase?: IToolRegistrationUseCase,
     private readonly sessionDelegationUseCase?: ISessionDelegationUseCase,
     private readonly pendingDelegationRepo?: IPendingDelegationDB,
     private readonly miniAppRequestCache?: IMiniAppRequestCache,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
-    private readonly commandMappingUseCase?: ICommandMappingUseCase,
     private readonly userProfileCache?: IUserProfileCache,
-    private readonly httpQueryToolUseCase?: IHttpQueryToolUseCase,
     private readonly userPreferencesRepo?: IUserPreferencesDB,
     private readonly tokenDelegationRepo?: ITokenDelegationDB,
     private readonly userProfileDB?: IUserProfileDB,
@@ -189,15 +182,9 @@ export class HttpApiServer {
       "GET /portfolio":                 (req, res) => this.handleGetPortfolio(req, res),
       "GET /transfers":                 (req, res, url) => this.handleGetTransfers(req, res, url),
       "GET /tokens":                    (req, res, url) => this.handleGetTokens(req, res, url),
-      "POST /tools":                    (req, res) => this.handlePostTools(req, res),
-      "GET /tools":                     (req, res, url) => this.handleGetTools(req, res, url),
       "GET /permissions":               (req, res, url) => this.handleGetPermissions(req, res, url),
       "GET /delegation/pending":        (req, res) => this.handleGetPendingDelegation(req, res),
       "POST /response":                 (req, res) => this.handlePostResponse(req, res),
-      "POST /command-mappings":         (req, res) => this.handlePostCommandMapping(req, res),
-      "GET /command-mappings":          (req, res) => this.handleGetCommandMappings(req, res),
-      "POST /http-tools":               (req, res) => this.handlePostHttpTool(req, res),
-      "GET /http-tools":                (req, res) => this.handleGetHttpTools(req, res),
       "GET /preference":                (req, res) => this.handleGetPreference(req, res),
       "POST /preference":               (req, res) => this.handlePostPreference(req, res),
       "GET /delegation/approval-params": (req, res, url) => this.handleGetDelegationApprovalParams(req, res, url),
@@ -220,19 +207,19 @@ export class HttpApiServer {
     (req: http.IncomingMessage, res: http.ServerResponse, url: URL, param: string) => Promise<void>
   ]> {
     return [
-      [{ method: "DELETE", regex: /^\/tools\/([^/]+)$/ },             (req, res, url) => this.handleDeleteTool(req, res, url)],
       [{ method: "POST",   regex: /^\/delegation\/([^/]+)\/signed$/ }, (req, res, _u, id) => this.handlePostDelegationSigned(req, res, id)],
       [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, url, requestId) => this.handleGetMiniAppRequest(req, res, url, requestId)],
-      [{ method: "DELETE", regex: /^\/command-mappings\/(.+)$/ },     (req, res, _u, command) => this.handleDeleteCommandMapping(req, res, decodeURIComponent(command))],
-      [{ method: "DELETE", regex: /^\/http-tools\/([^/]+)$/ },        (req, res, _u, id) => this.handleDeleteHttpTool(req, res, id)],
     ];
   }
 
   private async handlePrivyLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
     let body: unknown;
     try {
       body = await this.readJson(req);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ reqId, path: "POST /auth/privy", err: msg }, "invalid-json-body");
       return this.sendJson(res, 400, { error: "Invalid JSON" });
     }
 
@@ -347,71 +334,6 @@ export class HttpApiServer {
     return this.sendJson(res, 200, { tokens });
   }
 
-  private async handlePostTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.requireAdmin(req, res);
-    if (!userId) return;
-
-    if (!this.toolRegistrationUseCase) {
-      return this.sendJson(res, 503, { error: "tool registration service not available" });
-    }
-
-    let body: unknown;
-    try {
-      body = await this.readJson(req);
-    } catch {
-      return this.sendJson(res, 400, { error: "invalid JSON" });
-    }
-
-    const parsed = ToolManifestSchema.safeParse(body);
-    if (!parsed.success) {
-      return this.sendJson(res, 400, { error: "invalid manifest", details: parsed.error.issues });
-    }
-
-    try {
-      const result = await this.toolRegistrationUseCase.register(parsed.data);
-      log.info({ userId, route: "POST /tools", toolId: parsed.data.toolId }, "admin-action");
-      return this.sendJson(res, 201, result);
-    } catch (err) {
-      const msg = toErrorMessage(err);
-      log.warn({ userId, route: "POST /tools", toolId: parsed.data.toolId, err: msg }, "admin-action-failed");
-      if (err instanceof Error && err.message.startsWith("TOOL_ID_TAKEN")) {
-        return this.sendJson(res, 409, { error: "tool ID already registered" });
-      }
-      throw err;
-    }
-  }
-
-  private async handleDeleteTool(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    const userId = await this.requireAdmin(req, res);
-    if (!userId) return;
-    if (!this.toolRegistrationUseCase) return this.sendJson(res, 503, { error: "tool registration service not available" });
-
-    const toolId = url.pathname.split("/").pop()?.trim();
-    if (!toolId) return this.sendJson(res, 400, { error: "toolId is required" });
-
-    try {
-      await this.toolRegistrationUseCase.deactivate(toolId);
-      log.info({ userId, route: "DELETE /tools", toolId }, "admin-action");
-      return this.sendJson(res, 200, { toolId, deactivated: true });
-    } catch (err) {
-      const message = toErrorMessage(err);
-      const status = message.startsWith("TOOL_NOT_FOUND") ? 404 : 500;
-      log.warn({ userId, route: "DELETE /tools", toolId, err: message }, "admin-action-failed");
-      return this.sendJson(res, status, { error: message });
-    }
-  }
-
-  private async handleGetTools(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
-    if (!this.toolRegistrationUseCase) {
-      return this.sendJson(res, 503, { error: "Tool registration service not available" });
-    }
-
-    const chainIdStr = url.searchParams.get("chainId");
-    const chainId = chainIdStr ? parseInt(chainIdStr, 10) : undefined;
-    const tools = await this.toolRegistrationUseCase.list(chainId);
-    return this.sendJson(res, 200, { tools });
-  }
-
   private async handleGetPermissions(
     req: http.IncomingMessage,
     res: http.ServerResponse,
@@ -482,10 +404,12 @@ export class HttpApiServer {
     }
     if (!id) return this.sendJson(res, 400, { error: 'Delegation ID required' });
 
+    const reqId = this.reqLogIds.get(req) ?? "?";
     try {
       await this.pendingDelegationRepo.markSigned(id);
       return this.sendJson(res, 200, { id, signed: true });
     } catch (err) {
+      log.error({ err, reqId, path: "POST /delegation/pending/:id/signed" }, "request-handler-failed");
       return this.sendJson(res, 500, { error: toErrorMessage(err) });
     }
   }
@@ -551,10 +475,13 @@ export class HttpApiServer {
       return this.sendJson(res, 503, { error: 'Mini app request service not available' });
     }
 
+    const reqId = this.reqLogIds.get(req) ?? "?";
     let body: unknown;
     try {
       body = await this.readJson(req);
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ reqId, path: "POST /response", err: msg }, "invalid-json-body");
       return this.sendJson(res, 400, { error: 'Invalid JSON' });
     }
 
@@ -767,140 +694,6 @@ export class HttpApiServer {
     return session ? session.telegramChatId : null;
   }
 
-  // ── Command mapping handlers ─────────────────────────────────────────────────
-
-  private async handlePostCommandMapping(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const userId = await this.requireAdmin(req, res);
-    if (!userId) return;
-
-    if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "command mapping service not available" });
-    }
-    let body: unknown;
-    try {
-      body = await this.readJson(req);
-    } catch {
-      return this.sendJson(res, 400, { error: "invalid JSON" });
-    }
-    const parsed = z.object({
-      command: z.string().min(1),
-      toolId:  z.string().min(1),
-    }).safeParse(body);
-    if (!parsed.success) {
-      return this.sendJson(res, 400, { error: "command and toolId are required", details: parsed.error.issues });
-    }
-    try {
-      const result = await this.commandMappingUseCase.setMapping(parsed.data.command, parsed.data.toolId);
-      log.info({ userId, route: "POST /command-mappings", command: parsed.data.command, toolId: parsed.data.toolId }, "admin-action");
-      return this.sendJson(res, 201, result);
-    } catch (err) {
-      const msg = toErrorMessage(err);
-      log.warn({ userId, route: "POST /command-mappings", command: parsed.data.command, toolId: parsed.data.toolId, err: msg }, "admin-action-failed");
-      if (msg.startsWith("UNKNOWN_COMMAND")) return this.sendJson(res, 400, { error: msg });
-      if (msg.startsWith("TOOL_NOT_FOUND"))  return this.sendJson(res, 404, { error: msg });
-      throw err;
-    }
-  }
-
-  private async handleGetCommandMappings(
-    _req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "command mapping service not available" });
-    }
-    const mappings = await this.commandMappingUseCase.listMappings();
-    return this.sendJson(res, 200, { mappings });
-  }
-
-  private async handleDeleteCommandMapping(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    command: string,
-  ): Promise<void> {
-    const userId = await this.requireAdmin(req, res);
-    if (!userId) return;
-
-    if (!this.commandMappingUseCase) {
-      return this.sendJson(res, 503, { error: "command mapping service not available" });
-    }
-    if (!command) return this.sendJson(res, 400, { error: "command is required" });
-    try {
-      await this.commandMappingUseCase.deleteMapping(command);
-      log.info({ userId, route: "DELETE /command-mappings", command }, "admin-action");
-      return this.sendJson(res, 200, { command, deleted: true });
-    } catch (err) {
-      const msg = toErrorMessage(err);
-      log.warn({ userId, route: "DELETE /command-mappings", command, err: msg }, "admin-action-failed");
-      if (msg.startsWith("MAPPING_NOT_FOUND")) return this.sendJson(res, 404, { error: msg });
-      throw err;
-    }
-  }
-
-  private async handlePostHttpTool(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
-
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-
-    const parsed = z.object({
-      name: z.string().regex(/^[a-z][a-z0-9_]{0,62}$/, "must be snake_case, start with letter, max 63 chars"),
-      description: z.string().min(1),
-      endpoint: z.string().url(),
-      method: z.enum(["GET", "POST", "PUT"]),
-      requestBodySchema: z.record(z.string(), z.unknown()),
-      headers: z.array(z.object({
-        key: z.string().min(1),
-        value: z.string().min(1),
-        encrypt: z.boolean(),
-      })).default([]),
-    }).safeParse(body);
-
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
-
-    try {
-      const result = await this.httpQueryToolUseCase.register({ userId, ...parsed.data });
-      return this.sendJson(res, 201, result);
-    } catch (err) {
-      const msg = toErrorMessage(err);
-      if (msg.startsWith("INVALID_TOOL_NAME")) return this.sendJson(res, 400, { error: msg });
-      if (msg.startsWith("INVALID_ENDPOINT_URL")) return this.sendJson(res, 400, { error: msg });
-      if (msg.startsWith("ENCRYPTION_KEY_NOT_CONFIGURED")) return this.sendJson(res, 503, { error: msg });
-      throw err;
-    }
-  }
-
-  private async handleGetHttpTools(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
-
-    const tools = await this.httpQueryToolUseCase.list(userId);
-    return this.sendJson(res, 200, { tools });
-  }
-
-  private async handleDeleteHttpTool(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.httpQueryToolUseCase) return this.sendJson(res, 503, { error: "HTTP tool service not available" });
-    if (!id) return this.sendJson(res, 400, { error: "Tool ID required" });
-
-    try {
-      await this.httpQueryToolUseCase.deactivate(id, userId);
-      return this.sendJson(res, 200, { id, deactivated: true });
-    } catch (err) {
-      const msg = toErrorMessage(err);
-      if (msg === "TOOL_NOT_FOUND") return this.sendJson(res, 404, { error: msg });
-      if (msg === "TOOL_FORBIDDEN") return this.sendJson(res, 403, { error: msg });
-      throw err;
-    }
-  }
-
   private async handleGetPreference(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
@@ -915,8 +708,15 @@ export class HttpApiServer {
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.userPreferencesRepo) return this.sendJson(res, 503, { error: "Preferences service not available" });
 
+    const reqId = this.reqLogIds.get(req) ?? "?";
     let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+    try {
+      body = await this.readJson(req);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ reqId, path: "POST /preference", err: msg }, "invalid-json-body");
+      return this.sendJson(res, 400, { error: "Invalid JSON" });
+    }
 
     const parsed = z.object({ aegisGuardEnabled: z.boolean() }).safeParse(body);
     if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid request", details: parsed.error.issues });
@@ -1037,8 +837,15 @@ export class HttpApiServer {
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.tokenDelegationRepo) return this.sendJson(res, 503, { error: "Delegation service not available" });
 
+    const reqId = this.reqLogIds.get(req) ?? "?";
     let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+    try {
+      body = await this.readJson(req);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn({ reqId, path: "POST /delegation/grant", err: msg }, "invalid-json-body");
+      return this.sendJson(res, 400, { error: "Invalid JSON" });
+    }
 
     const parsed = z.object({
       delegations: z.array(z.object({
@@ -1152,14 +959,11 @@ export class HttpApiServer {
       auth: true,
       intent: !!this.intentUseCase,
       portfolio: !!this.portfolioUseCase,
-      toolRegistration: !!this.toolRegistrationUseCase,
       sessionDelegation: !!this.sessionDelegationUseCase,
       pendingDelegation: !!this.pendingDelegationRepo,
       miniAppRequest: !!this.miniAppRequestCache,
       signingRequest: !!this.signingRequestUseCase,
-      commandMapping: !!this.commandMappingUseCase,
       userProfileCache: !!this.userProfileCache,
-      httpQueryTool: !!this.httpQueryToolUseCase,
       userPreferences: !!this.userPreferencesRepo,
       tokenDelegation: !!this.tokenDelegationRepo,
       userProfileDB: !!this.userProfileDB,
@@ -1328,9 +1132,12 @@ export class HttpApiServer {
       req.on("end", () => {
         try {
           const parsed = JSON.parse(body);
-          log.debug({ reqId, body: parsed }, "request body");
+          log.debug({ reqId, bodyBytes: body.length }, "request body parsed");
           resolve(parsed);
-        } catch { reject(new Error("Invalid JSON")); }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          reject(new Error(`Invalid JSON: ${msg}`));
+        }
       });
       req.on("error", reject);
     });

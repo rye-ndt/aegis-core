@@ -6,10 +6,7 @@ import type { ITransferHistoryUseCase } from "../../../use-cases/interface/input
 import type { IStockPriceOracle } from "../../../use-cases/interface/output/stocks/stockPriceOracle.interface";
 import type { IStockPairRegistry } from "../../../use-cases/interface/output/stocks/stockPair.interface";
 import type { IStockUseCase } from "../../../use-cases/interface/input/stock.interface";
-import { WalletBalancesTool } from "./tools/system/walletBalances.tool";
 import { TransactionStatusTool } from "./tools/system/transactionStatus.tool";
-import { GasSpendTool } from "./tools/system/gasSpend.tool";
-import { RpcProxyTool } from "./tools/system/rpcProxy.tool";
 import { GetTransferHistoryTool } from "./tools/getTransferHistory.tool";
 import { GetStockQuoteTool } from "./tools/getStockQuote.tool";
 import { GetStockPositionsTool } from "./tools/getStockPositions.tool";
@@ -32,10 +29,7 @@ export class SystemToolProviderConcrete implements ISystemToolProvider {
 
   getTools(userId: string, _conversationId: string): ITool[] {
     const tools: ITool[] = [
-      new WalletBalancesTool(userId, this.walletDataProvider, this.userProfileCache),
       new TransactionStatusTool(this.walletDataProvider),
-      new GasSpendTool(userId, this.walletDataProvider, this.userProfileCache),
-      new RpcProxyTool(userId, this.walletDataProvider, this.userProfileCache),
     ];
     if (this.transferHistoryUseCase) {
       tools.push(new GetTransferHistoryTool(userId, this.transferHistoryUseCase, this.chainId));

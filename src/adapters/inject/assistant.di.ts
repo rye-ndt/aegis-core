@@ -11,6 +11,7 @@ import {
 import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
+import { OPENAI_MODEL } from "../../helpers/env/openaiEnv";
 import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
 import { createLogger } from "../../helpers/observability/logger";
@@ -19,8 +20,6 @@ import { AssistantUseCaseImpl } from "../../use-cases/implementations/assistant.
 import { AuthUseCaseImpl } from "../../use-cases/implementations/auth.usecase";
 import { CapabilityDispatcher } from "../../use-cases/implementations/capabilityDispatcher.usecase";
 import { CapabilityRegistry } from "../../use-cases/implementations/capabilityRegistry";
-import { CommandMappingUseCase } from "../../use-cases/implementations/commandMapping.usecase";
-import { HttpQueryToolUseCaseImpl } from "../../use-cases/implementations/httpQueryTool.usecase";
 import { IntentUseCaseImpl } from "../../use-cases/implementations/intent.usecase";
 import { LoyaltyUseCaseImpl } from "../../use-cases/implementations/loyaltyUseCase";
 import { PortfolioUseCaseImpl } from "../../use-cases/implementations/portfolio.usecase";
@@ -28,21 +27,17 @@ import { RecipientNotificationUseCase } from "../../use-cases/implementations/re
 import { SessionDelegationUseCaseImpl } from "../../use-cases/implementations/sessionDelegation.usecase";
 import { SigningRequestUseCaseImpl } from "../../use-cases/implementations/signingRequest.usecase";
 import { TokenIngestionUseCase } from "../../use-cases/implementations/tokenIngestion.usecase";
-import { ToolRegistrationUseCase } from "../../use-cases/implementations/toolRegistration.usecase";
 import { TransferHistoryUseCaseImpl } from "../../use-cases/implementations/transferHistory.usecase";
 import { YieldOptimizerUseCase } from "../../use-cases/implementations/yieldOptimizerUseCase";
 import { YieldPoolRanker } from "../../use-cases/implementations/yieldPoolRanker";
 import type { IAssistantUseCase } from "../../use-cases/interface/input/assistant.interface";
 import type { IAuthUseCase } from "../../use-cases/interface/input/auth.interface";
 import type { ICapabilityDispatcher } from "../../use-cases/interface/input/capabilityDispatcher.interface";
-import type { ICommandMappingUseCase } from "../../use-cases/interface/input/commandMapping.interface";
-import type { IHttpQueryToolUseCase } from "../../use-cases/interface/input/httpQueryTool.interface";
 import type { IIntentUseCase } from "../../use-cases/interface/input/intent.interface";
 import type { ILoyaltyUseCase } from "../../use-cases/interface/input/loyalty.interface";
 import type { IPortfolioUseCase } from "../../use-cases/interface/input/portfolio.interface";
 import type { ISessionDelegationUseCase } from "../../use-cases/interface/input/sessionDelegation.interface";
 import type { ISigningRequestUseCase } from "../../use-cases/interface/input/signingRequest.interface";
-import type { IToolRegistrationUseCase } from "../../use-cases/interface/input/toolRegistration.interface";
 import type { ITransferHistoryUseCase } from "../../use-cases/interface/input/transferHistory.interface";
 import type { IBalanceProvider } from "../../use-cases/interface/output/blockchain/balanceProvider.interface";
 import type { ITransferHistoryProvider } from "../../use-cases/interface/output/blockchain/transferHistoryProvider.interface";
@@ -51,14 +46,13 @@ import type { ISessionDelegationCache } from "../../use-cases/interface/output/c
 import type { ITransferHistoryCache } from "../../use-cases/interface/output/cache/transferHistory.cache";
 import type { IUserProfileCache } from "../../use-cases/interface/output/cache/userProfile.cache";
 import type { IDelegationRequestBuilder } from "../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
-import type { IExecutionEstimator } from "../../use-cases/interface/output/executionEstimator.interface";
 import type { IPendingCollectionStore } from "../../use-cases/interface/output/pendingCollectionStore.interface";
 import type { IRelayClient } from "../../use-cases/interface/output/relay.interface";
 import type { ITokenDelegationDB } from "../../use-cases/interface/output/repository/tokenDelegation.repo";
 import type { IResolverEngine } from "../../use-cases/interface/output/resolver.interface";
 import type { ISystemToolProvider } from "../../use-cases/interface/output/systemToolProvider.interface";
 import type { ITelegramNotifier } from "../../use-cases/interface/output/telegramNotifier.interface";
-import type { IToolRegistry } from "../../use-cases/interface/output/tool.interface";
+import type { ITool } from "../../use-cases/interface/output/tool.interface";
 import type { IToolIndexService } from "../../use-cases/interface/output/toolIndex.interface";
 import type { IWalletDataProvider } from "../../use-cases/interface/output/walletDataProvider.interface";
 import type {
@@ -104,7 +98,6 @@ import {
 } from "../implementations/output/capabilities/yieldCapability";
 import { DelegationRequestBuilder } from "../implementations/output/delegation/delegationRequestBuilder";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
-import { DeterministicExecutionEstimator } from "../implementations/output/intentParser/deterministic.executionEstimator";
 import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
 import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
 import { OpenAIIntentInterpreter } from "../implementations/output/intentInterpreter/openai.intentInterpreter";
@@ -124,10 +117,8 @@ import { GramjsTelegramResolver } from "../implementations/output/telegram/gramj
 import { PangolinTokenCrawler } from "../implementations/output/tokenCrawler/pangolin.tokenCrawler";
 import { DbTokenRegistryService } from "../implementations/output/tokenRegistry/db.tokenRegistry";
 import { PineconeToolIndexService } from "../implementations/output/toolIndex/pinecone.toolIndex";
-import { ToolRegistryConcrete } from "../implementations/output/toolRegistry.concrete";
 import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.tool";
 import { RouteIntentTool } from "../implementations/output/tools/routeIntent.tool";
-import { HttpQueryTool } from "../implementations/output/tools/httpQuery.tool";
 import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
 import { StockOpenTool } from "../implementations/output/tools/stockOpen.tool";
@@ -173,7 +164,6 @@ export class AssistantInject {
   private _viemClient: ViemClientAdapter | null = null;
   private _solverRegistry: SolverRegistry | null = null;
   private _schemaCompiler: OpenAISchemaCompiler | null = null;
-  private _toolRegistrationUseCase: IToolRegistrationUseCase | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
   private _stockPairCrawlerJob: StockPairCrawlerJob | null = null;
@@ -190,12 +180,9 @@ export class AssistantInject {
   private _miniAppRequestCache: IMiniAppRequestCache | null = null;
   private _signingRequestUseCase: ISigningRequestUseCase | null = null;
   private _resolverEngine: IResolverEngine | null = null;
-  private _commandMappingUseCase: ICommandMappingUseCase | null = null;
-  private _httpQueryToolUseCase: IHttpQueryToolUseCase | null = null;
   private _walletDataProvider: IWalletDataProvider | null = null;
   private _telegramNotifier: ITelegramNotifier | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
-  private _executionEstimator: IExecutionEstimator | null = null;
   private _intentInterpreter: IIntentInterpreter | null = null;
   private _intentInterpreterChecked = false;
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
@@ -341,16 +328,6 @@ export class AssistantInject {
     return this._toolIndexService;
   }
 
-  getToolRegistrationUseCase(): IToolRegistrationUseCase {
-    if (!this._toolRegistrationUseCase) {
-      this._toolRegistrationUseCase = new ToolRegistrationUseCase(
-        this.getSqlDB().toolManifests,
-        this.getToolIndexService(),
-      );
-    }
-    return this._toolRegistrationUseCase;
-  }
-
   /**
    * Result-card LLM interpreter. Returns undefined when
    * `RESULT_CARD_INTERPRETER_ENABLED` is not "true" or `OPENAI_API_KEY` is
@@ -386,17 +363,11 @@ export class AssistantInject {
 
   getIntentUseCase(): IIntentUseCase {
     if (!this._intentUseCase) {
-      const chainId = this.getChainId();
       const db = this.getSqlDB();
       this._intentUseCase = new IntentUseCaseImpl(
         this.getTokenRegistryService(),
-        this.getSolverRegistry(),
         db.userProfiles,
-        chainId,
-        db.toolManifests,
-        this.getToolIndexService(),
         this.getSchemaCompiler(),
-        db.commandToolMappings,
       );
     }
     return this._intentUseCase;
@@ -408,7 +379,7 @@ export class AssistantInject {
 
       const orchestrator = new OpenAIOrchestrator(
         process.env.OPENAI_API_KEY ?? "",
-        process.env.OPENAI_MODEL ?? "gpt-4o",
+        OPENAI_MODEL,
       );
 
       const webSearchService = new TavilyWebSearchService(
@@ -426,11 +397,12 @@ export class AssistantInject {
         userId: string,
         conversationId: string,
         channelId: string,
-      ): Promise<IToolRegistry> => {
-        const r = new ToolRegistryConcrete();
+      ): Promise<Map<string, ITool>> => {
+        const r = new Map<string, ITool>();
+        const add = (tool: ITool) => r.set(tool.definition().name, tool);
 
-        r.register(new WebSearchTool(webSearchService));
-        r.register(
+        add(new WebSearchTool(webSearchService));
+        add(
           new GetPortfolioTool(
             userId,
             userProfileDB,
@@ -445,26 +417,7 @@ export class AssistantInject {
           userId,
           conversationId,
         )) {
-          r.register(tool);
-        }
-
-        const httpToolDB = this.getSqlDB().httpQueryTools;
-        const userHttpTools = await httpToolDB.findActiveByUser(userId);
-        const encryptionKey = process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY;
-
-        for (const toolConfig of userHttpTools) {
-          const headers = await httpToolDB.getHeaders(toolConfig.id);
-          r.register(
-            new HttpQueryTool(
-              toolConfig,
-              headers,
-              userId,
-              userProfileCache,
-              userProfileDB,
-              orchestrator,
-              encryptionKey,
-            ),
-          );
+          add(tool);
         }
 
         // route_intent + stock_open — both re-enter the capability dispatcher
@@ -477,7 +430,7 @@ export class AssistantInject {
         // the same capability execution path as their /-prefixed counterparts.
         const dispatcher = await this.getCapabilityDispatcher();
         if (dispatcher) {
-          r.register(
+          add(
             new RouteIntentTool({
               userId,
               channelId,
@@ -485,7 +438,7 @@ export class AssistantInject {
               dispatcher,
             }),
           );
-          r.register(
+          add(
             new StockOpenTool({
               userId,
               channelId,
@@ -595,13 +548,6 @@ export class AssistantInject {
     return this.getSqlDB().tokenDelegations;
   }
 
-  getExecutionEstimator(): IExecutionEstimator | undefined {
-    if (!this._executionEstimator) {
-      this._executionEstimator = new DeterministicExecutionEstimator();
-    }
-    return this._executionEstimator;
-  }
-
   getSigningRequestUseCase(
     onResolved: (
       event: import("../../use-cases/interface/input/signingRequest.interface").SigningResolutionEvent,
@@ -703,16 +649,6 @@ export class AssistantInject {
     return this._telegramHandleResolver;
   }
 
-  getHttpQueryToolUseCase(): IHttpQueryToolUseCase {
-    if (!this._httpQueryToolUseCase) {
-      this._httpQueryToolUseCase = new HttpQueryToolUseCaseImpl(
-        this.getSqlDB().httpQueryTools,
-        process.env.HTTP_TOOL_HEADER_ENCRYPTION_KEY,
-      );
-    }
-    return this._httpQueryToolUseCase;
-  }
-
   getWalletDataProvider(): IWalletDataProvider {
     if (!this._walletDataProvider) {
       this._walletDataProvider = new PrivyWalletDataProvider(
@@ -799,7 +735,6 @@ export class AssistantInject {
       userProfileDB,
       factory,
       chainId,
-      this.getSqlDB().intentExecutions,
     );
     return this._transferHistoryUseCase;
   }
@@ -816,17 +751,6 @@ export class AssistantInject {
       this._relaySwapTool = new RelaySwapTool(this.getRelayClient());
     }
     return this._relaySwapTool;
-  }
-
-  getCommandMappingUseCase(): ICommandMappingUseCase {
-    if (!this._commandMappingUseCase) {
-      const db = this.getSqlDB();
-      this._commandMappingUseCase = new CommandMappingUseCase(
-        db.commandToolMappings,
-        db.toolManifests,
-      );
-    }
-    return this._commandMappingUseCase;
   }
 
   /**
@@ -868,7 +792,6 @@ export class AssistantInject {
       resolverEngine: this.getResolverEngine(),
       tokenRegistryService: this.getTokenRegistryService(),
       tokenDelegationDB: this.getTokenDelegationRepo(),
-      executionEstimator: this.getExecutionEstimator(),
       telegramHandleResolver: this.getTelegramHandleResolver(),
       privyAuthService: this.getPrivyAuthService(),
       userProfileRepo: sqlDB.userProfiles,
@@ -907,7 +830,6 @@ export class AssistantInject {
           signingRequestUseCase: this._signingRequestUseCase,
           miniAppRequestCache: this.getMiniAppRequestCache(),
           tokenDelegationDB: this.getTokenDelegationRepo(),
-          executionEstimator: this.getExecutionEstimator(),
           userProfileRepo: sqlDB.userProfiles,
           chainId: this.getChainId(),
           loyaltyUseCase: this.getLoyaltyUseCase(),
@@ -1376,14 +1298,11 @@ export class AssistantInject {
       port,
       this.getIntentUseCase(),
       this.getPortfolioUseCase(),
-      this.getToolRegistrationUseCase(),
       this.getSessionDelegationUseCase(),
       this.getSqlDB().pendingDelegations,
       this.getMiniAppRequestCache(),
       signingRequestUseCase,
-      this.getCommandMappingUseCase(),
       this.getUserProfileCache(),
-      this.getHttpQueryToolUseCase(),
       this.getSqlDB().userPreferences,
       this.getTokenDelegationRepo(),
       this.getSqlDB().userProfiles,

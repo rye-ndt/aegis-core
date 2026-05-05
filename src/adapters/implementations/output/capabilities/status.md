@@ -1,5 +1,36 @@
 # Capabilities Status
 
+## /send — in-code SEND_MANIFEST + direct ERC-20 calldata — 2026-05-05
+
+**What was done:**
+- `sendCapability.ts` now defines `SEND_MANIFEST: CapabilityManifest` inline
+  (verbatim copy of the `input_schema` JSON from
+  `drizzle/0023_seed_send_tool.sql:36`) and a private
+  `buildTransferCalldata` helper. The capability no longer calls
+  `intentUseCase.selectTool` / `intentUseCase.buildRequestBody`; both have
+  been deleted from `IIntentUseCase`.
+- Native sends: `{ to: recipient, data: "0x", value: amountRaw }`.
+- ERC-20 sends: `{ to: tokenAddress, data: encodeFunctionData(erc20Abi, "transfer", [recipient, BigInt(amountRaw)]), value: "0" }`.
+  Mirrors the legacy `executeErc20Transfer` step executor byte-for-byte.
+- `SessionState.manifest` and `SendParams.manifest` are now
+  `CapabilityManifest` (from `helpers/types/manifest.ts`), not the
+  zod-validated `ToolManifest`.
+
+**Why over alternatives:**
+- Solver / manifest-DB registry was the only consumer of the dynamic-tool
+  table; nothing else read `tool_manifests`. Inlining the manifest dropped
+  the entire RAG + solver hop without changing calldata bytes.
+- Kept `compileSchema` / `generateMissingParamQuestion` / `searchTokens`
+  on `IIntentUseCase` because both `/send` and `/swap` still rely on
+  LLM-driven param extraction.
+
+**New convention:**
+- In-code capability tools register a `CapabilityManifest` constant in the
+  capability file. The slim type lives in `helpers/types/manifest.ts` and is
+  the single source of truth for both `SEND_MANIFEST` and `SWAP_MANIFEST`.
+  Calldata is built directly inside `Capability.run` rather than dispatched
+  through `solverRegistry`.
+
 ## /stock — preview-only summary, no chat preamble — 2026-05-05
 
 **What was done:**

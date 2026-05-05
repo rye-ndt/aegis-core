@@ -1,19 +1,18 @@
+import { estimateExecution } from "../../helpers/executionEstimator";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import type { ITokenRecord } from "../interface/input/intent.interface";
 import type { ApproveRequest } from "../interface/output/cache/miniAppRequest.types";
-import type { IExecutionEstimator } from "../interface/output/executionEstimator.interface";
 import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
 
 /**
  * Shared Aegis Guard delegation check used by both `/send` and `/swap`.
  *
- * Given a spend intent (token + human/raw amount), it asks the
- * `IExecutionEstimator` whether the user's active `token_delegations` already
- * cover this spend. When coverage is sufficient the caller may proceed with
- * autonomous signing; otherwise this helper mints a re-approval
- * `ApproveRequest` for the mini app and returns it with an explanatory
- * message.
+ * Given a spend intent (token + human/raw amount), it runs `estimateExecution`
+ * to check whether the user's active `token_delegations` already cover this
+ * spend. When coverage is sufficient the caller may proceed with autonomous
+ * signing; otherwise this helper mints a re-approval `ApproveRequest` for the
+ * mini app and returns it with an explanatory message.
  */
 export interface AegisGuardCheckParams {
   userId: string;
@@ -21,7 +20,6 @@ export interface AegisGuardCheckParams {
   amountHuman: string;
   amountRaw: string;
   tokenDelegationDB: ITokenDelegationDB;
-  executionEstimator: IExecutionEstimator;
 }
 
 export type AegisGuardResult =
@@ -38,7 +36,7 @@ export async function checkTokenDelegation(
   const { userId, fromToken, amountHuman, amountRaw } = params;
 
   const delegations = await params.tokenDelegationDB.findActiveByUserId(userId);
-  const estimation = await params.executionEstimator.estimate({
+  const estimation = estimateExecution({
     delegations,
     intentTokenAddress: fromToken.address,
     intentTokenSymbol: fromToken.symbol,

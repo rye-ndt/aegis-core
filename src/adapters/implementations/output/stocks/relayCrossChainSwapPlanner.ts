@@ -4,11 +4,10 @@ import type {
   ICrossChainSwapPlanner,
 } from "../../../../use-cases/interface/output/stocks/crossChainSwapPlanner.interface";
 import type { IRelayClient } from "../../../../use-cases/interface/output/relay.interface";
+import { RELAY_NATIVE_SENTINEL } from "../../../../helpers/chainConfig";
 import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("relayCrossChainSwapPlanner");
-
-const NATIVE_CURRENCY_SENTINEL = "0x0000000000000000000000000000000000000000";
 
 /**
  * Wraps `IRelayClient.getQuote` behind the `ICrossChainSwapPlanner` port so
@@ -83,7 +82,5 @@ function coerceValueToDecimal(raw: string | undefined | null): string {
 
 function normalise(addr: `0x${string}`): string {
   // Relay accepts the zero address for native currency.
-  return addr === ("0x0000000000000000000000000000000000000000" as `0x${string}`)
-    ? NATIVE_CURRENCY_SENTINEL
-    : addr;
+  return addr.toLowerCase() === RELAY_NATIVE_SENTINEL ? RELAY_NATIVE_SENTINEL : addr;
 }

@@ -1,6 +1,6 @@
 import { formatUnits } from "viem";
 import { createLogger } from "../../../../helpers/observability/logger";
-import { getAnkrBlockchain } from "../../../../helpers/chainConfig";
+import { getAnkrBlockchain, RELAY_NATIVE_SENTINEL } from "../../../../helpers/chainConfig";
 import type { IBalanceProvider, ProviderBalance } from "../../../../use-cases/interface/output/blockchain/balanceProvider.interface";
 
 const log = createLogger("AnkrBalanceProvider");
@@ -20,7 +20,6 @@ function formatBalance(rawIntegerStr: string, decimals: number): string {
   return human.slice(0, dot + 7).padEnd(dot + 7, "0");
 }
 
-const NATIVE_ADDRESS = "0x0000000000000000000000000000000000000000";
 const ANKR_PUBLIC_ENDPOINT = "https://rpc.ankr.com/multichain";
 const REQUEST_TIMEOUT_MS = 8_000;
 const RETRY_BACKOFFS_MS = [200, 800] as const;
@@ -127,7 +126,7 @@ export class AnkrBalanceProvider implements IBalanceProvider {
       const assets = body.result?.assets ?? [];
       const balances: ProviderBalance[] = assets.map((a) => ({
         symbol: a.tokenSymbol,
-        address: a.contractAddress ?? NATIVE_ADDRESS,
+        address: a.contractAddress ?? RELAY_NATIVE_SENTINEL,
         decimals: a.tokenDecimals,
         balance: formatBalance(a.balanceRawInteger, a.tokenDecimals),
         rawBalance: a.balanceRawInteger,

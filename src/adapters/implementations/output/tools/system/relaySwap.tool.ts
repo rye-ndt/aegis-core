@@ -11,14 +11,13 @@ import type {
 } from "../../../../../use-cases/interface/output/relay.interface";
 import {
   CHAIN_CONFIG,
+  RELAY_NATIVE_SENTINEL,
   RELAY_SUPPORTED_CHAIN_IDS,
 } from "../../../../../helpers/chainConfig";
 import { toErrorMessage } from "../../../../../helpers/errors/toErrorMessage";
 import { createLogger } from "../../../../../helpers/observability/logger";
 
 const log = createLogger("relaySwapTool");
-
-const NATIVE_CURRENCY_SENTINEL = "0x0000000000000000000000000000000000000000";
 
 const InputSchema = z.object({
   tokenIn: z.string().describe("Origin-token address (0x…) or 'native' for the chain's native token"),
@@ -117,7 +116,7 @@ export class RelaySwapTool implements ITool {
 function normaliseCurrency(token: string): string {
   const lower = token.trim().toLowerCase();
   if (lower === "native" || lower === CHAIN_CONFIG.nativeSymbol.toLowerCase()) {
-    return NATIVE_CURRENCY_SENTINEL;
+    return RELAY_NATIVE_SENTINEL;
   }
   return token;
 }

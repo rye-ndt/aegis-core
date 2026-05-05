@@ -1,4 +1,4 @@
-import type { ToolManifest } from "./toolManifest.types";
+import type { CapabilityManifest } from "../../../helpers/types/manifest";
 
 export interface CompileResult {
   params:          Record<string, unknown>;
@@ -15,14 +15,14 @@ export interface CompileResult {
 
 export interface ISchemaCompiler {
   compile(opts: {
-    manifest: ToolManifest;
+    manifest: CapabilityManifest;
     messages: string[];
     autoFilled: Record<string, unknown>;
     partialParams: Record<string, unknown>;
   }): Promise<CompileResult>;
 
   generateQuestion(opts: {
-    manifest: ToolManifest;
+    manifest: CapabilityManifest;
     missingFields: string[];
   }): Promise<string>;
 }
