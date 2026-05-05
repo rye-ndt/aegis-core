@@ -163,11 +163,27 @@ export class AssistantUseCaseImpl implements IAssistantUseCase {
       createdAtEpoch: newCurrentUTCEpoch(),
     });
 
+    // Pick the trailing successful tool result that carried a structured
+    // payload — capabilities use this to bypass the LLM's prose and render
+    // a result_card directly. We walk backwards so the latest tool wins.
+    let lastStructuredToolResult: IChatResponse["lastStructuredToolResult"];
+    for (let i = toolsUsed.length - 1; i >= 0; i--) {
+      const tu = toolsUsed[i]!;
+      const structured = (
+        tu.result as { structured?: NonNullable<IChatResponse["lastStructuredToolResult"]>["payload"] }
+      ).structured;
+      if (tu.result.success && structured) {
+        lastStructuredToolResult = { toolName: tu.toolName, payload: structured };
+        break;
+      }
+    }
+
     return {
       conversationId,
       messageId,
       reply: finalReply,
       toolsUsed: toolsUsed.map((t) => t.toolName),
+      lastStructuredToolResult,
     };
   }
 

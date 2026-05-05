@@ -9,7 +9,6 @@ import {
   getYieldConfig,
 } from "../../helpers/chainConfig";
 import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
-import { MESSAGE_ROLE } from "../../helpers/enums/messageRole.enum";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
 import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
@@ -111,6 +110,10 @@ import { OpenAIIntentClassifier } from "../implementations/output/intentParser/o
 import { OpenAIIntentParser } from "../implementations/output/intentParser/openai.intentParser";
 import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
 import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
+import { OpenAIIntentInterpreter } from "../implementations/output/intentInterpreter/openai.intentInterpreter";
+import { makeRedisResponseCache } from "../../helpers/cache/redisResponseCache";
+import { getResultCardEnv } from "../../helpers/env/resultCardEnv";
+import type { IIntentInterpreter } from "../../use-cases/interface/output/intentInterpreter.interface";
 import { InMemoryPendingCollectionStore } from "../implementations/output/pendingCollectionStore/inMemory";
 import { RedisPendingCollectionStore } from "../implementations/output/pendingCollectionStore/redis";
 import { PrivyServerAuthAdapter } from "../implementations/output/privyAuth/privyServer.adapter";
@@ -151,6 +154,11 @@ import { AsterBrokerProvider } from "../implementations/output/aster/asterBroker
 import type { IStockPairRegistry } from "../../use-cases/interface/output/stocks/stockPair.interface";
 import type { IStockPriceOracle } from "../../use-cases/interface/output/stocks/stockPriceOracle.interface";
 import type { IStockBrokerProvider } from "../../use-cases/interface/output/stocks/stockBrokerProvider.interface";
+import { renderResultCard } from "../implementations/output/artifactRenderer/resultCard.render";
+import type {
+  IntentResult,
+  ResultField,
+} from "../../use-cases/interface/input/resultCard.types";
 
 const log = createLogger("assistantDI");
 
@@ -188,6 +196,8 @@ export class AssistantInject {
   private _telegramNotifier: ITelegramNotifier | null = null;
   private _systemToolProvider: ISystemToolProvider | null = null;
   private _executionEstimator: IExecutionEstimator | null = null;
+  private _intentInterpreter: IIntentInterpreter | null = null;
+  private _intentInterpreterChecked = false;
   private _capabilityDispatcher: ICapabilityDispatcher | null = null;
   private _relayClient: IRelayClient | null = null;
   private _relaySwapTool: RelaySwapTool | null = null;
@@ -343,6 +353,30 @@ export class AssistantInject {
       );
     }
     return this._toolRegistrationUseCase;
+  }
+
+  /**
+   * Result-card LLM interpreter. Returns undefined when
+   * `RESULT_CARD_INTERPRETER_ENABLED` is not "true" or `OPENAI_API_KEY` is
+   * unset — the renderer treats undefined as "interpreter off" and just
+   * skips the optional italic note. Cache is best-effort: if Redis isn't
+   * configured we run uncached.
+   */
+  getIntentInterpreter(): IIntentInterpreter | undefined {
+    if (this._intentInterpreterChecked) {
+      return this._intentInterpreter ?? undefined;
+    }
+    this._intentInterpreterChecked = true;
+    const env = getResultCardEnv();
+    if (!env.enabled || !env.apiKey) return undefined;
+    const redis = this.getRedis();
+    const cache = redis ? makeRedisResponseCache(redis, "interp") : undefined;
+    this._intentInterpreter = new OpenAIIntentInterpreter({
+      apiKey: env.apiKey,
+      model: env.model,
+      cache,
+    });
+    return this._intentInterpreter;
   }
 
   getIntentParser(): OpenAIIntentParser {
@@ -824,6 +858,7 @@ export class AssistantInject {
       bot,
       this.getMiniAppRequestCache(),
       this._signingRequestUseCase ?? undefined,
+      this.getIntentInterpreter(),
     );
     const sqlDB = this.getSqlDB();
 
@@ -939,7 +974,12 @@ export class AssistantInject {
     // /positions — chat-seeded summariser of open Aster positions. Delegates
     // to the assistant LLM loop with a fixed prompt that nudges the agent
     // toward the `get_stock_positions` tool.
-    registry.register(new PositionsCapability(this.getUseCase()));
+    registry.register(
+      new PositionsCapability(
+        () => this.getStockUseCaseSync(),
+        () => this.isStockCapabilityDisabled(),
+      ),
+    );
 
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
     // command and isn't continuing a pending capability flow.
@@ -1132,10 +1172,7 @@ export class AssistantInject {
       const sqlDB = this.getSqlDB();
       const bot = this.getBot();
 
-      const llm = new OpenAIOrchestrator(
-        process.env.OPENAI_API_KEY ?? "",
-        process.env.OPENAI_MODEL ?? "gpt-4o",
-      );
+      const interpreter = this.getIntentInterpreter();
 
       const sendReport = async (
         _userId: string,
@@ -1143,6 +1180,11 @@ export class AssistantInject {
         report: DailyReport,
       ): Promise<void> => {
         if (!bot) return;
+        const start = Date.now();
+        log.info(
+          { step: "started", userId: _userId, chatId, positions: report.positions.length },
+          "yield-report-send",
+        );
 
         type PositionSummary = {
           protocol: string;
@@ -1150,6 +1192,7 @@ export class AssistantInject {
           balance: string;
           delta: string;
           deltaPrefix: string;
+          deltaNum: number;
         };
         const summaries: PositionSummary[] = [];
         for (const pos of report.positions) {
@@ -1159,69 +1202,128 @@ export class AssistantInject {
           );
           if (!stable) continue;
           const { decimals, symbol } = stable;
+          const deltaNum = Number(pos.delta24hRaw) / Math.pow(10, decimals);
           const balance = (
             Number(pos.balanceRaw) / Math.pow(10, decimals)
           ).toFixed(4);
-          const delta = (
-            Number(pos.delta24hRaw) / Math.pow(10, decimals)
-          ).toFixed(4);
-          const deltaPrefix = Number(pos.delta24hRaw) >= 0 ? "+" : "";
+          const delta = deltaNum.toFixed(4);
+          const deltaPrefix = deltaNum >= 0 ? "+" : "";
           summaries.push({
             protocol: pos.protocolId,
             symbol,
             balance,
             delta,
             deltaPrefix,
+            deltaNum,
           });
         }
 
-        if (summaries.length === 0) return;
+        if (summaries.length === 0) {
+          log.info(
+            { step: "succeeded", mode: "skipped-no-stable-positions", chatId, durationMs: Date.now() - start },
+            "yield-report-send",
+          );
+          return;
+        }
 
-        const dataBlurb = summaries
-          .map(
-            (s) =>
-              `${s.protocol}: ${s.deltaPrefix}${s.delta} ${s.symbol} earned today, ${s.balance} ${s.symbol} total`,
-          )
-          .join("; ");
+        // Top mover by absolute earnings.
+        const top = [...summaries].sort(
+          (a, b) => Math.abs(b.deltaNum) - Math.abs(a.deltaNum),
+        )[0]!;
+        const totalEarned = summaries.reduce((s, x) => s + x.deltaNum, 0);
+        const totalEarnedStr = `${totalEarned >= 0 ? "+" : ""}${totalEarned.toFixed(4)}`;
 
-        let message: string;
+        const fields: ResultField[] = [
+          {
+            label: "Earned today",
+            value: `${totalEarnedStr} (across ${summaries.length} position${summaries.length === 1 ? "" : "s"})`,
+            emphasis: "primary",
+          },
+          {
+            label: "Top mover",
+            value: `${top.protocol} ${top.deltaPrefix}${top.delta} ${top.symbol}`,
+          },
+        ];
+
+        const details: ResultField[] = summaries.map((s) => ({
+          label: s.protocol,
+          value: `${s.deltaPrefix}${s.delta} ${s.symbol} today · ${s.balance} total`,
+        }));
+
+        const result: IntentResult = {
+          status: "success",
+          verb: "portfolio_summary",
+          headline: "Your yield update",
+          fields,
+          details,
+          complexity: "complex",
+          interpreterContext: {
+            totalEarned: totalEarnedStr,
+            positions: summaries.map((s) => ({
+              protocol: s.protocol,
+              symbol: s.symbol,
+              balance: s.balance,
+              delta: `${s.deltaPrefix}${s.delta}`,
+            })),
+          },
+          nextActions: [
+            { label: "Check positions", kind: "command", payload: "/yield" },
+          ],
+        };
+
+        let interpreterNote: string | null = null;
+        if (interpreter) {
+          try {
+            interpreterNote = await interpreter.interpret({
+              verb: result.verb,
+              status: result.status,
+              fields: result.fields,
+              interpreterContext: result.interpreterContext,
+            });
+          } catch {
+            interpreterNote = null;
+          }
+        }
+
+        const rendered = renderResultCard({ result, interpreterNote });
         try {
-          const result = await llm.chat({
-            systemPrompt: [
-              "You are Aegis, a friendly onchain AI agent. Write a short, warm, conversational yield update for the user.",
-              "Rules:",
-              "- 2–4 sentences max. No lists, no markdown tables, no bullet points.",
-              "- Bold token symbols and protocol names using *asterisks* (Telegram Markdown).",
-              "- Mention the amount earned today and the total balance naturally in the prose.",
-              "- Keep a positive, encouraging tone — like a friend sharing good news.",
-              "- Do NOT start with 'Hey' or 'Hi'. Do NOT use emojis.",
-              "- End with a one-line forward-looking note (e.g. what they can do next or when to expect more).",
-            ].join("\n"),
-            conversationHistory: [
-              {
-                role: MESSAGE_ROLE.USER,
-                content: `Yield data: ${dataBlurb}`,
-              },
-            ],
-            availableTools: [],
+          await bot.api.sendMessage(Number(chatId), rendered.text, {
+            parse_mode: rendered.parseMode,
+            ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
           });
-          message = result.text?.trim() ?? "";
-        } catch {
-          message = "";
+          log.info(
+            {
+              step: "succeeded",
+              mode: "rendered",
+              chatId,
+              positions: summaries.length,
+              hasInterpreterNote: !!interpreterNote,
+              durationMs: Date.now() - start,
+            },
+            "yield-report-send",
+          );
+        } catch (err) {
+          log.warn(
+            { step: "failed", mode: "markdownV2-retry-plain", err, chatId },
+            "yield-report-send",
+          );
+          const plain =
+            `${result.headline}\n` +
+            result.fields.map((f) => `${f.label}: ${f.value}`).join("\n");
+          await bot.api.sendMessage(Number(chatId), plain, {
+            ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
+          });
+          log.info(
+            {
+              step: "succeeded",
+              mode: "plain-fallback",
+              chatId,
+              positions: summaries.length,
+              durationMs: Date.now() - start,
+            },
+            "yield-report-send",
+          );
         }
-
-        if (!message) {
-          message = summaries
-            .map(
-              (s) =>
-                `*${s.protocol}* — earned ${s.deltaPrefix}${s.delta} *${s.symbol}* today · ${s.balance} *${s.symbol}* total`,
-            )
-            .join("\n");
-        }
-
-        await bot.api.sendMessage(Number(chatId), `${message}`, {
-          parse_mode: "Markdown",
-        });
       };
 
       this._yieldReportJob = new YieldReportJob(

@@ -9,9 +9,11 @@ import type { IMiniAppRequestCache } from "../../../../use-cases/interface/outpu
 import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
+import type { IIntentInterpreter } from "../../../../use-cases/interface/output/intentInterpreter.interface";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { renderResultCard } from "./resultCard.render";
 
 const log = createLogger("telegramArtifactRenderer");
 const MINI_APP_URL = process.env.MINI_APP_URL;
@@ -43,6 +45,7 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
     private readonly bot: Bot,
     private readonly miniAppRequestCache?: IMiniAppRequestCache,
     private readonly signingRequestUseCase?: ISigningRequestUseCase,
+    private readonly intentInterpreter?: IIntentInterpreter,
   ) {}
 
   async render(artifact: Artifact, ctx: CapabilityCtx): Promise<void> {
@@ -88,6 +91,7 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
           autoSign: artifact.autoSign,
           createdAt: now,
           expiresAt,
+          preview: artifact.preview,
         };
         const buttonText = artifact.autoSign ? "Execute Automatically" : "Open Aegis to Sign";
         const promptText = artifact.autoSign
@@ -125,6 +129,7 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
                 tokenSymbol: artifact.tokenSymbol,
                 tokenAddress: artifact.tokenAddress,
                 amountRaw: artifact.amountRaw,
+                preview: artifact.preview,
               };
               await this.signingRequestUseCase.create(record);
             }
@@ -133,6 +138,56 @@ export class TelegramArtifactRenderer implements IArtifactRenderer {
             }
           },
         );
+        return;
+      }
+      case "result_card": {
+        if (artifact.result.status === "preview") {
+          // Preview cards belong to the mini-app, not Telegram. Drop silently
+          // to keep the renderer side-effect-free if a capability misroutes one.
+          log.debug({ verb: artifact.result.verb }, "skip-preview-on-telegram");
+          return;
+        }
+        let interpreterNote: string | null = null;
+        if (
+          this.intentInterpreter &&
+          artifact.result.complexity === "complex"
+        ) {
+          try {
+            interpreterNote = await this.intentInterpreter.interpret({
+              verb: artifact.result.verb,
+              status: artifact.result.status,
+              fields: artifact.result.fields,
+              interpreterContext: artifact.result.interpreterContext,
+            });
+          } catch (err) {
+            // The interpreter impl already logs at warn; double-log here is
+            // unnecessary. Never block the receipt on the LLM call.
+            log.debug({ err }, "interpreter-threw-falling-back");
+            interpreterNote = null;
+          }
+        }
+        const rendered = renderResultCard({
+          result: artifact.result,
+          extraKeyboard: artifact.keyboard,
+          interpreterNote,
+        });
+        try {
+          await this.bot.api.sendMessage(chatId, rendered.text, {
+            parse_mode: rendered.parseMode,
+            ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
+          });
+        } catch (err) {
+          log.error(
+            { err, verb: artifact.result.verb, status: artifact.result.status },
+            "result-card-send-failed",
+          );
+          // Fallback: send unformatted plain text so the user still gets the gist.
+          const fallback = `${artifact.result.headline}\n` +
+            artifact.result.fields.map((f) => `${f.label}: ${f.value}`).join("\n");
+          await this.bot.api.sendMessage(chatId, fallback, {
+            ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
+          });
+        }
         return;
       }
       case "llm_data":

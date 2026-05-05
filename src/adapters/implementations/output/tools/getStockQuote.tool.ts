@@ -70,7 +70,11 @@ export class GetStockQuoteTool implements ITool {
     try {
       const marks = await this.oracle.markPrices(requested);
       if (marks.length === 0) {
-        return { success: true, data: "No marks available." };
+        return {
+          success: true,
+          data: "No marks available.",
+          structured: { kind: "stock_quote", items: [] },
+        };
       }
       const rows: string[] = ["Symbol | Mark (USD) | As-of (UTC)", "-------|-----------|-----------"];
       for (const m of marks) {
@@ -78,7 +82,14 @@ export class GetStockQuoteTool implements ITool {
         rows.push(`${m.symbol} | $${m.priceUsd} | ${ts}`);
       }
       log.info({ step: "succeeded", requestId, count: marks.length }, "stock-quote-tool");
-      return { success: true, data: rows.join("\n") };
+      return {
+        success: true,
+        data: rows.join("\n"),
+        structured: {
+          kind: "stock_quote",
+          items: marks.map((m) => ({ symbol: m.symbol, priceUsd: m.priceUsd, asOfEpoch: m.asOfEpoch })),
+        },
+      };
     } catch (err) {
       log.error({ err, requestId, step: "failed" }, "stock-quote-tool");
       return { success: false, error: toErrorMessage(err) };

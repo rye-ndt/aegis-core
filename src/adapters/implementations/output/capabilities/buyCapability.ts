@@ -10,6 +10,7 @@ import type {
   CollectResult,
   TriggerSpec,
 } from "../../../../use-cases/interface/input/capability.interface";
+import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
 import type { OnrampRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
 
@@ -104,22 +105,40 @@ export class BuyCapability implements Capability<BuyParams> {
     const profile = await this.userProfileRepo.findByUserId(ctx.userId);
     const address = profile?.smartAccountAddress;
     if (!address) {
-      return {
-        kind: "chat",
-        text: "Your smart account address is not set up yet. Open the Aegis mini app once to initialise it.",
+      const failed: IntentResult = {
+        status: "failed",
+        verb: "buy_onramp",
+        headline: "Wallet not set up yet",
+        fields: [
+          {
+            label: "Reason",
+            value:
+              "Your smart account address is not set up yet. Open the Aegis mini app once to initialise it.",
+          },
+        ],
+        complexity: "simple",
       };
+      return { kind: "result_card", result: failed };
     }
 
     const amountStr = formatBuyAmount(params.amount);
 
     if (params.choice === "deposit") {
-      return {
-        kind: "chat",
-        parseMode: "Markdown",
-        text:
-          `Deposit *${amountStr} USDC* on *${CHAIN_CONFIG.name}* to:\n` +
-          `\`${address}\`\n\n`,
+      const result: IntentResult = {
+        status: "pending",
+        verb: "buy_onramp",
+        headline: `Deposit ${amountStr} USDC on ${CHAIN_CONFIG.name}`,
+        fields: [
+          { label: "Amount", value: `${amountStr} USDC`, emphasis: "primary" },
+          { label: "Network", value: CHAIN_CONFIG.name },
+          { label: "To address", value: address },
+        ],
+        nextActions: [
+          { label: "Buy with card instead", kind: "callback", payload: `buy:n:${amountStr}` },
+        ],
+        complexity: "simple",
       };
+      return { kind: "result_card", result };
     }
 
     // card → mini-app onramp

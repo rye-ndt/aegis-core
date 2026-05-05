@@ -1,5 +1,126 @@
 # Capabilities Status
 
+## Result-card framework — review-feedback closure — 2026-05-05
+
+Closes the gaps surfaced by the post-implementation review agent (true-positive
+sweep done first; non-claims left untouched).
+
+**Verified true positives, then fixed:**
+- **assistantChatCapability fully migrated.** New `assistantResultRouter.ts` maps `StructuredToolPayload` → `IntentResult` for all four read-only tools (`get_transfer_history`, `get_stock_positions`, `get_stock_quote`, `get_portfolio`). Each tool's `execute()` now returns `{success, data, structured?}` — `data` (markdown table) still flows to the LLM for context, `structured` is captured by `AssistantUseCaseImpl` (last-tool-wins) and surfaced via `IChatResponse.lastStructuredToolResult`. The capability emits `result_card` when a structured payload is present and falls back to `kind:"chat"` for plain prose. The LLM's prose is intentionally suppressed on the structured branch — that's the whole point of plan §5.2.5.
+- **Renderer requestId tail gated to `errorCode === "internal"` (spec §2.2).** Added `errorCode?: string` to `IntentResult`. The renderer only emits "If this keeps happening, tell us with code …" when `errorCode` is missing or `"internal"`. Known catalog codes (amount_too_low, no_route, etc.) no longer leak a support id alongside their already-friendly text. All capabilities that called `interpretError` now pass `errorCode: interpreted.code` on their failed cards.
+- **Three previously-unreachable error codes now have regex patterns**: `unsupported_token`, `insufficient_allowance` (with a `Grant permission` → `/permissions` recovery), and `transfer_history_unavailable`. Each has a unit test.
+- **Three test failures fixed (root-caused, not papered over).** `tests/sendCapability.test.ts` was hitting a hard `abort("no usdc found for this chain")` because chainId=1 fiat detection requires `ETH_USDC` env that isn't set in tests; fix is one line at the top of the file. `tests/capability.dispatcher.test.ts`'s "default fallthrough" test was wrong from inception — `CapabilityRegistry.match()` never falls through to `defaultCapability`; the dispatcher itself calls `getDefault()` separately. Test rewritten to reflect the real contract.
+
+**Verified false positives (no action taken):**
+- "Sign-capability test regression suggests something behavioural shifted on the stubbed path" — false. The stubs were missing an env var that's required for the BE-side fiat detection that's been in place independently of the result-card work. Setting `ETH_USDC` made all paths green.
+
+**Stock per-step preview attachment (plan §5.2.4 deferred item, now closed).**
+`executeSignSteps` gained an optional `previews?: (IntentResult | undefined)[]` param. When provided, `previews[i]` attaches to step `i`'s `SigningRequestRecord` and its mini-app cache entry — so the FE's `?after=<prev>` chain shows distinct cards for "Approve USDC" → "Swap on BSC" → "Open AAPL long" instead of the same step-0 preview throughout. Backwards-compat: the legacy single `preview` arg is still respected when `previews` is omitted (attached to step 0 only). Wired up on the open and close paths (multi-step). Set-exits is single-step and stays on the legacy `preview` path.
+
+**Logging cleanup.**
+`notifyResolved` and `yieldReportJob.sendReport` now emit the canonical
+`step: 'started' | 'succeeded' | 'failed'` lifecycle with `durationMs` per
+CLAUDE.md. Each branch (success-with-tx, recovery-success, insufficient-USDC
+nudge, non-USDC insufficient, stock errors, generic errorCode, user-rejected)
+logs `succeeded` with a `mode` discriminator so call-graph traces stay
+readable.
+
+**Paperwork.**
+- New `helpers/errors/errorCatalog.md` — standalone reference table for every code with friendly text, regex, and recovery action; documents the renderer-side internal-only requestId-tail rule.
+- `redis.signingRequest.ts` carries a schema-evolution comment: optional fields like `preview` are JSON-roundtrip-compatible without bumping the `sign_req:` key prefix; only breaking shape changes warrant a version bump.
+
+**Test counts:** 98 passing across `errorCatalog`, `resultCardRender`, `sendCapability`, `capability.dispatcher`, `assistantResultRouter`, `loyalty.formula`, `loyalty.usecase`, `yieldPoolRanker`, `yieldRepository.window`. 0 failing. `npx tsc --noEmit` clean.
+
+## Result-card framework — P7+ gap closure — 2026-05-05
+
+Closes the deferred items called out in the P2–P6 entry below, plus the §9
+"files to modify" list (positions, loyalty, notifyResolved, daily report) and
+the §8 test fixtures.
+
+**What was done:**
+- **positionsCapability** — fully migrated to `result_card`. Stops round-tripping through the LLM tool loop and calls `IStockUseCase.listPositions` directly: structured fields beat hoping the LLM reformats a markdown table cleanly. Verbs: `positions_query`. Errors flow through `interpretError`. Empty result emits a `success` card ("No open stock positions") rather than a chat string. DI was switched to pass `(getStockUseCaseSync, isStockCapabilityDisabled)` so the capability honours the same disabled-gate the rest of the stock surface uses.
+- **loyaltyCapability** — both `/points` and `/leaderboard` migrated. Verb `loyalty_query`. Balance becomes a `primary` field; recent ledger entries surface as fields with the rest under the spoiler `details` block. Leaderboard highlights the caller's row via `emphasis: "primary"`. The pre-existing helpers (`buildPointsMessage`, `buildLeaderboardMessage`) were deleted — the renderer is now the single formatter.
+- **notifyResolved** (`helpers/notifyResolved.ts`) — migrated. Every branch now constructs an `IntentResult` and renders via `renderResultCard`, sending the resulting MarkdownV2 + keyboard through `tgApi.sendMessage`. Branches preserved exactly: success-with-decoded-ERC20, success-with-recovery, insufficient_token_balance USDC `/buy` nudge (callback payloads `buy:y:N` / `buy:n:N` are the buy-flow contract and are kept byte-identical), other rejection codes including the Aster `stockErrorMessage` table. The renderer's settlement-tx logic auto-derives the "View on explorer" button from `IntentResult.txHashes`, so the bespoke explorer-link helper is gone. **Recipient notification dispatch is unchanged** (plan §12 keeps that path out of scope).
+- **yieldReportJob.sendReport** — migrated. Verb `portfolio_summary`, `complexity: "complex"`. Top mover + total earned become primary fields; per-position rows go in `details`. The bespoke OpenAI prompt the job ran inline (2–4 sentence "warm yield update") was removed in favour of the framework's `IIntentInterpreter` — when env-gated on, the interpreter writes the same kind of italic note; when off, the user sees clean structured fields. The job retains markdown-fallback behaviour on Telegram parse errors.
+- **Env helper** — `helpers/env/resultCardEnv.ts` exposes `getResultCardEnv()` returning `{enabled, apiKey, model}`. DI's `getIntentInterpreter` no longer reads `process.env.*` directly; it composes `getResultCardEnv()`. Default model is `gpt-4o-mini`; override hierarchy is `RESULT_CARD_INTERPRETER_MODEL` → `OPENAI_MODEL` → default.
+- **Tests** (`tests/errorCatalog.test.ts`, `tests/resultCardRender.test.ts`) — 28 new tests. Renderer covers all 4 statuses, emphasis variants, MarkdownV2 escaping (parens / brackets / period / exclamation), max-fields and max-action limits, interpreter-note rendering, spoiler details + explorer button. Catalog covers regex precedence, `UnsupportedChainError` typed-instance fast path, recovery-action shape, internal fallback, and the "no codes/raw inside friendly" privacy invariant.
+- **Updated stale tests**: `tests/sendCapability.test.ts` happy-path now asserts `sign_calldata.preview` is set instead of a removed pre-sign chat artifact. `tests/capability.dispatcher.test.ts` buy:y deposit branch now asserts a `result_card` of verb `buy_onramp` with the SCA address as a field (replacing the stale `chat`-artifact + `buy:copy` callback assertions; that callback was removed during P5).
+
+**Why this approach:**
+- `positionsCapability` calling `IStockUseCase` directly (rather than building a structured-tool side-channel for the LLM loop) is a cheaper, more reliable migration than refactoring the assistant chat loop. Dedicated capability triggers (`/positions`) want dedicated formatters; the structured-tool router is only a real win for free-text queries that incidentally hit a tool.
+- For `notifyResolved`, going through `renderResultCard` instead of building a parallel formatter means the explorer-button keyboard, MarkdownV2 escaping, and spoiler details auto-collapse all behave identically to the rest of the framework. The tradeoff: post-tx receipts are now MarkdownV2 (was Markdown) — clients that don't render MarkdownV2 cleanly will see literal `\.` / `\!` escapes. Mitigated by the existing plain-text retry path on parse failure.
+- For the daily report, dropping the inline LLM call simplifies the job to "build structured fields, hand to the renderer, optionally let the framework's interpreter add a note". The ≤25-word interpreter cap is intentionally tighter than the prior "2–4 sentences"; this matches plan §4.2 ("write ONE sentence"). If users miss the longer prose we can re-tune the interpreter system prompt without touching the job.
+
+**New conventions (in addition to the P2–P6 entry below):**
+- Read-only query capabilities (positions, loyalty, balance/portfolio summary, history) emit `result_card{status:"success"}` even on the empty path. "No data" is an outcome and gets a card with a muted explanatory field; it is NOT a `chat`.
+- When migrating a non-renderer call site (jobs, helpers, etc.), prefer importing `renderResultCard` and sending via the existing transport (`bot.api.sendMessage` / `tgApi.sendMessage`) over plumbing the full `IArtifactRenderer` through. Keeps DI footprint small while still using the canonical formatter.
+- Env reads for the result-card stack go through `getResultCardEnv()` — do not sprinkle `process.env.RESULT_CARD_INTERPRETER_*` reads at call sites.
+
+**Remaining gaps (intentionally not closed in this phase):**
+- `assistantChatCapability` structured-tool-result routing (plan §5.2.5). The free-text LLM-tool-loop path still returns a single `reply: string`; rerouting tool outputs into `result_card` requires extending `IChatResponse` to surface tool-result data and adding a router that recognises known shapes. Plan §13 itself flags the alternative (heuristic markdown parsing) as fragile, so this stays deferred until the contract change is justified by user-visible drift. The `/positions` path is now covered by `PositionsCapability` directly; `/portfolio` and `/history` still go through the LLM loop.
+- `tests/sendCapability.test.ts`'s "simple happy path" and "token disambiguation round-trip" remain failing pre-existing tests (the dispatcher returns `handled: false` against the test's stubbed `IIntentUseCase` because the real send flow grew additional collaborators since the fixture was authored). Not introduced by this phase; flagged for a follow-up that re-stubs the fixture.
+
+## Result-card framework — P2–P6 capability migrations — 2026-05-05
+
+Per `be/constructions/2026-05-04-result-card-framework.md` §5–§8. Builds on the P1 foundations entry below.
+
+**What was done:**
+- New helpers: `helpers/format/humanFormat.ts` (formatTokenAmount, formatUsd, formatRelativeTime, formatDuration, truncateHash) and `capabilities/buildPreview.ts` (canonical constructor for `IntentResult{status:"preview"}`).
+- Preview plumbing extended through the sign-request transport: `Artifact.sign_calldata.preview?: IntentResult` → `SigningRequestRecord.preview?: IntentResult` (the existing redis cache JSON-serializes the field automatically — no serializer change needed). The Telegram renderer's `sign_calldata` case threads `artifact.preview` into the persisted record so the FE mini-app can read it via `GET /request/:id` and render the modal body via the FE `ResultCard` component (FE plan §3.1). Backwards-compat: when `preview` is undefined the mini-app falls back to today's raw to/value/calldata view.
+- Interpreter wired through DI (`getIntentInterpreter`). Env-gated behind `RESULT_CARD_INTERPRETER_ENABLED=true` AND `OPENAI_API_KEY`. Model resolves to `RESULT_CARD_INTERPRETER_MODEL ?? OPENAI_MODEL ?? "gpt-4o-mini"`. Cache keyed under `interp:` namespace via `makeRedisResponseCache`. The `RESULT_CARD_INTERPRETER_ENABLED` env replaces the P1 placeholder.
+- **swapCapability** (§5.2.1): dropped the BE-side `buildQuoteSummary` Telegram emit and the `buildCompletionMessage` chat reply. The pre-sign quote now lives on `preview` (set on the FIRST step's `SigningRequestRecord` only — subsequent steps chain silently via `fetchNextRequest`). Post-success returns `result_card{status:"success", verb:"swap"}` with `txHashes:[settlementHash]`, "Earn yield" + "Swap again" `nextActions`, `complexity:"complex"` whenever cross-chain or multi-step. Quote-failure path runs through `interpretError({verb:"swap"})`. Mid-flow rejected/expired/no-tx-hash returns are now `result_card{status:"failed"}` cards with earlier `txHashes` preserved.
+- **sendCapability** (§5.2.2): `buildRequestBody` failures route through `interpretError`. Pre-sign Telegram chat emits removed (auto-sign "Check the Aegis mini app…", manual-sign `buildConfirmationMessage`/`buildFinalSchemaConfirmation`). Both auto-sign and manual-sign `sign_calldata` artifacts now carry `preview` ("Send 5 USDC to @alice"). The renderer's standard `Tap below to execute silently. / Tap below to review and sign.` prompt is the only Telegram-side message before signing. **Post-tx success/failure UX is owned by `notifyResolved` (recipient notification path), not by sendCapability.run() — that lives in `helpers/notifyResolved.ts` and is intentionally out of scope for this phase. See "Open follow-ups" below.**
+- **yieldCapability** (§5.2.3): deposit/withdraw/rebalance pre-sign Telegram quote emits removed; previews attached to first step in each flow via a new `preview?: IntentResult` param threaded through `executeSignSteps`. Success returns `result_card` with verbs `yield_deposit` (simple), `yield_withdraw` (simple), and `yield_rebalance` (complex with `interpreterContext: { fromProtocol, toProtocol, fromApy, toApy, sizeUsd }`). Position-vanished and signing-unavailable paths render as `result_card{status:"failed"}`. Mid-flow rejected/expired returns become `result_card`s. **Daily report (`yieldReportJob.sendReport`) NOT migrated** — the job sends Telegram messages directly via the bot rather than through the artifact renderer; routing it through the renderer requires DI plumbing that's out of scope here.
+- **buyCapability** (§5.2.4): "smart account not set up" failure → `result_card{status:"failed", verb:"buy_onramp"}`. Deposit-address path (today a markdown chat) → `result_card{status:"pending", verb:"buy_onramp"}` with the address as a body field and a "Buy with card instead" callback nextAction. The card-onramp `mini_app` artifact is unchanged (it's a mini-app handoff, not a sign request, so there's no preview to attach).
+- **stockCapability** (§5.2.4): top-level catch routes through `interpretError({verb})` with `verbForKind` mapping. Open/close/exits success → `result_card` with verbs `stock_buy` / `stock_close` / `stock_set_exits`; open is `complexity:"complex"` so the interpreter can frame "you now own ~X shares". Disambiguation prompts ("Multiple positions open — pick one") stay as `kind:"chat"` since those are ask-style, not terminal outcomes. Mid-flow rejected/expired in `executeSignSteps` now emit `result_card{status:"failed"}`. **Stock previews on sign requests NOT attached** — each Aster step has its own `step.label` (approve → swap → open) and the previews would need per-step labelling; deferred. Recovery flow's mini-app handoff is unchanged.
+- **assistantChatCapability** (§5.2.5): NOT migrated. The capability returns `IChatResponse{reply: string}` from the LLM tool loop, with no structured-tool-result side-channel. The plan's heuristic-based prose-vs-structured router would have to parse the markdown reply, which §13 itself flags as fragile. Documented in-file as a `TODO` deferred until `IChatResponse` exposes structured tool output.
+- Removed stale helpers: `swapCapability.formatHashes`, `yieldCapability.{buildDepositQuoteSummary, buildWithdrawQuoteSummary, buildDepositSuccessMessage, buildRebalanceQuoteSummary, buildRebalanceSuccessMessage, buildWithdrawSuccessMessage}`, `stockCapability.formatHashes`. Stale imports cleaned in send (dropped `buildConfirmationMessage`, `buildFinalSchemaConfirmation`, `populateFinalSchema` from `send.messages`) and stock (dropped `getExplorerTxUrl` import — explorer link is now derived by the renderer from `IntentResult.txHashes`).
+- Status emoji map for non-success outcomes is now consistent across the codebase via the renderer (`pending → ⏳`, `failed → ⚠️`, `success → ✅`); capabilities supply `status` only.
+
+**Why this approach:**
+- Threading `preview` through the existing `SigningRequestRecord` (rather than adding a parallel cache) means zero migration cost: every sign request that already had a record gains the optional field, and JSON serialization "just works" because the redis cache stores `JSON.stringify(record)`.
+- `executeSignSteps` in yield gained an `opts.preview` param rather than a per-step preview array because the mini-app modal only ever shows the user one preview screen — subsequent FE-chained steps execute silently. Doing it any other way would mislabel the modal during chained execution.
+- For swap, attributing `preview` to step 0 (typically the approve leg in same-chain mode, or the first Relay step in cross-chain) and not later steps means the user sees a coherent "Swap 5 USDC for ~0.06 AVAX" summary even though the underlying tx is an ERC-20 approve. The plan accepts this in §5.1 — the modal preview describes the user's intent, not the leg's calldata.
+- Pre-execution validation aborts (e.g. `swapCapability.abort("Unknown chain")`, `stockCapability.usageHint`) intentionally stay on `kind:"chat"`. Plan §7 P7 says the terminal-must-be-result_card rule applies to "outcomes"; ask-style validation prompts and disambiguation menus aren't outcomes. The boundary is: if the user is being asked to choose/correct, it's `chat`; if execution actually happened or definitively didn't, it's `result_card`.
+- The interpreter's DI is `getIntentInterpreter() → IIntentInterpreter | undefined`, returning undefined when env-gated off. The renderer treats undefined as "interpreter off" and skips the optional italic note — no separate "is interpreter enabled" flag needs to flow through the call sites.
+
+**New conventions (do not break):**
+- Capabilities that emit `sign_calldata` for an ERC-20 / native spend MUST attach `preview: buildPreview({...})` so the mini-app modal shows a clean summary instead of raw calldata. Don't route preview construction through ad-hoc strings — always go through `buildPreview`.
+- `complexity:"complex"` is reserved for outcomes that genuinely benefit from a one-sentence LLM gloss: cross-chain swaps, multi-step swaps, yield rebalance, stock buy. Single-token sends, same-chain single-step swaps, simple deposits/withdrawals are `"simple"` so the interpreter never fires for them. New capabilities default to `"simple"` and earn `"complex"` only when the field set wouldn't be self-explanatory to a teenager.
+- Pre-execution `abort` messages stay as `kind:"chat"`. Post-execution outcomes are always `result_card`. If you find yourself adding a `chat` artifact in `run()` and not in `collect()`, you almost certainly want a `result_card` instead.
+- For multi-step sign-request flows (swap, yield deposit/withdraw/rebalance, stock open/close), the preview attaches to the FIRST `SigningRequestRecord` only. Subsequent steps' `preview` MUST be `undefined` so the FE doesn't re-render the modal mid-chain.
+- New result-card verbs go on the `IntentVerb` union in `resultCard.types.ts`. `verbForKind` in stockCapability is the canonical mapping from `StockParams.kind` to `IntentVerb`; mirror its pattern when other capabilities grow internal-kind unions.
+
+**Open follow-ups (deferred, with rationale):**
+- `notifyResolved` post-tx success/failure messages (used by send's resolution path) still emit raw text. Migrating it requires plumbing the artifact renderer into the recipient-notification path; not done here because send's own pre-sign UX is the user-visible swing in this phase.
+- `yieldReportJob.sendReport` daily yield report — still emits markdown directly via the bot. Migrating it cleanly requires routing the job through the artifact renderer (or building a renderer-equivalent for jobs); deferred.
+- Stock per-step `preview` attachment (Aster approve → swap → open). The label set ("approve USDC", "swap to USDC.E on BSC", "open AAPL long") is per-step and would need a richer `executeSignSteps` contract to expose it on the modal. Deferred; the existing per-step `step.label` continues to feed `record.description`.
+- `assistantChatCapability` structured-tool-result routing. Requires extending `IChatResponse` to expose underlying tool outputs; the plan itself flags the alternative (heuristic markdown-table parsing) as fragile. Deferred until the contract change lands.
+- Snapshot tests for the renderer (plan §7 P1) and pattern tests for `errorCatalog` (§7 P1). The repo has no `be/tests/` directory yet — will add alongside the test-runner setup, not blocked on this phase.
+
+## Result-card framework — P1 foundations — 2026-05-04
+
+Per `be/constructions/2026-05-04-result-card-framework.md` §1–§4. **No capability migrated yet** — this PR is opt-in scaffolding. Existing `kind: "chat"` terminal replies are untouched.
+
+**What was done:**
+- New `IntentResult` shape and `result_card` artifact variant (`use-cases/interface/input/resultCard.types.ts`, plus a new branch in `Artifact`). `IntentResult` carries `status × verb × headline × fields × txHashes? × nextActions? × complexity? × interpreterContext? × details? × requestId?`.
+- Renderer (`adapters/.../artifactRenderer/resultCard.render.ts` + `resultCard.escape.ts`) is the single place that touches Telegram MarkdownV2: `escapeMd` runs over every capability-supplied substring; `renderResultCard` builds `text + keyboard + parseMode`. Layout: status emoji + headline, body fields, optional italic interpreter note, "What's next" line, MarkdownV2 spoiler `||...||` for details + tx hashes.
+- `TelegramArtifactRenderer.render` gained a `case "result_card"`: invokes the optional `IIntentInterpreter` only when `complexity === "complex"`, swallows interpreter failures, never blocks the receipt. `preview`-status cards are dropped on the Telegram side (they belong to the mini-app).
+- Telegram input handler (`telegram/handler.ts`) recognises `cmd:<text>` callback data on the global callback router: strips the prefix and re-dispatches as `{ kind: "text", text }`. This is what makes a result card's "command" `nextAction` button tappable end-to-end.
+- New port `IIntentInterpreter` + OpenAI adapter (`adapters/.../intentInterpreter/openai.intentInterpreter.ts`). 2-second timeout with `Promise.race`, optional `RedisResponseCache` keyed by `sha256(verb|status|fields|context)` with 5-min TTL, sentence clamped to ≤25 words. **Not wired into DI yet** — P1 ships with the renderer's `intentInterpreter` constructor arg undefined, equivalent to `RESULT_CARD_INTERPRETER_ENABLED=false` in the plan. Subsequent phases will wire it.
+
+**Why this approach (vs. alternatives):**
+- The renderer runs the interpreter (not capabilities) so capabilities cannot "forget" the LLM pass — they only set `complexity: "complex"` and the framework does the rest.
+- Slash-command relay via `cmd:` callback data was the only Telegram-supported way to make a slash-command-style "What's next" button tappable; Telegram doesn't support a button that types a `/cmd` for the user, so we round-trip through callbacks.
+- `preview` is part of the same `IntentResult` shape rather than a separate `PreviewCard` type because the FE mini-app will render it via the same component (FE plan §3.1) — splitting types would force two parallel renderers for the same grammar.
+
+**Conventions introduced (do not break):**
+- All terminal capability outcomes that go to the user MUST eventually become `kind: "result_card"` (subsequent phases). `kind: "chat"` is reserved for intermediate ask-prompts. P1 doesn't enforce this — phases P2–P6 do.
+- Capabilities never write MarkdownV2. They hand the renderer plain strings; `escapeMd` runs in the renderer.
+- Capabilities never inline error strings from caught exceptions. They MUST call `interpretError(err, { verb, requestId })` from `helpers/errors/errorCatalog.ts` and project the result into `IntentResult.fields` + `nextActions`.
+- New verbs go on the `IntentVerb` union in `resultCard.types.ts`. New error codes go on `ErrorCode` in `errorCatalog.ts` AND its `PATTERNS` table.
+- New log scopes: `resultCardRender`, `errorCatalog`, `intentInterpreter`.
+
 ## Yield auto-rebalance (minimal) — 2026-05-04
 
 Implemented Part B of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md`.

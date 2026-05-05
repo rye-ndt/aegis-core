@@ -1,11 +1,12 @@
-import { InlineKeyboard } from "grammy";
 import { toRaw } from "../../../../helpers/bigint";
 import {
   RELAY_SUPPORTED_CHAIN_IDS,
-  getExplorerTxUrl,
   getUsdcAddress,
   resolveChainSymbol,
 } from "../../../../helpers/chainConfig";
+import { interpretError } from "../../../../helpers/errors/errorCatalog";
+import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
+import { buildPreview } from "./buildPreview";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
@@ -187,10 +188,11 @@ export class SwapCapability implements Capability<SwapParams> {
         { userId: ctx.userId, err: toolResult.error },
         "relay quote failed",
       );
-      return {
-        kind: "chat",
-        text: `Swap failed: ${toolResult.error ?? "unknown error"}`,
-      };
+      const interpreted = interpretError(toolResult.error ?? "unknown error", {
+        verb: "swap",
+        requestId: ctx.conversationId ?? newUuid(),
+      });
+      return swapFailedCard(interpreted, params);
     }
     const data = toolResult.data as RelaySwapToolOutputData;
     const txs = data.txs;
@@ -203,12 +205,6 @@ export class SwapCapability implements Capability<SwapParams> {
       },
       "relay quote received",
     );
-
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: this.buildQuoteSummary(params, data, txs.length),
-    });
 
     // Sequence each transaction through the mini-app session-key flow. Only
     // the first step gets a Telegram button; subsequent steps are queued in
@@ -243,6 +239,11 @@ export class SwapCapability implements Capability<SwapParams> {
       // an approve) to avoid double-counting against the delegation row.
       const isLastStep = i === txs.length - 1;
       const attributesSpend = isLastStep && !params.fromToken.isNative;
+      // Preview lives only on the first step's record — the mini-app modal
+      // shows it once at the start of the session; subsequent steps chain
+      // silently via fetchNextRequest.
+      const previewForStep =
+        i === 0 ? buildSwapPreview(params, data, txs.length) : undefined;
       const record: SigningRequestRecord = {
         id: requestId,
         userId: ctx.userId,
@@ -259,6 +260,7 @@ export class SwapCapability implements Capability<SwapParams> {
           ? params.fromToken.address.toLowerCase()
           : undefined,
         amountRaw: attributesSpend ? params.amountRaw : undefined,
+        preview: previewForStep,
       };
       await this.deps.signingRequestUseCase.create(record);
 
@@ -276,6 +278,7 @@ export class SwapCapability implements Capability<SwapParams> {
         chainId: params.fromChainId,
         createdAt: now,
         expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+        preview: previewForStep,
       };
 
       if (i === 0) {
@@ -306,48 +309,39 @@ export class SwapCapability implements Capability<SwapParams> {
 
       if (resolution.status === "rejected") {
         log.warn(
-          {
-            step: "failed",
-            userId: ctx.userId,
-            stepIndex: i,
-            reason: "rejected",
-          },
+          { step: "failed", userId: ctx.userId, stepIndex: i, reason: "rejected" },
           "swap step rejected",
         );
-        return {
-          kind: "chat",
-          text: `❌ Swap aborted at step ${i + 1}/${txs.length}. Earlier steps: ${formatHashes(txHashes)}`,
-        };
+        return midFlowSwapCard({
+          headline: `Swap aborted at step ${i + 1} of ${txs.length}`,
+          params,
+          earlierHashes: txHashes,
+          requestId: ctx.conversationId ?? newUuid(),
+        });
       }
       if (resolution.status === "expired") {
         log.warn(
-          {
-            step: "failed",
-            userId: ctx.userId,
-            stepIndex: i,
-            reason: "expired",
-          },
+          { step: "failed", userId: ctx.userId, stepIndex: i, reason: "expired" },
           "swap step timed out",
         );
-        return {
-          kind: "chat",
-          text: `⏱️ Swap timed out at step ${i + 1}/${txs.length}. Earlier steps: ${formatHashes(txHashes)}`,
-        };
+        return midFlowSwapCard({
+          headline: `Swap timed out at step ${i + 1} of ${txs.length}`,
+          params,
+          earlierHashes: txHashes,
+          requestId: ctx.conversationId ?? newUuid(),
+        });
       }
       if (!resolution.txHash) {
         log.warn(
-          {
-            step: "failed",
-            userId: ctx.userId,
-            stepIndex: i,
-            reason: "no_tx_hash",
-          },
+          { step: "failed", userId: ctx.userId, stepIndex: i, reason: "no_tx_hash" },
           "swap step approved but missing txHash",
         );
-        return {
-          kind: "chat",
-          text: `⚠️ Step ${i + 1} approved with no tx hash. Please check your wallet history.`,
-        };
+        return midFlowSwapCard({
+          headline: `Step ${i + 1} approved with no transaction hash`,
+          params,
+          earlierHashes: txHashes,
+          requestId: ctx.conversationId ?? newUuid(),
+        });
       }
       log.info(
         {
@@ -383,22 +377,38 @@ export class SwapCapability implements Capability<SwapParams> {
       "swap complete",
     );
 
-    // Build a "View on explorer" button for the final (settlement) tx, which
-    // is the last hash on the origin chain. Mirrors /send's notifyResolved UX.
-    const finalHash = txHashes[txHashes.length - 1];
-    const explorerUrl = finalHash
-      ? getExplorerTxUrl(params.fromChainId, finalHash)
-      : null;
-    const keyboard = explorerUrl
-      ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
-      : undefined;
-
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: this.buildCompletionMessage(params, data, txHashes),
-      keyboard,
+    // Result-card framework: the renderer derives the explorer button from
+    // `txHashes` (last entry = settlement tx) and "What's next" buttons
+    // from `nextActions`. No manual InlineKeyboard.
+    const sameChain = params.fromChainId === params.toChainId;
+    const out =
+      data.outputAmountFormatted ??
+      (data.outputAmount ? `${data.outputAmount} raw` : "—");
+    const finalHash = txHashes[txHashes.length - 1]!;
+    const result: IntentResult = {
+      status: "success",
+      verb: "swap",
+      headline: `You swapped ${params.amountHuman} ${params.fromToken.symbol} into ~${out} ${params.toToken.symbol}`,
+      fields: [
+        { label: "You sent", value: `${params.amountHuman} ${params.fromToken.symbol}` },
+        { label: "You got", value: `~${out} ${params.toToken.symbol}`, emphasis: "primary" },
+      ],
+      txHashes: [{ hash: finalHash, chainId: params.fromChainId }],
+      nextActions: [
+        { label: "Earn yield on this", kind: "command", payload: "/yield" },
+        { label: "Swap again", kind: "command", payload: "/swap" },
+      ],
+      complexity: sameChain && txHashes.length === 1 ? "simple" : "complex",
+      interpreterContext:
+        !sameChain || txHashes.length > 1
+          ? {
+              fromChainId: params.fromChainId,
+              toChainId: params.toChainId,
+              steps: txHashes.length,
+            }
+          : undefined,
     };
+    return { kind: "result_card", result };
   }
 
   // ── Compile phase ────────────────────────────────────────────────────────
@@ -716,52 +726,95 @@ export class SwapCapability implements Capability<SwapParams> {
     return this.finishCompileOrResolve(ctx, state);
   }
 
-  // ── Messaging helpers ────────────────────────────────────────────────────
-
-  private buildQuoteSummary(
-    params: SwapParams,
-    data: RelaySwapToolOutputData,
-    stepCount: number,
-  ): string {
-    const sameChain = params.fromChainId === params.toChainId;
-    const header = sameChain ? "*Swap quote*" : "*Cross-chain swap quote*";
-    const out =
-      data.outputAmountFormatted ??
-      (data.outputAmount ? `${data.outputAmount} raw` : "—");
-    const lines = [
-      header,
-      "",
-      `From: ${params.amountHuman} *${params.fromToken.symbol}* (chain ${params.fromChainId})`,
-      `To:   ~${out} *${params.toToken.symbol}* (chain ${params.toChainId})`,
-      `Steps: ${stepCount}`,
-      "",
-      stepCount === 1
-        ? "Tap the button below to execute the swap automatically."
-        : "Tap the button below — all steps will be signed in one mini-app session.",
-    ];
-    return lines.join("\n");
-  }
-
-  private buildCompletionMessage(
-    params: SwapParams,
-    data: RelaySwapToolOutputData,
-    txHashes: string[],
-  ): string {
-    const out =
-      data.outputAmountFormatted ??
-      (data.outputAmount ? `${data.outputAmount} raw` : "—");
-    const lines = [
-      "*Swap complete*",
-      "",
-      `Sent:     ${params.amountHuman} *${params.fromToken.symbol}*`,
-      `Received: ~${out} *${params.toToken.symbol}*`,
-    ];
-    return lines.join("\n");
-  }
-
   private abort(message: string): CollectResult<SwapParams> {
+    // Pre-execution validation messages stay as `chat` — they're conversational
+    // setup errors (e.g. "Unknown chain"), not capability outcomes. The
+    // terminal-must-be-result_card rule applies to post-resolve outcomes.
     return { kind: "terminal", artifact: { kind: "chat", text: message } };
   }
+}
+
+function buildSwapPreview(
+  params: SwapParams,
+  data: RelaySwapToolOutputData,
+  stepCount: number,
+): IntentResult {
+  const sameChain = params.fromChainId === params.toChainId;
+  const out =
+    data.outputAmountFormatted ??
+    (data.outputAmount ? `${data.outputAmount} raw` : "—");
+  return buildPreview({
+    verb: "swap",
+    headline: sameChain
+      ? `Swap ${params.amountHuman} ${params.fromToken.symbol} for ~${out} ${params.toToken.symbol}`
+      : `Swap ${params.amountHuman} ${params.fromToken.symbol} for ~${out} ${params.toToken.symbol} (cross-chain)`,
+    fields: [
+      { label: "You send", value: `${params.amountHuman} ${params.fromToken.symbol}` },
+      { label: "You get", value: `~${out} ${params.toToken.symbol}`, emphasis: "primary" },
+      ...(stepCount > 1
+        ? [{ label: "Steps", value: `${stepCount}`, emphasis: "muted" as const }]
+        : []),
+    ],
+  });
+}
+
+function swapFailedCard(
+  interpreted: ReturnType<typeof interpretError>,
+  params: SwapParams,
+): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb: "swap",
+    headline: "Couldn't swap right now",
+    fields: [
+      { label: "Reason", value: interpreted.friendly },
+      {
+        label: "Wanted",
+        value: `${params.amountHuman} ${params.fromToken.symbol} → ${params.toToken.symbol}`,
+        emphasis: "muted",
+      },
+    ],
+    nextActions: interpreted.recovery
+      ? [
+          {
+            label: interpreted.recovery.label,
+            kind: interpreted.recovery.kind,
+            payload: interpreted.recovery.payload,
+          },
+          { label: "Try again", kind: "command", payload: "/swap" },
+        ]
+      : [{ label: "Try again", kind: "command", payload: "/swap" }],
+    requestId: interpreted.requestId,
+    errorCode: interpreted.code,
+  };
+  return { kind: "result_card", result };
+}
+
+function midFlowSwapCard(input: {
+  headline: string;
+  params: SwapParams;
+  earlierHashes: string[];
+  requestId: string;
+}): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb: "swap",
+    headline: input.headline,
+    fields: [
+      {
+        label: "Tried",
+        value: `${input.params.amountHuman} ${input.params.fromToken.symbol} → ${input.params.toToken.symbol}`,
+        emphasis: "muted",
+      },
+    ],
+    txHashes: input.earlierHashes.map((h) => ({
+      hash: h,
+      chainId: input.params.fromChainId,
+    })),
+    nextActions: [{ label: "Try again", kind: "command", payload: "/swap" }],
+    requestId: input.requestId,
+  };
+  return { kind: "result_card", result };
 }
 
 function toPlain(state: SessionState): Record<string, unknown> {
@@ -771,11 +824,6 @@ function toPlain(state: SessionState): Record<string, unknown> {
 function isUsdcSymbol(s?: string): boolean {
   if (!s) return false;
   return s.trim().toUpperCase() === "USDC";
-}
-
-function formatHashes(hashes: string[]): string {
-  if (hashes.length === 0) return "none";
-  return hashes.map((h) => `\`${h}\``).join(", ");
 }
 
 /**

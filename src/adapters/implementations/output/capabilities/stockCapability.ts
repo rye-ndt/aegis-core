@@ -1,10 +1,14 @@
 import { InlineKeyboard } from "grammy";
 import { ASTER_ENV } from "../../../../helpers/env/asterEnv";
-import { getExplorerTxUrl } from "../../../../helpers/chainConfig";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
+import { interpretError } from "../../../../helpers/errors/errorCatalog";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
+import type {
+  IntentResult,
+  IntentVerb,
+} from "../../../../use-cases/interface/input/resultCard.types";
 import type {
   Artifact,
   Capability,
@@ -21,6 +25,7 @@ import type { ISigningRequestUseCase } from "../../../../use-cases/interface/inp
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
+import { buildPreview } from "./buildPreview";
 
 const log = createLogger("stockCapability");
 
@@ -141,10 +146,10 @@ export class StockCapability implements Capability<StockParams> {
 
   async run(params: StockParams, ctx: CapabilityCtx): Promise<Artifact> {
     if (this.deps.isStockCapabilityDisabled?.()) {
-      return {
-        kind: "chat",
-        text: "Stock trading is temporarily unavailable. Please try again later.",
-      };
+      return stockSimpleFailedCard(
+        verbForKind(params.kind),
+        "Stock trading is temporarily unavailable. Please try again later.",
+      );
     }
     try {
       if (params.kind === "open") return await this.runOpen(ctx, params);
@@ -156,7 +161,29 @@ export class StockCapability implements Capability<StockParams> {
         { step: "failed", err: msg, userId: ctx.userId, kind: params.kind },
         "stock run failed",
       );
-      return { kind: "chat", text: `Stock action failed: ${msg}` };
+      const interpreted = interpretError(err, {
+        verb: verbForKind(params.kind),
+        requestId: ctx.conversationId ?? newUuid(),
+      });
+      const result: IntentResult = {
+        status: "failed",
+        verb: verbForKind(params.kind),
+        headline: "Stock action failed",
+        fields: [{ label: "Reason", value: interpreted.friendly }],
+        nextActions: interpreted.recovery
+          ? [
+              {
+                label: interpreted.recovery.label,
+                kind: interpreted.recovery.kind,
+                payload: interpreted.recovery.payload,
+              },
+            ]
+          : undefined,
+        complexity: "simple",
+        requestId: interpreted.requestId,
+    errorCode: interpreted.code,
+      };
+      return { kind: "result_card", result };
     }
   }
 
@@ -199,6 +226,33 @@ export class StockCapability implements Capability<StockParams> {
       text: plan.quoteSummary,
     });
 
+    const verb = "stock_buy" as const;
+    const headlineForOpen = (stepLabel: string) =>
+      `${stepLabel} — ${params.verb === "short" ? "Short" : "Buy"} $${params.amountUsd} ${plan.symbol}`;
+    const previewsForOpen = plan.steps.map((s, i) =>
+      buildPreview({
+        verb,
+        headline:
+          plan.steps.length === 1
+            ? params.verb === "short"
+              ? `Short $${params.amountUsd} of ${plan.symbol}`
+              : `Buy $${params.amountUsd} of ${plan.symbol}`
+            : headlineForOpen(s.label),
+        fields: [
+          { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+          { label: "Size", value: `$${params.amountUsd}` },
+          ...(plan.steps.length > 1
+            ? [
+                {
+                  label: "Step",
+                  value: `${i + 1} of ${plan.steps.length}`,
+                  emphasis: "muted" as const,
+                },
+              ]
+            : []),
+        ],
+      }),
+    );
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.steps,
@@ -207,6 +261,7 @@ export class StockCapability implements Capability<StockParams> {
         plan.steps.length === 1
           ? "Tap below to execute the trade automatically."
           : `Tap below — all ${plan.steps.length} steps will be signed in one mini-app session.`,
+      previews: previewsForOpen,
     });
 
     if (result.aborted) {
@@ -283,24 +338,33 @@ export class StockCapability implements Capability<StockParams> {
 
     const finalHash = result.txHashes[result.txHashes.length - 1];
     const venueChainId = plan.steps[plan.steps.length - 1]?.chainId;
-    const explorerUrl =
-      finalHash && venueChainId
-        ? getExplorerTxUrl(venueChainId, finalHash)
-        : null;
-    const keyboard = explorerUrl
-      ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
-      : undefined;
-
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: [
-        `*${params.verb === "short" ? "Short" : "Long"} ${plan.symbol} opened*`,
-        "",
-        `Notional: $${params.amountUsd}`,
-      ].join("\n"),
-      keyboard,
+    const sideLabel = params.verb === "short" ? "Short" : "Long";
+    const successCard: IntentResult = {
+      status: "success",
+      verb: "stock_buy",
+      headline: `You opened a ${sideLabel.toLowerCase()} position on ${plan.symbol}`,
+      fields: [
+        { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+        { label: "Side", value: sideLabel },
+        { label: "Notional", value: `$${params.amountUsd}` },
+      ],
+      txHashes:
+        finalHash && venueChainId
+          ? [{ hash: finalHash, chainId: venueChainId }]
+          : undefined,
+      nextActions: [
+        { label: "Set TP", kind: "command", payload: `/stock tp ${plan.symbol}` },
+        { label: "Set SL", kind: "command", payload: `/stock sl ${plan.symbol}` },
+        { label: "Positions", kind: "command", payload: "/positions" },
+      ],
+      complexity: "complex",
+      interpreterContext: {
+        symbol: plan.symbol,
+        side: sideLabel,
+        notionalUsd: params.amountUsd,
+      },
     };
+    return { kind: "result_card", result: successCard };
   }
 
   // ── close ────────────────────────────────────────────────────────────────
@@ -316,10 +380,10 @@ export class StockCapability implements Capability<StockParams> {
         params.symbol,
       );
       if (resolution.kind === "none") {
-        return {
-          kind: "chat",
-          text: `No open ${params.symbol} position to close.`,
-        };
+        return stockSimpleFailedCard(
+          "stock_close",
+          `No open ${params.symbol} position to close.`,
+        );
       }
       if (resolution.kind === "many") {
         const kb = new InlineKeyboard();
@@ -349,11 +413,33 @@ export class StockCapability implements Capability<StockParams> {
       parseMode: "Markdown",
       text: plan.quoteSummary,
     });
+    const previewsForClose = plan.steps.map((s, i) =>
+      buildPreview({
+        verb: "stock_close",
+        headline:
+          plan.steps.length === 1
+            ? `Close your ${plan.symbol} position`
+            : `${s.label} — Close ${plan.symbol}`,
+        fields: [
+          { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+          ...(plan.steps.length > 1
+            ? [
+                {
+                  label: "Step",
+                  value: `${i + 1} of ${plan.steps.length}`,
+                  emphasis: "muted" as const,
+                },
+              ]
+            : []),
+        ],
+      }),
+    );
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.steps,
       buttonText: "Execute Close",
       promptText: "Tap below to close the position.",
+      previews: previewsForClose,
     });
     if (result.aborted) return result.artifact;
 
@@ -423,23 +509,32 @@ export class StockCapability implements Capability<StockParams> {
 
     const closeHash = result.txHashes[result.txHashes.length - 1];
     const closeChainId = plan.steps[plan.steps.length - 1]?.chainId;
-    const explorerUrl =
-      closeHash && closeChainId
-        ? getExplorerTxUrl(closeChainId, closeHash)
-        : null;
-    const keyboard = explorerUrl
-      ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
-      : undefined;
-    const lines = [`*${plan.symbol} closed.*`];
+    const fields: IntentResult["fields"] = [
+      { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+    ];
     if (returnTxHashes.length > 0) {
-      lines.push("", "Funds returned to your home chain.");
+      fields.push({
+        label: "Funds",
+        value: "Returned to your home chain",
+        emphasis: "muted",
+      });
     }
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: lines.join("\n"),
-      ...(keyboard ? { keyboard } : {}),
+    const successCard: IntentResult = {
+      status: "success",
+      verb: "stock_close",
+      headline: `You closed your ${plan.symbol} position`,
+      fields,
+      txHashes:
+        closeHash && closeChainId
+          ? [{ hash: closeHash, chainId: closeChainId }]
+          : undefined,
+      nextActions: [
+        { label: "Positions", kind: "command", payload: "/positions" },
+        { label: "Buy more", kind: "command", payload: "/stock" },
+      ],
+      complexity: "simple",
     };
+    return { kind: "result_card", result: successCard };
   }
 
   // ── sl / tp ──────────────────────────────────────────────────────────────
@@ -455,10 +550,10 @@ export class StockCapability implements Capability<StockParams> {
         params.symbol,
       );
       if (resolution.kind === "none") {
-        return {
-          kind: "chat",
-          text: `No open ${params.symbol} position to update.`,
-        };
+        return stockSimpleFailedCard(
+          "stock_set_exits",
+          `No open ${params.symbol} position to update.`,
+        );
       }
       if (resolution.kind === "many") {
         const kb = new InlineKeyboard();
@@ -493,13 +588,40 @@ export class StockCapability implements Capability<StockParams> {
       steps: plan.steps,
       buttonText: "Update Exits",
       promptText: "Tap below to update SL/TP.",
+      preview: buildPreview({
+        verb: "stock_set_exits",
+        headline:
+          params.verb === "sl"
+            ? `Set stop-loss for ${plan.symbol} at $${params.priceUsd}`
+            : `Set take-profit for ${plan.symbol} at $${params.priceUsd}`,
+        fields: [
+          { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+          {
+            label: params.verb === "sl" ? "Stop-loss" : "Take-profit",
+            value: `$${params.priceUsd}`,
+          },
+        ],
+      }),
     });
     if (result.aborted) return result.artifact;
 
-    return {
-      kind: "chat",
-      text: `${plan.symbol} exits updated.`,
+    const successCard: IntentResult = {
+      status: "success",
+      verb: "stock_set_exits",
+      headline: `Updated ${params.verb.toUpperCase()} on ${plan.symbol}`,
+      fields: [
+        { label: "Symbol", value: plan.symbol, emphasis: "primary" },
+        {
+          label: params.verb === "sl" ? "Stop loss" : "Take profit",
+          value: `$${params.priceUsd}`,
+        },
+      ],
+      nextActions: [
+        { label: "Positions", kind: "command", payload: "/positions" },
+      ],
+      complexity: "simple",
     };
+    return { kind: "result_card", result: successCard };
   }
 
   // ── sign-step loop (mirrors yieldCapability.executeSignSteps) ──────────
@@ -519,6 +641,18 @@ export class StockCapability implements Capability<StockParams> {
     /** Optional `planKind` stamped on every signing record so notifyResolved
      * can branch the success UX (recovery / return). */
     planKind?: "recovery";
+    /** Attached to the FIRST step's signing-request only — modal-shown summary. */
+    preview?: IntentResult;
+    /**
+     * Per-step preview overrides. When provided and `previews[i]` is set, it
+     * is attached to step `i`'s signing record (and its mini-app cache entry
+     * for chained steps). Falls back to `preview` for i===0 when this array
+     * is omitted, preserving the legacy single-preview contract. Passing
+     * `previews` is the way to surface "approve USDC" → "swap on BSC" →
+     * "open AAPL long" labels distinctly inside the mini-app modal as the FE
+     * chains through `?after=<prev>`.
+     */
+    previews?: (IntentResult | undefined)[];
   }): Promise<
     | {
         aborted: true;
@@ -529,7 +663,7 @@ export class StockCapability implements Capability<StockParams> {
       }
     | { aborted: false; txHashes: string[] }
   > {
-    const { ctx, steps, buttonText, promptText, continueSession, planKind } = opts;
+    const { ctx, steps, buttonText, promptText, continueSession, planKind, preview, previews } = opts;
     const signing = this.deps.signingRequestUseCase;
     const chatId = Number(ctx.channelId);
     const txHashes: string[] = [];
@@ -541,6 +675,8 @@ export class StockCapability implements Capability<StockParams> {
       const label =
         steps.length === 1 ? step.label : `${step.label} (${i + 1}/${steps.length})`;
 
+      const previewForStep =
+        previews?.[i] ?? (i === 0 && !continueSession ? preview : undefined);
       const record: SigningRequestRecord = {
         id: requestId,
         userId: ctx.userId,
@@ -555,6 +691,7 @@ export class StockCapability implements Capability<StockParams> {
         autoSign: true,
         tokenAddress: step.spendTokenAddress,
         amountRaw: step.spendAmountRaw,
+        preview: previewForStep,
         ...(planKind ? { planKind } : {}),
       };
       await signing.create(record);
@@ -571,6 +708,7 @@ export class StockCapability implements Capability<StockParams> {
         chainId: step.chainId,
         createdAt: now,
         expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+        preview: previewForStep,
       };
 
       if (i === 0 && !continueSession) {
@@ -606,16 +744,10 @@ export class StockCapability implements Capability<StockParams> {
         const userMessage =
           resolution.errorMessage ??
           (errorCode === "user_rejected"
-            ? `You aborted at step ${i + 1}/${steps.length}.`
-            : `Step ${i + 1}/${steps.length} failed${errorCode ? ` (${errorCode})` : ""}.`);
+            ? `You aborted at step ${i + 1} of ${steps.length}.`
+            : `Step ${i + 1} of ${steps.length} failed${errorCode ? ` (${errorCode})` : ""}.`);
         log.warn(
-          {
-            step: "failed",
-            userId: ctx.userId,
-            stepIndex: i,
-            errorCode,
-            chainId: step.chainId,
-          },
+          { step: "failed", userId: ctx.userId, stepIndex: i, errorCode, chainId: step.chainId },
           "stock step rejected",
         );
         return {
@@ -623,12 +755,11 @@ export class StockCapability implements Capability<StockParams> {
           failedStepIndex: i,
           errorCode,
           userMessage,
-          artifact: {
-            kind: "chat",
-            text: `❌ ${userMessage}${
-              txHashes.length > 0 ? ` Earlier steps: ${formatHashes(txHashes)}` : ""
-            }`,
-          },
+          artifact: stockStepFailedCard({
+            headline: userMessage,
+            txHashes,
+            chainId: step.chainId,
+          }),
         };
       }
       if (resolution.status === "expired") {
@@ -639,13 +770,12 @@ export class StockCapability implements Capability<StockParams> {
         return {
           aborted: true,
           failedStepIndex: i,
-          userMessage: `Step ${i + 1}/${steps.length} timed out.`,
-          artifact: {
-            kind: "chat",
-            text: `⏱️ Step ${i + 1}/${steps.length} timed out.${
-              txHashes.length > 0 ? ` Earlier steps: ${formatHashes(txHashes)}` : ""
-            }`,
-          },
+          userMessage: `Step ${i + 1} of ${steps.length} timed out.`,
+          artifact: stockStepFailedCard({
+            headline: `Step ${i + 1} of ${steps.length} timed out`,
+            txHashes,
+            chainId: step.chainId,
+          }),
         };
       }
       if (resolution.txHash) {
@@ -671,10 +801,10 @@ export class StockCapability implements Capability<StockParams> {
     steps: StockExecutionStep[],
   ): Promise<Artifact> {
     if (steps.length === 0) {
-      return {
-        kind: "chat",
-        text: "No funds to recover. Contact support if you believe this is wrong.",
-      };
+      return stockSimpleFailedCard(
+        "stock_close",
+        "No funds to recover. Contact support if you believe this is wrong.",
+      );
     }
     const chatId = Number(ctx.channelId);
     const requestIds: string[] = [];
@@ -728,6 +858,24 @@ export class StockCapability implements Capability<StockParams> {
     // the final user-facing message via the standard resolve path.
     const firstStep = steps[0]!;
     const firstRequestId = requestIds[0]!;
+    const recoveryPreview = buildPreview({
+      verb: "stock_close",
+      headline: "Return your funds to your home chain",
+      fields: [
+        {
+          label: "What this does",
+          value: "Brings your USDC back from the trading venue.",
+        },
+        {
+          label: "Steps",
+          value:
+            steps.length === 1
+              ? "1 transaction"
+              : `${steps.length} transactions in one session`,
+          emphasis: "muted",
+        },
+      ],
+    });
     const firstReq: SignRequest = {
       requestId: firstRequestId,
       requestType: "sign",
@@ -741,6 +889,7 @@ export class StockCapability implements Capability<StockParams> {
       chainId: firstStep.chainId,
       createdAt: newCurrentUTCEpoch(),
       expiresAt: newCurrentUTCEpoch() + SIGN_REQUEST_TTL_SECONDS,
+      preview: recoveryPreview,
     };
     log.info(
       { step: "recovery-emitted", userId: ctx.userId, stepCount: steps.length },
@@ -864,7 +1013,38 @@ function parseAmountSymbol(
   return { amountUsd: amount, symbol };
 }
 
-function formatHashes(hashes: string[]): string {
-  if (hashes.length === 0) return "none";
-  return hashes.map((h) => `\`${h}\``).join(", ");
+function verbForKind(kind: StockParams["kind"]): IntentVerb {
+  if (kind === "open") return "stock_buy";
+  if (kind === "close") return "stock_close";
+  return "stock_set_exits";
 }
+
+function stockSimpleFailedCard(verb: IntentVerb, reason: string): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb,
+    headline: "Couldn't run that stock action",
+    fields: [{ label: "Reason", value: reason }],
+    nextActions: [{ label: "Stock", kind: "command", payload: "/stock" }],
+    complexity: "simple",
+  };
+  return { kind: "result_card", result };
+}
+
+function stockStepFailedCard(input: {
+  headline: string;
+  txHashes: string[];
+  chainId: number;
+}): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb: "stock_buy",
+    headline: input.headline,
+    fields: [],
+    txHashes: input.txHashes.map((h) => ({ hash: h, chainId: input.chainId })),
+    nextActions: [{ label: "Try again", kind: "command", payload: "/stock" }],
+    complexity: "simple",
+  };
+  return { kind: "result_card", result };
+}
+

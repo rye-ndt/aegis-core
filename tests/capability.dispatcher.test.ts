@@ -140,8 +140,12 @@ test("dispatcher: callback buy:y:50 produces mini-app-or-chat artifact and clear
   assert.equal(r.handled, true);
   assert.equal(await pending.get("c1"), null);
   const art = renderer.rendered[0]!;
-  // deposit path → chat with copy-address button
-  assert.equal(art.kind, "chat");
+  // deposit path → result_card (buy_onramp pending) per result-card framework
+  assert.equal(art.kind, "result_card");
+  if (art.kind === "result_card") {
+    assert.equal(art.result.verb, "buy_onramp");
+    assert.equal(art.result.status, "pending");
+  }
 });
 
 test("dispatcher: callback buy:n:50 yields mini_app artifact", async () => {
@@ -152,13 +156,17 @@ test("dispatcher: callback buy:n:50 yields mini_app artifact", async () => {
   assert.equal(renderer.rendered[0]!.kind, "mini_app");
 });
 
-test("dispatcher: buy:copy callback returns chat artifact with address", async () => {
-  const cap = new BuyCapability(fakeUserProfileRepo("0xabc"), 1);
+test("dispatcher: buy:y deposit result_card surfaces wallet address as a field", async () => {
+  const cap = new BuyCapability(fakeUserProfileRepo("0xdeadbeef"), 1);
   const { dispatcher, renderer } = mkDispatcher([cap]);
-  await dispatcher.handle(baseCtx({ input: { kind: "callback", data: "buy:copy:0xdeadbeef" } }));
+  await dispatcher.handle(baseCtx({ input: { kind: "callback", data: "buy:y:50" } }));
   const art = renderer.rendered[0]!;
-  assert.equal(art.kind, "chat");
-  if (art.kind === "chat") assert.match(art.text, /0xdeadbeef/);
+  assert.equal(art.kind, "result_card");
+  if (art.kind === "result_card") {
+    const addrField = art.result.fields.find((f) => f.label === "To address");
+    assert.ok(addrField, "deposit card should expose the SCA address");
+    assert.match(addrField!.value, /0xdeadbeef/);
+  }
 });
 
 test("dispatcher: fresh command cancels a stale pending flow", async () => {
@@ -212,8 +220,14 @@ test("registry: default capability handles free text with no command match", () 
     run: async () => ({ kind: "chat", text: "hi" }),
   };
   r.registerDefault(defaultCap);
-  assert.equal(r.match({ kind: "text", text: "hello world" })?.id, "assistant_chat");
-  // Callbacks never route to default.
+  // Contract: `match()` only returns command/callback-matched capabilities.
+  // The dispatcher itself falls back to `getDefault()` when `match()` is null
+  // (see CapabilityDispatcher.handle: const matchFirst = registry.match(...);
+  //  if (!matchFirst) capability = registry.getDefault()).
+  assert.equal(r.match({ kind: "text", text: "hello world" }), null);
+  assert.equal(r.getDefault()?.id, "assistant_chat");
+  // Callbacks never route to default — match returns null AND default is not
+  // consulted by the dispatcher for callbacks.
   assert.equal(r.match({ kind: "callback", data: "anything" }), null);
 });
 

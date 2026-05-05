@@ -55,7 +55,11 @@ export class GetStockPositionsTool implements ITool {
       const positions = await stockUseCase.listPositions(this.userId);
       if (positions.length === 0) {
         log.info({ step: "succeeded", userId: this.userId, requestId, count: 0 }, "stock-positions-tool");
-        return { success: true, data: "No open stock positions." };
+        return {
+          success: true,
+          data: "No open stock positions.",
+          structured: { kind: "stock_positions", items: [] },
+        };
       }
       const rows: string[] = [
         "Symbol | Side | Entry | Mark | Collateral | P&L | SL | TP | Trade",
@@ -70,7 +74,24 @@ export class GetStockPositionsTool implements ITool {
         { step: "succeeded", userId: this.userId, requestId, count: positions.length },
         "stock-positions-tool",
       );
-      return { success: true, data: rows.join("\n") };
+      return {
+        success: true,
+        data: rows.join("\n"),
+        structured: {
+          kind: "stock_positions",
+          items: positions.map((p) => ({
+            symbol: p.symbol,
+            side: p.side,
+            entryPriceUsd: p.entryPriceUsd,
+            markPriceUsd: p.markPriceUsd,
+            collateralUsd: p.collateralUsd,
+            unrealizedPnlUsd: p.unrealizedPnlUsd,
+            stopLossUsd: p.stopLossUsd,
+            takeProfitUsd: p.takeProfitUsd,
+            tradeHash: p.tradeHash,
+          })),
+        },
+      };
     } catch (err) {
       log.error({ err, userId: this.userId, requestId, step: "failed" }, "stock-positions-tool");
       return { success: false, error: toErrorMessage(err) };

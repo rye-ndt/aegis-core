@@ -30,13 +30,14 @@ import { checkTokenDelegation } from "../../../../use-cases/implementations/aegi
 import { createLogger } from "../../../../helpers/observability/logger";
 import { getUsdcAddress } from "../../../../helpers/chainConfig";
 import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
+import { interpretError } from "../../../../helpers/errors/errorCatalog";
+import { newUuid } from "../../../../helpers/uuid";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
+import { buildPreview } from "./buildPreview";
 import {
-  buildConfirmationMessage,
   buildDelegationPrompt,
   buildDisambiguationPrompt,
-  buildFinalSchemaConfirmation,
-  populateFinalSchema,
 } from "./send.messages";
 import {
   detectStablecoinIntent,
@@ -170,10 +171,30 @@ export class SendCapability implements Capability<SendParams> {
       });
     } catch (err) {
       log.error({ err }, "buildRequestBody failed");
-      return {
-        kind: "chat",
-        text: `Could not build transaction: ${err instanceof Error ? err.message : String(err)}`,
+      const interpreted = interpretError(err, {
+        verb: "send",
+        requestId: ctx.conversationId ?? newUuid(),
+      });
+      const result: IntentResult = {
+        status: "failed",
+        verb: "send",
+        headline: "Couldn't build that transaction",
+        fields: [{ label: "Reason", value: interpreted.friendly }],
+        nextActions: interpreted.recovery
+          ? [
+              {
+                label: interpreted.recovery.label,
+                kind: interpreted.recovery.kind,
+                payload: interpreted.recovery.payload,
+              },
+              { label: "Try again", kind: "command", payload: "/send" },
+            ]
+          : [{ label: "Try again", kind: "command", payload: "/send" }],
+        complexity: "simple",
+        requestId: interpreted.requestId,
+    errorCode: interpreted.code,
       };
+      return { kind: "result_card", result };
     }
 
     const fromToken = params.resolvedFrom;
@@ -207,15 +228,10 @@ export class SendCapability implements Capability<SendParams> {
       });
       if (guard.ok) {
         log.info({ step: "auto-sign", userId: ctx.userId }, "delegation sufficient — pushing auto-sign request");
-        await ctx.emit({
-          kind: "chat",
-          text: "Check the Aegis mini app to complete the transaction automatically.",
-          parseMode: "Markdown",
-        });
-        // partialParams.amountRaw is only set when the resolver populated it;
-        // for /send the amount typically arrives only as amountHuman, so compute
-        // the raw value from token decimals so the resolution path can attribute
-        // the spend to token_delegations.spent_raw.
+        // Pre-sign Telegram chat ("Check the Aegis mini app...") removed —
+        // the renderer's standard "Tap below to execute silently." prompt
+        // attached to the sign_calldata artifact replaces it. The richer
+        // recipient/amount summary now lives on `preview` inside the modal.
         const amountHumanStr = params.partialParams.amountHuman as string | undefined;
         const partialRaw = params.partialParams.amountRaw as string | undefined;
         const computedAmountRaw =
@@ -234,6 +250,12 @@ export class SendCapability implements Capability<SendParams> {
           tokenSymbol: params.resolvedFrom?.symbol,
           tokenAddress: fromToken.address.toLowerCase(),
           amountRaw: computedAmountRaw,
+          preview: buildSendPreview({
+            amountHuman: amountHumanStr,
+            tokenSymbol: fromToken.symbol,
+            recipientHandle: params.recipientHandle,
+            recipientAddress: calldata.to,
+          }),
         });
         if (this.command === INTENT_COMMAND.SEND) {
           void this.deps.loyaltyUseCase?.awardPoints({
@@ -253,35 +275,12 @@ export class SendCapability implements Capability<SendParams> {
       };
     }
 
-    // Confirmation path.
-    if (params.manifest.finalSchema && params.resolved) {
-      const filled = populateFinalSchema(
-        params.manifest.finalSchema,
-        params.resolved,
-        params.partialParams,
-      );
-      await ctx.emit({
-        kind: "chat",
-        text: buildFinalSchemaConfirmation(
-          { manifest: params.manifest, partialParams: params.partialParams },
-          filled,
-          calldata,
-        ),
-        parseMode: "Markdown",
-      });
-    } else {
-      await ctx.emit({
-        kind: "chat",
-        text: buildConfirmationMessage(
-          { manifest: params.manifest, partialParams: params.partialParams },
-          calldata,
-          params.resolvedFrom,
-          params.resolvedTo,
-        ),
-        parseMode: "Markdown",
-      });
-    }
-
+    // Manual-sign path. The previous Telegram-side confirmation chat
+    // (buildConfirmationMessage / buildFinalSchemaConfirmation) is no longer
+    // emitted — its content moves into `preview` so the user reviews the
+    // summary inside the mini-app modal alongside the approve/reject footer,
+    // not as a separate Telegram message before tapping the button.
+    const amountHumanStr = params.partialParams.amountHuman as string | undefined;
     await ctx.emit({
       kind: "sign_calldata",
       to: calldata.to,
@@ -291,8 +290,14 @@ export class SendCapability implements Capability<SendParams> {
       autoSign: false,
       recipientTelegramUserId: params.recipientTelegramUserId,
       recipientHandle: params.recipientHandle,
-      amountFormatted: params.partialParams.amountHuman as string | undefined,
+      amountFormatted: amountHumanStr,
       tokenSymbol: params.resolvedFrom?.symbol,
+      preview: buildSendPreview({
+        amountHuman: amountHumanStr,
+        tokenSymbol: fromToken?.symbol,
+        recipientHandle: params.recipientHandle,
+        recipientAddress: calldata.to,
+      }),
     });
 
     if (this.command === INTENT_COMMAND.SEND) {
@@ -798,6 +803,34 @@ export class SendCapability implements Capability<SendParams> {
   private abort(message: string): CollectResult<SendParams> {
     return { kind: "terminal", artifact: { kind: "chat", text: message } };
   }
+}
+
+function buildSendPreview(input: {
+  amountHuman: string | undefined;
+  tokenSymbol: string | undefined;
+  recipientHandle: string | undefined;
+  recipientAddress: string;
+}): IntentResult {
+  const amountStr =
+    input.amountHuman && input.tokenSymbol
+      ? `${input.amountHuman} ${input.tokenSymbol}`
+      : "—";
+  const recipient = input.recipientHandle
+    ? `@${input.recipientHandle}`
+    : truncateAddress(input.recipientAddress);
+  return buildPreview({
+    verb: "send",
+    headline: `Send ${amountStr} to ${recipient}`,
+    fields: [
+      { label: "Amount", value: amountStr, emphasis: "primary" },
+      { label: "To", value: recipient },
+    ],
+  });
+}
+
+function truncateAddress(addr: string): string {
+  if (!addr) return "—";
+  return addr.length > 12 ? `${addr.slice(0, 6)}…${addr.slice(-4)}` : addr;
 }
 
 /**

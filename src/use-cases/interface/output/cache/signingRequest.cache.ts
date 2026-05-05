@@ -1,3 +1,5 @@
+import type { IntentResult } from '../../input/resultCard.types';
+
 export type SigningRequestRecord = {
   id: string;
   userId: string;
@@ -32,6 +34,15 @@ export type SigningRequestRecord = {
    * "Funds returned" instead of a generic "transaction submitted".
    */
   planKind?: 'recovery';
+  /**
+   * Plain-English preview the mini-app renders inside its existing approve
+   * modal in place of the raw to/value/calldata view. Always status="preview"
+   * — never carries txHashes or nextActions. Set by capabilities via
+   * `buildPreview`; threaded through `Artifact.sign_calldata.preview` →
+   * here → `GET /request/:id` → mini-app `ResultCard`. Backwards-compat:
+   * when undefined the mini-app falls back to today's raw view.
+   */
+  preview?: IntentResult;
 };
 
 export interface ISigningRequestCache {

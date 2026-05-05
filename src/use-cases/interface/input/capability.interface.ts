@@ -1,6 +1,7 @@
 import type { InlineKeyboard } from "grammy";
 import type { INTENT_COMMAND } from "../../../helpers/enums/intentCommand.enum";
 import type { MiniAppRequest } from "../output/cache/miniAppRequest.types";
+import type { IntentResult } from "./resultCard.types";
 
 /**
  * How a capability declares it wants to be reached.
@@ -96,8 +97,15 @@ export type Artifact =
       // native sends, swaps' approval steps, etc.
       tokenAddress?: string;
       amountRaw?: string;
+      /**
+       * Preview rendered by the mini-app inside its existing approve modal
+       * in place of raw to/value/calldata. status MUST be "preview" — the
+       * Telegram renderer drops it; the FE consumes it.
+       */
+      preview?: IntentResult;
     }
   | { kind: "mini_app"; request: MiniAppRequest; promptText: string; buttonText: string; fallbackText?: string }
+  | { kind: "result_card"; result: IntentResult; keyboard?: InlineKeyboard }
   | { kind: "llm_data"; data: unknown }
   /**
    * Begin an in-place "loading" message keyed by `id`. The renderer sends

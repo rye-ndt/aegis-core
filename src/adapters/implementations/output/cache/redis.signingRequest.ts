@@ -15,6 +15,17 @@ export class RedisSigningRequestCache implements ISigningRequestCache {
     return `sign_req:${id}`;
   }
 
+  /**
+   * Schema notes for `SigningRequestRecord` round-trips:
+   * - The record is JSON-serialised; new optional fields (e.g. `preview`
+   *   added in the result-card framework P2 migration) are forward- and
+   *   backward-compatible automatically — old records read by new code see
+   *   `preview: undefined`, new records read by old code ignore it.
+   * - DO NOT bump the `sign_req:` prefix on schema additions — it would
+   *   strand in-flight pending requests at deploy time. Reserve a version
+   *   bump for a *breaking* shape change (renaming an existing field,
+   *   removing one, or changing a value's type).
+   */
   async save(record: SigningRequestRecord): Promise<void> {
     const ttl = Math.max(10, record.expiresAt - newCurrentUTCEpoch());
     await this.redis.set(this.key(record.id), JSON.stringify(record), 'EX', ttl);

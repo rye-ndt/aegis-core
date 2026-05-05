@@ -84,7 +84,20 @@ export class GetPortfolioTool implements ITool {
       }
 
       log.info({ step: "done", rowCount: rows.length }, "portfolio fetch complete");
-      return { success: true, data: rows.join("\n") };
+      return {
+        success: true,
+        data: rows.join("\n"),
+        structured: {
+          kind: "portfolio",
+          walletAddress,
+          walletLabel,
+          balances: balances.map((b) => ({
+            symbol: b.symbol,
+            balance: b.balance,
+            usdValue: b.usdValue ?? null,
+          })),
+        },
+      };
     } catch (err) {
       log.error({ err }, "portfolio fetch error");
       const message = toErrorMessage(err);

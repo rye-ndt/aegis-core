@@ -1,3 +1,5 @@
+import type { IntentResult } from '../../input/resultCard.types';
+
 export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 export type SignKind = 'yield_deposit' | 'yield_withdraw';
@@ -34,6 +36,14 @@ export interface SignRequest extends BaseRequest {
   protocolId?: string;
   tokenAddress?: string;
   displayMeta?: YieldDisplayMeta;
+  /**
+   * Plain-English preview the mini-app renders inside its existing approve
+   * modal in place of raw to/value/calldata. Always `status: "preview"`. When
+   * absent, the mini-app falls back to the legacy raw view (backward compat).
+   * Threaded from `Artifact.sign_calldata.preview` → renderer/capability →
+   * miniAppRequestCache → `GET /request/:id` → FE.
+   */
+  preview?: IntentResult;
 }
 
 export interface ApproveRequest extends BaseRequest {

@@ -1,5 +1,7 @@
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { newUuid } from "../../../../helpers/uuid";
+import { interpretError } from "../../../../helpers/errors/errorCatalog";
 import type {
   Artifact,
   Capability,
@@ -7,25 +9,28 @@ import type {
   CollectResult,
   TriggerSpec,
 } from "../../../../use-cases/interface/input/capability.interface";
-import type { IAssistantUseCase } from "../../../../use-cases/interface/input/assistant.interface";
+import type {
+  IntentResult,
+  ResultField,
+} from "../../../../use-cases/interface/input/resultCard.types";
+import type { IStockUseCase } from "../../../../use-cases/interface/input/stock.interface";
+import type { StockPosition } from "../../../../use-cases/interface/output/stocks/stockPositionsProvider.interface";
 
 const log = createLogger("positionsCapability");
 
-const SEED_PROMPT =
-  "Summarize the user's open Aster stock positions in a friendly paragraph, " +
-  "then include the raw position table. Call get_stock_positions to fetch " +
-  "the data. If there are no positions, say so plainly.";
+const MAX_FIELDS = 5;
 
-interface PositionsParams {
-  message: string;
-}
+type PositionsParams = Record<string, never>;
 
 /**
- * `/positions` — thin chat-seeded entry that delegates to the assistant LLM
- * loop. The agent calls `get_stock_positions` (registered as a system tool)
- * and renders its output. Kept as a dedicated capability rather than baking
- * the seed into AssistantChatCapability so the trigger remains explicit and
- * doesn't pollute the default free-text path.
+ * `/positions` — read-only listing of open Aster stock positions, rendered as
+ * a result-card receipt (verb: `positions_query`).
+ *
+ * Calls `IStockUseCase.listPositions` directly instead of round-tripping
+ * through the LLM tool loop: the data is structured and the framework's
+ * renderer is the only formatter we want users to see for terminal outputs
+ * (plan §5.2.5). When the stock surface is disabled or unavailable we surface
+ * a `failed` result-card via `interpretError` rather than a raw chat string.
  */
 export class PositionsCapability implements Capability<PositionsParams> {
   readonly id = "intent_positions";
@@ -33,32 +38,115 @@ export class PositionsCapability implements Capability<PositionsParams> {
     commands: [INTENT_COMMAND.POSITIONS],
   };
 
-  constructor(private readonly assistantUseCase: IAssistantUseCase) {}
+  constructor(
+    private readonly getStockUseCase: () => IStockUseCase | null,
+    private readonly isDisabled: () => boolean,
+  ) {}
 
   async collect(_ctx: CapabilityCtx): Promise<CollectResult<PositionsParams>> {
-    return { kind: "ok", params: { message: SEED_PROMPT } };
+    return { kind: "ok", params: {} };
   }
 
-  async run(params: PositionsParams, ctx: CapabilityCtx): Promise<Artifact> {
-    log.info({ step: "started", userId: ctx.userId }, "positions chat started");
+  async run(_params: PositionsParams, ctx: CapabilityCtx): Promise<Artifact> {
+    const requestId = newUuid();
+    log.info({ step: "started", userId: ctx.userId, requestId }, "positions-list");
+
+    if (this.isDisabled()) {
+      return this.unavailableCard(requestId);
+    }
+    const useCase = this.getStockUseCase();
+    if (!useCase) {
+      return this.unavailableCard(requestId);
+    }
+
     try {
-      const response = await this.assistantUseCase.chat({
-        userId: ctx.userId,
-        message: params.message,
-      });
+      const positions = await useCase.listPositions(ctx.userId);
       log.info(
-        {
-          step: "succeeded",
-          userId: ctx.userId,
-          toolsUsed: response.toolsUsed.length,
-        },
-        "positions chat complete",
+        { step: "succeeded", userId: ctx.userId, requestId, count: positions.length },
+        "positions-list",
       );
-      return { kind: "chat", text: response.reply, parseMode: "Markdown" };
+
+      if (positions.length === 0) {
+        const result: IntentResult = {
+          status: "success",
+          verb: "positions_query",
+          headline: "No open stock positions",
+          fields: [
+            { label: "Status", value: "Nothing open right now", emphasis: "muted" },
+          ],
+          nextActions: [
+            { label: "Browse stocks", kind: "command", payload: "/stock" },
+          ],
+          complexity: "simple",
+        };
+        return { kind: "result_card", result };
+      }
+
+      const fields: ResultField[] = positions.slice(0, MAX_FIELDS).map(toField);
+      const details: ResultField[] = positions.slice(MAX_FIELDS).map(toField);
+
+      const result: IntentResult = {
+        status: "success",
+        verb: "positions_query",
+        headline: `Open positions: ${positions.length}`,
+        fields,
+        details: details.length > 0 ? details : undefined,
+        nextActions: [
+          { label: "Open another", kind: "command", payload: "/stock" },
+        ],
+        complexity: "simple",
+      };
+      return { kind: "result_card", result };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error({ err: msg, userId: ctx.userId }, "positions chat failed");
-      return { kind: "chat", text: `Could not load positions: ${msg}` };
+      const interpreted = interpretError(err, { verb: "positions_query", requestId });
+      const result: IntentResult = {
+        status: "failed",
+        verb: "positions_query",
+        headline: "Couldn't load your positions",
+        fields: [{ label: "Reason", value: interpreted.friendly }],
+        complexity: "simple",
+        requestId: interpreted.requestId,
+    errorCode: interpreted.code,
+        ...(interpreted.recovery
+          ? {
+              nextActions: [
+                {
+                  label: interpreted.recovery.label,
+                  kind: interpreted.recovery.kind,
+                  payload: interpreted.recovery.payload,
+                },
+              ],
+            }
+          : {}),
+      };
+      return { kind: "result_card", result };
     }
   }
+
+  private unavailableCard(requestId: string): Artifact {
+    const result: IntentResult = {
+      status: "failed",
+      verb: "positions_query",
+      headline: "Stock trading isn't available right now",
+      fields: [
+        {
+          label: "Reason",
+          value: "The Aster surface is briefly unavailable. Please try again in a moment.",
+        },
+      ],
+      complexity: "simple",
+      requestId,
+    };
+    log.warn({ requestId }, "positions-list-unavailable");
+    return { kind: "result_card", result };
+  }
+}
+
+function toField(p: StockPosition): ResultField {
+  const sign = p.unrealizedPnlUsd.startsWith("-") ? "" : "+";
+  const pnl = `${sign}$${p.unrealizedPnlUsd}`;
+  return {
+    label: `${p.symbol} (${p.side})`,
+    value: `Mark $${p.markPriceUsd} · P&L ${pnl}`,
+  };
 }

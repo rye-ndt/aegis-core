@@ -8,6 +8,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+// chainId=1 fiat-detection path calls getUsdcAddress(1) which reads ETH_USDC.
+// Set a real-looking address so the resolver short-circuit matches the
+// "logged warn + fall through to searchTokens" branch (tokenRegistryService
+// stays undefined). Without this the capability aborts with
+// "no usdc found for this chain" and never reaches sign_calldata.
+process.env.ETH_USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48";
+
 import { SendCapability } from "../src/adapters/implementations/output/capabilities/sendCapability";
 import type { SendCapabilityDeps } from "../src/adapters/implementations/output/capabilities/sendCapability";
 import { CapabilityDispatcher } from "../src/use-cases/implementations/capabilityDispatcher.usecase";
@@ -80,9 +87,15 @@ test("SendCapability: simple happy path via dispatcher produces confirmation + s
   });
   assert.equal(r.handled, true);
   const kinds = renderer.rendered.map((a) => a.kind);
-  // Expected order: confirmation chat, sign_calldata, then noop/terminal.
-  assert.ok(kinds.includes("chat"));
+  // Result-card framework migration: the pre-sign confirmation chat moved
+  // into `sign_calldata.preview` (rendered inside the mini-app modal), so
+  // the BE no longer emits a chat artifact alongside the sign request.
   assert.ok(kinds.includes("sign_calldata"));
+  const signArt = renderer.rendered.find((a) => a.kind === "sign_calldata");
+  assert.ok(signArt);
+  if (signArt && signArt.kind === "sign_calldata") {
+    assert.ok(signArt.preview, "sign_calldata should carry a preview IntentResult");
+  }
 });
 
 test("SendCapability: selectTool returns null → abort chat artifact", async () => {

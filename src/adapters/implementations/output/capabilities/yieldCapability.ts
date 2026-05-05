@@ -3,6 +3,8 @@ import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { getYieldConfig } from "../../../../helpers/chainConfig";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
+import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
+import { buildPreview } from "./buildPreview";
 import type {
   Artifact,
   Capability,
@@ -134,10 +136,16 @@ export class YieldCapability implements Capability<YieldRunParams> {
   private async runDeposit(ctx: CapabilityCtx, pct: number): Promise<Artifact> {
     const plan = await this.deps.optimizer.buildDepositPlan(ctx.userId, pct);
     if (!plan) {
-      return { kind: "chat", text: "No idle USDC found or no yield protocol available." };
+      return yieldUnavailableCard(
+        "yield_deposit",
+        "No idle USDC found or no yield protocol available.",
+      );
     }
     if (!this.deps.signingRequestUseCase) {
-      return { kind: "chat", text: "Signing service unavailable. Please try again later." };
+      return yieldUnavailableCard(
+        "yield_deposit",
+        "Signing service unavailable. Please try again later.",
+      );
     }
 
     const stablecoin = findStablecoin(plan.chainId, plan.tokenAddress);
@@ -148,13 +156,12 @@ export class YieldCapability implements Capability<YieldRunParams> {
           amountHuman: formatHumanAmount(BigInt(plan.amountRaw), stablecoin.decimals),
         }
       : undefined;
+    const amountHuman = displayMeta?.amountHuman ?? plan.amountRaw;
+    const tokenSymbol = displayMeta?.tokenSymbol ?? "USDC";
 
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildDepositQuoteSummary(plan, displayMeta, plan.txSteps.length),
-    });
-
+    // Pre-sign Telegram quote ("*Yield deposit quote*…") removed — the
+    // summary now lives in the mini-app modal via `preview` so the user sees
+    // it next to the approve button rather than as a separate Telegram chat.
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.txSteps,
@@ -170,6 +177,17 @@ export class YieldCapability implements Capability<YieldRunParams> {
         plan.txSteps.length === 1
           ? "Tap the button below to execute the deposit automatically."
           : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
+      preview: buildPreview({
+        verb: "yield_deposit",
+        headline: `Deposit ${amountHuman} ${tokenSymbol} into ${plan.protocolId}`,
+        fields: [
+          { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+          { label: "Protocol", value: plan.protocolId },
+          ...(plan.txSteps.length > 1
+            ? [{ label: "Steps", value: `${plan.txSteps.length}`, emphasis: "muted" as const }]
+            : []),
+        ],
+      }),
     });
 
     if (result.aborted) return result.artifact;
@@ -187,20 +205,38 @@ export class YieldCapability implements Capability<YieldRunParams> {
       }).catch(() => undefined);
     }
 
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildDepositSuccessMessage(pct, result.txHashes),
+    const successResult: IntentResult = {
+      status: "success",
+      verb: "yield_deposit",
+      headline: `You deposited ${amountHuman} ${tokenSymbol} into ${plan.protocolId}`,
+      fields: [
+        { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+        { label: "Protocol", value: plan.protocolId },
+        { label: "Allocation", value: `${pct}% of idle balance`, emphasis: "muted" },
+      ],
+      txHashes: txHash ? [{ hash: txHash, chainId: plan.chainId }] : undefined,
+      nextActions: [
+        { label: "Withdraw", kind: "command", payload: "/withdraw" },
+        { label: "Yield", kind: "command", payload: "/yield" },
+      ],
+      complexity: "simple",
     };
+    return { kind: "result_card", result: successResult };
   }
 
   private async runWithdraw(ctx: CapabilityCtx): Promise<Artifact> {
     const plan = await this.deps.optimizer.buildWithdrawAllPlan(ctx.userId);
     if (!plan) {
-      return { kind: "chat", text: "No active yield positions found to withdraw." };
+      return yieldUnavailableCard(
+        "yield_withdraw",
+        "No active yield positions found to withdraw.",
+      );
     }
     if (!this.deps.signingRequestUseCase) {
-      return { kind: "chat", text: "Signing service unavailable. Please try again later." };
+      return yieldUnavailableCard(
+        "yield_withdraw",
+        "Signing service unavailable. Please try again later.",
+      );
     }
 
     const first = plan.withdrawals[0];
@@ -212,12 +248,9 @@ export class YieldCapability implements Capability<YieldRunParams> {
           amountHuman: formatHumanAmount(BigInt(first.balanceRaw), stablecoin.decimals),
         }
       : undefined;
-
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildWithdrawQuoteSummary(displayMeta, plan.txSteps.length),
-    });
+    const amountHuman = displayMeta?.amountHuman ?? "your balance";
+    const tokenSymbol = displayMeta?.tokenSymbol ?? "USDC";
+    const protocolLabel = first?.protocolId ?? "Aegis yield";
 
     const result = await this.executeSignSteps({
       ctx,
@@ -233,6 +266,14 @@ export class YieldCapability implements Capability<YieldRunParams> {
         plan.txSteps.length === 1
           ? "Tap the button below to execute the withdrawal automatically."
           : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
+      preview: buildPreview({
+        verb: "yield_withdraw",
+        headline: `Withdraw ${amountHuman} ${tokenSymbol} from ${protocolLabel}`,
+        fields: [
+          { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+          { label: "Protocol", value: protocolLabel },
+        ],
+      }),
     });
 
     if (result.aborted) return result.artifact;
@@ -247,11 +288,25 @@ export class YieldCapability implements Capability<YieldRunParams> {
       })),
     );
 
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildWithdrawSuccessMessage(result.txHashes),
+    const finalHash = result.txHashes[result.txHashes.length - 1];
+    const successResult: IntentResult = {
+      status: "success",
+      verb: "yield_withdraw",
+      headline: `You withdrew ${amountHuman} ${tokenSymbol}`,
+      fields: [
+        { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+        { label: "Protocol", value: protocolLabel },
+      ],
+      txHashes: finalHash && first
+        ? [{ hash: finalHash, chainId: first.chainId }]
+        : undefined,
+      nextActions: [
+        { label: "Deposit again", kind: "command", payload: "/yield" },
+        { label: "Send", kind: "command", payload: "/send" },
+      ],
+      complexity: "simple",
     };
+    return { kind: "result_card", result: successResult };
   }
 
   private async executeSignSteps(opts: {
@@ -270,6 +325,8 @@ export class YieldCapability implements Capability<YieldRunParams> {
     displayMeta?: YieldDisplayMeta;
     buttonText: string;
     promptText: string;
+    /** Attached to the FIRST step's signing-request only — modal-shown summary. */
+    preview?: IntentResult;
   }): Promise<
     | { aborted: true; artifact: Artifact }
     | { aborted: false; txHashes: string[] }
@@ -286,6 +343,7 @@ export class YieldCapability implements Capability<YieldRunParams> {
       displayMeta,
       buttonText,
       promptText,
+      preview,
     } = opts;
     const signingUseCase = this.deps.signingRequestUseCase!;
     const chatId = Number(ctx.channelId);
@@ -314,6 +372,7 @@ export class YieldCapability implements Capability<YieldRunParams> {
         autoSign: true,
         tokenAddress: attributesSpend ? tokenAddress!.toLowerCase() : undefined,
         amountRaw: attributesSpend ? spendAmountRaw : undefined,
+        preview: i === 0 ? preview : undefined,
       };
       await signingUseCase.create(record);
 
@@ -335,6 +394,7 @@ export class YieldCapability implements Capability<YieldRunParams> {
         // Display meta lives on the first step only — follow-up approve/supply steps
         // shouldn't re-render a "Confirm Deposit" screen.
         displayMeta: i === 0 ? displayMeta : undefined,
+        preview: i === 0 ? preview : undefined,
       };
 
       if (i === 0) {
@@ -360,13 +420,13 @@ export class YieldCapability implements Capability<YieldRunParams> {
       if (resolution.status === "rejected") {
         return {
           aborted: true,
-          artifact: { kind: "chat", text: `${labelPrefix} aborted at step ${i + 1}/${steps.length}.` },
+          artifact: yieldStepFailedCard(labelPrefix, "aborted", i, steps.length),
         };
       }
       if (resolution.status === "expired") {
         return {
           aborted: true,
-          artifact: { kind: "chat", text: `${labelPrefix} timed out at step ${i + 1}/${steps.length}.` },
+          artifact: yieldStepFailedCard(labelPrefix, "timed out", i, steps.length),
         };
       }
       if (resolution.txHash) {
@@ -470,7 +530,10 @@ export class YieldCapability implements Capability<YieldRunParams> {
     params: RebalanceParams,
   ): Promise<Artifact> {
     if (!this.deps.signingRequestUseCase) {
-      return { kind: "chat", text: "Signing service unavailable. Please try again later." };
+      return yieldUnavailableCard(
+        "yield_rebalance",
+        "Signing service unavailable. Please try again later.",
+      );
     }
 
     const plan = await this.deps.optimizer.buildRebalancePlan(ctx.userId, {
@@ -483,10 +546,17 @@ export class YieldCapability implements Capability<YieldRunParams> {
       // Position vanished between nudge and tap. Clear the lock so the user
       // isn't stuck pending forever.
       await this.deps.optimizer.clearRebalancePending(ctx.userId);
-      return {
-        kind: "chat",
-        text: "Looks like you already withdrew — nothing to rebalance.",
+      const noPlan: IntentResult = {
+        status: "failed",
+        verb: "yield_rebalance",
+        headline: "Nothing to rebalance",
+        fields: [
+          { label: "Reason", value: "Looks like you already withdrew — nothing to rebalance." },
+        ],
+        nextActions: [{ label: "Yield", kind: "command", payload: "/yield" }],
+        complexity: "simple",
       };
+      return { kind: "result_card", result: noPlan };
     }
 
     const stablecoin = findStablecoin(plan.chainId, plan.tokenAddress);
@@ -495,20 +565,9 @@ export class YieldCapability implements Capability<YieldRunParams> {
       : plan.amountRaw;
     const tokenSymbol = stablecoin?.symbol ?? "USDC";
 
-    await ctx.emit({
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildRebalanceQuoteSummary({
-        amountHuman,
-        tokenSymbol,
-        fromProtocol: plan.fromProtocol,
-        toProtocol: plan.toProtocol,
-        fromApy: plan.fromApy,
-        toApy: plan.toApy,
-        stepCount: plan.txSteps.length,
-      }),
-    });
-
+    // Pre-sign Telegram quote removed — moved into mini-app via `preview`.
+    const fromApyPct = (plan.fromApy * 100).toFixed(2);
+    const toApyPct = (plan.toApy * 100).toFixed(2);
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.txSteps,
@@ -530,6 +589,15 @@ export class YieldCapability implements Capability<YieldRunParams> {
         plan.txSteps.length === 1
           ? "Tap the button below to execute the rebalance automatically."
           : `Tap the button below — all ${plan.txSteps.length} steps will be signed in one mini-app session.`,
+      preview: buildPreview({
+        verb: "yield_rebalance",
+        headline: `Move ${amountHuman} ${tokenSymbol} from ${plan.fromProtocol} to ${plan.toProtocol}`,
+        fields: [
+          { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+          { label: "From", value: `${plan.fromProtocol} (~${fromApyPct}% APY)` },
+          { label: "To", value: `${plan.toProtocol} (~${toApyPct}% APY)` },
+        ],
+      }),
     });
 
     if (result.aborted) {
@@ -556,18 +624,66 @@ export class YieldCapability implements Capability<YieldRunParams> {
       })
       .catch(() => undefined);
 
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildRebalanceSuccessMessage({
-        amountHuman,
-        tokenSymbol,
+    const finalHash = result.txHashes[result.txHashes.length - 1];
+    const successResult: IntentResult = {
+      status: "success",
+      verb: "yield_rebalance",
+      headline: `You moved ${amountHuman} ${tokenSymbol} into ${plan.toProtocol}`,
+      fields: [
+        { label: "Amount", value: `${amountHuman} ${tokenSymbol}`, emphasis: "primary" },
+        { label: "From", value: `${plan.fromProtocol} (~${fromApyPct}% APY)`, emphasis: "muted" },
+        { label: "To", value: `${plan.toProtocol} (~${toApyPct}% APY)` },
+      ],
+      txHashes: finalHash ? [{ hash: finalHash, chainId: plan.chainId }] : undefined,
+      nextActions: [
+        { label: "Yield", kind: "command", payload: "/yield" },
+        { label: "Withdraw", kind: "command", payload: "/withdraw" },
+      ],
+      complexity: "complex",
+      interpreterContext: {
+        fromProtocol: plan.fromProtocol,
         toProtocol: plan.toProtocol,
+        fromApy: plan.fromApy,
         toApy: plan.toApy,
-        txHashes: result.txHashes,
-      }),
+        sizeUsd: amountHuman,
+      },
     };
+    return { kind: "result_card", result: successResult };
   }
+}
+
+function yieldUnavailableCard(
+  verb: "yield_deposit" | "yield_withdraw" | "yield_rebalance",
+  reason: string,
+): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb,
+    headline: "Couldn't run that yield action",
+    fields: [{ label: "Reason", value: reason }],
+    nextActions: [{ label: "Yield", kind: "command", payload: "/yield" }],
+    complexity: "simple",
+  };
+  return { kind: "result_card", result };
+}
+
+function yieldStepFailedCard(
+  labelPrefix: string,
+  reason: "aborted" | "timed out",
+  stepIndex: number,
+  totalSteps: number,
+): Artifact {
+  const result: IntentResult = {
+    status: "failed",
+    verb: "yield_deposit",
+    headline: `${labelPrefix} ${reason} at step ${stepIndex + 1} of ${totalSteps}`,
+    fields: [
+      { label: "Reason", value: reason === "aborted" ? "You declined or canceled" : "The signing window expired" },
+    ],
+    nextActions: [{ label: "Try again", kind: "command", payload: "/yield" }],
+    complexity: "simple",
+  };
+  return { kind: "result_card", result };
 }
 
 export function buildRebalanceNudgeKeyboard(args: {
@@ -591,113 +707,3 @@ export function buildNudgeKeyboard(): InlineKeyboard {
     .text("Skip", "yield:skip");
 }
 
-function buildDepositQuoteSummary(
-  plan: { protocolId: string; chainId: number },
-  meta: YieldDisplayMeta | undefined,
-  stepCount: number,
-): string {
-  const lines = ["*Yield deposit quote*", ""];
-  if (meta) {
-    lines.push(`Deposit: ${meta.amountHuman} *${meta.tokenSymbol}*`);
-    lines.push(`Protocol: ${meta.protocolName} (chain ${plan.chainId})`);
-    if (meta.expectedApy != null) {
-      lines.push(`APY: ~${(meta.expectedApy * 100).toFixed(2)}%`);
-    }
-  } else {
-    lines.push(`Protocol: ${plan.protocolId} (chain ${plan.chainId})`);
-  }
-  lines.push(`Steps: ${stepCount}`);
-  lines.push("");
-  lines.push(
-    stepCount === 1
-      ? "Tap the button below to execute the deposit automatically."
-      : "Tap the button below — all steps will be signed in one mini-app session.",
-  );
-  return lines.join("\n");
-}
-
-function buildWithdrawQuoteSummary(
-  meta: YieldDisplayMeta | undefined,
-  stepCount: number,
-): string {
-  const lines = ["*Yield withdrawal quote*", ""];
-  if (meta) {
-    lines.push(`Withdraw: ${meta.amountHuman} *${meta.tokenSymbol}*`);
-    lines.push(`Protocol: ${meta.protocolName}`);
-  }
-  lines.push(`Steps: ${stepCount}`);
-  lines.push("");
-  lines.push(
-    stepCount === 1
-      ? "Tap the button below to execute the withdrawal automatically."
-      : "Tap the button below — all steps will be signed in one mini-app session.",
-  );
-  return lines.join("\n");
-}
-
-function buildDepositSuccessMessage(pct: number, txHashes: string[]): string {
-  const lines = [
-    `*Yield deposit complete* (${pct}% of idle USDC)`,
-    "",
-    "*Transaction hashes*",
-    ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
-    "",
-    "Your USDC is now earning yield on Aave v3. Use /withdraw to exit at any time.",
-  ];
-  return lines.join("\n");
-}
-
-function buildRebalanceQuoteSummary(args: {
-  amountHuman: string;
-  tokenSymbol: string;
-  fromProtocol: string;
-  toProtocol: string;
-  fromApy: number;
-  toApy: number;
-  stepCount: number;
-}): string {
-  const fromApyPct = (args.fromApy * 100).toFixed(2);
-  const toApyPct = (args.toApy * 100).toFixed(2);
-  const lines = [
-    "*Yield rebalance quote*",
-    "",
-    `Move ${args.amountHuman} *${args.tokenSymbol}*`,
-    `From: *${args.fromProtocol}* (~${fromApyPct}% APY)`,
-    `To: *${args.toProtocol}* (~${toApyPct}% APY)`,
-    `Steps: ${args.stepCount}`,
-    "",
-    args.stepCount === 1
-      ? "Tap the button below to execute the rebalance automatically."
-      : "Tap the button below — all steps will be signed in one mini-app session.",
-  ];
-  return lines.join("\n");
-}
-
-function buildRebalanceSuccessMessage(args: {
-  amountHuman: string;
-  tokenSymbol: string;
-  toProtocol: string;
-  toApy: number;
-  txHashes: string[];
-}): string {
-  const apyPct = (args.toApy * 100).toFixed(2);
-  const lines = [
-    `*Rebalance complete*`,
-    "",
-    `${args.amountHuman} *${args.tokenSymbol}* now earning ~${apyPct}% APY on *${args.toProtocol}*.`,
-    "",
-    "*Transaction hashes*",
-    ...args.txHashes.map((h, i) => `${i + 1}. \`${h}\``),
-  ];
-  return lines.join("\n");
-}
-
-function buildWithdrawSuccessMessage(txHashes: string[]): string {
-  const lines = [
-    "*Withdrawal complete*",
-    "",
-    "*Transaction hashes*",
-    ...txHashes.map((h, i) => `${i + 1}. \`${h}\``),
-  ];
-  return lines.join("\n");
-}

@@ -82,11 +82,18 @@ export class TelegramAssistantHandler {
         await ctx.reply("Please authenticate first. Use /auth <token>.");
         return;
       }
+      // `cmd:<text>` callbacks are slash-command relays from result-card
+      // "What's next" buttons. Re-dispatch as text input so they hit the
+      // same routing as if the user had typed the command.
+      const isCmdRelay = data.startsWith("cmd:");
+      const dispatchInput = isCmdRelay
+        ? ({ kind: "text", text: data.slice(4) } as const)
+        : ({ kind: "callback", data } as const);
       try {
         await this.capabilityDispatcher.handle({
           userId: session.userId,
           channelId: String(chatId),
-          input: { kind: "callback", data },
+          input: dispatchInput,
         });
       } catch (err) {
         log.error({ err }, "callback dispatch error");

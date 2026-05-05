@@ -1,5 +1,6 @@
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
+import { createLogger } from "../../../../helpers/observability/logger";
 import type {
   Artifact,
   Capability,
@@ -8,26 +9,36 @@ import type {
   TriggerSpec,
 } from "../../../../use-cases/interface/input/capability.interface";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
+import type {
+  IntentResult,
+  ResultField,
+} from "../../../../use-cases/interface/input/resultCard.types";
 import type { LedgerEntry } from "../../../../use-cases/interface/output/repository/loyalty.repo";
+
+const log = createLogger("loyaltyCapability");
 
 export interface LoyaltyCapabilityDeps {
   loyaltyUseCase: ILoyaltyUseCase;
   leaderboardDefaultLimit: number;
 }
 
+// TODO(i18n): English-only labels.
 const ACTION_LABELS: Record<string, string> = {
-  swap_same_chain: "swap (same-chain)",
-  swap_cross_chain: "swap (cross-chain)",
-  send_erc20: "send",
-  send_native: "send (native)",
-  yield_deposit: "yield deposit",
-  yield_hold_day: "yield hold",
-  referral: "referral",
-  manual_adjust: "adjustment",
-  stock_open_long: "stock buy",
-  stock_open_short: "stock short",
-  stock_close: "stock close",
+  swap_same_chain: "Swap (same-chain)",
+  swap_cross_chain: "Swap (cross-chain)",
+  send_erc20: "Send",
+  send_native: "Send (native)",
+  yield_deposit: "Yield deposit",
+  yield_hold_day: "Yield hold",
+  referral: "Referral",
+  manual_adjust: "Adjustment",
+  stock_open_long: "Stock buy",
+  stock_open_short: "Stock short",
+  stock_close: "Stock close",
 };
+
+const MAX_HISTORY_FIELDS = 4;
+const MAX_LEADERBOARD_FIELDS = 5;
 
 function formatRelativeTime(epochSeconds: number): string {
   const diffSeconds = newCurrentUTCEpoch() - epochSeconds;
@@ -46,51 +57,17 @@ function formatActionLabel(actionType: string): string {
   return ACTION_LABELS[actionType] ?? actionType;
 }
 
-function buildPointsMessage(
-  balance: { seasonId: string; pointsTotal: bigint; rank: number | null },
-  history: LedgerEntry[],
-): string {
-  const lines = [
-    `🪙 *Points — ${balance.seasonId}*`,
-    `Balance: *${formatPoints(balance.pointsTotal)}*`,
-    balance.rank !== null ? `Rank: *#${balance.rank}*` : "Rank: —",
-    "",
-    "*Recent activity:*",
-  ];
-
-  if (history.length === 0) {
-    lines.push("_No activity yet._");
-  } else {
-    for (const entry of history.slice(0, 5)) {
-      const label = formatActionLabel(entry.actionType);
-      const sign = entry.pointsRaw >= 0n ? "+" : "";
-      const points = `${sign}${formatPoints(entry.pointsRaw)}`;
-      const when = formatRelativeTime(entry.createdAtEpoch);
-      lines.push(`• ${label} ${points} — ${when}`);
-    }
-  }
-
-  lines.push("", "_Tip: yield deposits earn the most points._");
-  return lines.join("\n");
+function shortUserId(id: string): string {
+  if (id.length <= 12) return id;
+  return `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
 
-function buildLeaderboardMessage(
-  entries: { userId: string; pointsTotal: bigint; rank: number }[],
-  seasonId: string,
-): string {
-  const lines = [`🏆 *Leaderboard — ${seasonId}*`, ""];
-
-  if (entries.length === 0) {
-    lines.push("_No entries yet._");
-    return lines.join("\n");
-  }
-
-  for (const entry of entries) {
-    const id = `${entry.userId.slice(0, 6)}…${entry.userId.slice(-4)}`;
-    lines.push(`*#${entry.rank}*  ${id} — ${formatPoints(entry.pointsTotal)} pts`);
-  }
-
-  return lines.join("\n");
+function buildHistoryEntry(entry: LedgerEntry): ResultField {
+  const sign = entry.pointsRaw >= 0n ? "+" : "";
+  return {
+    label: formatActionLabel(entry.actionType),
+    value: `${sign}${formatPoints(entry.pointsRaw)} pts · ${formatRelativeTime(entry.createdAtEpoch)}`,
+  };
 }
 
 export class LoyaltyCapability implements Capability<void> {
@@ -106,9 +83,10 @@ export class LoyaltyCapability implements Capability<void> {
   }
 
   async run(_params: void, ctx: CapabilityCtx): Promise<Artifact> {
-    const command = ctx.input.kind === "text"
-      ? ctx.input.text.trim().split(/\s+/)[0]?.toLowerCase()
-      : undefined;
+    const command =
+      ctx.input.kind === "text"
+        ? ctx.input.text.trim().split(/\s+/)[0]?.toLowerCase()
+        : undefined;
 
     if (command === INTENT_COMMAND.LEADERBOARD) {
       return this.handleLeaderboard(ctx);
@@ -122,11 +100,47 @@ export class LoyaltyCapability implements Capability<void> {
       this.deps.loyaltyUseCase.getHistory(ctx.userId, { limit: 5 }),
     ]);
 
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildPointsMessage(balance, history),
+    const fields: ResultField[] = [
+      {
+        label: "Balance",
+        value: `${formatPoints(balance.pointsTotal)} pts`,
+        emphasis: "primary",
+      },
+      {
+        label: "Rank",
+        value: balance.rank !== null ? `#${balance.rank}` : "—",
+      },
+    ];
+
+    const historyHead = history.slice(0, MAX_HISTORY_FIELDS).map(buildHistoryEntry);
+    fields.push(...historyHead);
+    if (history.length === 0) {
+      fields.push({ label: "Recent activity", value: "No activity yet", emphasis: "muted" });
+    }
+
+    const details: ResultField[] = history
+      .slice(MAX_HISTORY_FIELDS)
+      .map(buildHistoryEntry);
+
+    const result: IntentResult = {
+      status: "success",
+      verb: "loyalty_query",
+      headline: `Points — ${balance.seasonId}`,
+      fields,
+      details: details.length > 0 ? details : undefined,
+      nextActions: [
+        { label: "View leaderboard", kind: "command", payload: "/leaderboard" },
+        { label: "Earn more", kind: "command", payload: "/yield" },
+      ],
+      complexity: "simple",
     };
+
+    log.info(
+      { step: "succeeded", userId: ctx.userId, seasonId: balance.seasonId, historyCount: history.length },
+      "loyalty-points",
+    );
+
+    return { kind: "result_card", result };
   }
 
   private async handleLeaderboard(ctx: CapabilityCtx): Promise<Artifact> {
@@ -136,10 +150,41 @@ export class LoyaltyCapability implements Capability<void> {
       this.deps.leaderboardDefaultLimit,
     );
 
-    return {
-      kind: "chat",
-      parseMode: "Markdown",
-      text: buildLeaderboardMessage(entries.slice(0, 10), seasonId),
+    const top = entries.slice(0, MAX_LEADERBOARD_FIELDS);
+    const fields: ResultField[] = top.map((e) => ({
+      label: `#${e.rank}  ${shortUserId(e.userId)}`,
+      value: `${formatPoints(e.pointsTotal)} pts`,
+      emphasis: e.userId === ctx.userId ? "primary" : "normal",
+    }));
+    if (top.length === 0) {
+      fields.push({ label: "Status", value: "No entries yet", emphasis: "muted" });
+    }
+
+    const details: ResultField[] = entries
+      .slice(MAX_LEADERBOARD_FIELDS, 10)
+      .map((e) => ({
+        label: `#${e.rank}  ${shortUserId(e.userId)}`,
+        value: `${formatPoints(e.pointsTotal)} pts`,
+      }));
+
+    const result: IntentResult = {
+      status: "success",
+      verb: "loyalty_query",
+      headline: `Leaderboard — ${seasonId}`,
+      fields,
+      details: details.length > 0 ? details : undefined,
+      nextActions: [
+        { label: "Your points", kind: "command", payload: "/points" },
+        { label: "Earn more", kind: "command", payload: "/yield" },
+      ],
+      complexity: "simple",
     };
+
+    log.info(
+      { step: "succeeded", userId: ctx.userId, seasonId, entryCount: entries.length },
+      "loyalty-leaderboard",
+    );
+
+    return { kind: "result_card", result };
   }
 }

@@ -1,10 +1,15 @@
-import { Api, InlineKeyboard } from "grammy";
+import { Api } from "grammy";
 import type { SigningResolutionEvent } from "../use-cases/interface/input/signingRequest.interface";
 import type { RecipientNotificationUseCase } from "../use-cases/implementations/recipientNotification.useCase";
 import type { IUserDB } from "../use-cases/interface/output/repository/user.repo";
-import { CHAIN_CONFIG, getExplorerTxUrl } from "./chainConfig";
+import { CHAIN_CONFIG } from "./chainConfig";
 import { decodeErc20Transfer } from "./decodeErc20Transfer";
 import { createLogger } from "./observability/logger";
+import { renderResultCard } from "../adapters/implementations/output/artifactRenderer/resultCard.render";
+import type {
+  IntentResult,
+  IntentVerb,
+} from "../use-cases/interface/input/resultCard.types";
 
 const log = createLogger("notifyResolved");
 
@@ -14,15 +19,21 @@ const log = createLogger("notifyResolved");
  * the logic lives here.
  *
  * Branches:
- * - approved → friendly "you sent X TOKEN to 0x…" message + inline-keyboard
- *   "View on explorer" URL button when the chain has an explorer configured.
- *   Falls back to a plain "Transaction submitted" + button if calldata isn't
- *   a recognised ERC20 transfer (e.g. swap / yield deposit).
+ * - approved → result-card "you sent X TOKEN to 0x…" success card with the
+ *   explorer button auto-derived from `txHashes`. Falls back to a generic
+ *   "Transaction confirmed" card when calldata isn't a recognised ERC20
+ *   transfer (swaps / yield deposits).
  * - rejected (no errorCode) → user explicitly rejected in the mini app.
- * - rejected + insufficient_token_balance + USDC → /buy nudge with inline
- *   keyboard whose callbacks (`buy:y:<amt>` / `buy:n:<amt>`) feed straight
- *   into the existing BuyCapability confirm step.
- * - rejected + any other errorCode → surface the FE's friendly message.
+ * - rejected + insufficient_token_balance + USDC → /buy nudge as
+ *   `nextActions` whose callbacks (`buy:y:<amt>` / `buy:n:<amt>`) feed
+ *   straight into the existing BuyCapability confirm step. The callback
+ *   payloads are part of the buy-flow contract and MUST stay byte-identical.
+ * - rejected + any other errorCode → surface the FE's friendly message via
+ *   a `failed` result-card.
+ *
+ * The render path goes through `renderResultCard` so the same MarkdownV2
+ * formatting / spoiler / explorer-button rules apply that the rest of the
+ * result-card framework uses.
  */
 export function buildNotifyResolved(
   tgApi: Api,
@@ -32,17 +43,37 @@ export function buildNotifyResolved(
 ): (event: SigningResolutionEvent) => Promise<void> {
   return async (event: SigningResolutionEvent): Promise<void> => {
     const { chatId, txHash, rejected, errorCode, errorMessage, data, planKind } = event;
+    const start = Date.now();
+    log.info(
+      { step: "started", chatId, userId: event.userId, rejected, errorCode, hasTxHash: !!txHash, planKind },
+      "notify-resolved",
+    );
 
     if (!rejected) {
-      if (planKind === "recovery") {
-        await sendRecoverySuccessMessage(tgApi, chainId, chatId, txHash);
+      const result =
+        planKind === "recovery"
+          ? buildRecoverySuccessResult(chainId, txHash)
+          : buildSuccessResult(chainId, txHash, data);
+
+      try {
+        await sendCard(tgApi, chatId, result);
         log.info(
-          { step: "recovery-success", chatId, hash: txHash },
-          "stock recovery resolved",
+          {
+            step: "succeeded",
+            mode: planKind === "recovery" ? "recovery" : "default",
+            chatId,
+            hash: txHash,
+            durationMs: Date.now() - start,
+          },
+          "notify-resolved",
         );
-        return;
+      } catch (err) {
+        log.error(
+          { step: "failed", err, chatId, durationMs: Date.now() - start },
+          "notify-resolved",
+        );
+        throw err;
       }
-      await sendSuccessMessage(tgApi, chainId, chatId, txHash, data);
 
       if (event.recipientTelegramUserId && recipientNotificationUseCase) {
         let senderDisplayName: string | null = null;
@@ -84,159 +115,193 @@ export function buildNotifyResolved(
           1,
           Math.ceil(parseFloat(decoded.amountHuman)),
         );
-        const keyboard = new InlineKeyboard()
-          .text("Yes, deposit", `buy:y:${suggested}`)
-          .text("No, buy with card", `buy:n:${suggested}`);
-        await tgApi.sendMessage(
-          chatId,
-          [
-            "⚠️ *Not enough USDC to send.*",
-            "",
-            `You tried to send *${decoded.amountHuman} USDC* but your balance is too low.`,
-            "",
-            `Want to top up *${suggested} USDC*?`,
-            "",
-            "Already have crypto in another wallet, or prefer card?",
-          ].join("\n"),
-          { parse_mode: "Markdown", reply_markup: keyboard },
-        );
+        const result: IntentResult = {
+          status: "failed",
+          verb: "send",
+          headline: "Not enough USDC to send",
+          fields: [
+            {
+              label: "You tried to send",
+              value: `${decoded.amountHuman} USDC`,
+              emphasis: "primary",
+            },
+            { label: "Suggested top-up", value: `${suggested} USDC` },
+          ],
+          nextActions: [
+            { label: "Yes, deposit", kind: "callback", payload: `buy:y:${suggested}` },
+            { label: "No, buy with card", kind: "callback", payload: `buy:n:${suggested}` },
+          ],
+          complexity: "simple",
+        };
+        await sendCard(tgApi, chatId, result);
         log.info(
           {
-            step: "insufficient-balance-nudge",
+            step: "succeeded",
+            mode: "insufficient-balance-nudge",
             chatId,
             suggested,
             attempted: decoded.amountHuman,
+            durationMs: Date.now() - start,
           },
-          "sent /buy nudge",
+          "notify-resolved",
         );
         return;
       }
-      // Non-USDC or failed decode: still tell the user *why*, but no /buy
-      // nudge (the onramp only supports USDC).
-      await tgApi.sendMessage(
-        chatId,
-        errorMessage ??
-          "Your account does not have enough token balance to complete this transfer.",
+      const result: IntentResult = {
+        status: "failed",
+        verb: "send",
+        headline: "Not enough balance to send",
+        fields: [
+          {
+            label: "Reason",
+            value:
+              errorMessage ??
+              "Your account does not have enough token balance to complete this transfer.",
+          },
+        ],
+        complexity: "simple",
+      };
+      await sendCard(tgApi, chatId, result);
+      log.info(
+        { step: "succeeded", mode: "non-usdc-insufficient-balance", chatId, durationMs: Date.now() - start },
+        "notify-resolved",
       );
       return;
     }
 
     // Lockstep with FE `interpretSignError.ts` (Aster stock-trading codes).
-    // Add new codes here in the same PR that introduces them on the FE — the
-    // string is the contract.
     const stockMessage = stockErrorMessage(errorCode);
     if (stockMessage) {
-      await tgApi.sendMessage(chatId, stockMessage);
+      const result: IntentResult = {
+        status: "failed",
+        verb: "stock_buy",
+        headline: "Stock action failed",
+        fields: [{ label: "Reason", value: stockMessage }],
+        complexity: "simple",
+      };
+      await sendCard(tgApi, chatId, result);
       log.info(
-        { step: "stock-error", chatId, errorCode },
-        "stock-specific failure surfaced",
+        { step: "succeeded", mode: "stock-error", chatId, errorCode, durationMs: Date.now() - start },
+        "notify-resolved",
       );
       return;
     }
 
     if (errorCode) {
-      await tgApi.sendMessage(
-        chatId,
-        errorMessage ?? `Transaction failed (${errorCode}).`,
+      const result: IntentResult = {
+        status: "failed",
+        verb: rejectionVerb(planKind),
+        headline: "Transaction failed",
+        fields: [
+          {
+            label: "Reason",
+            value: errorMessage ?? `Transaction failed (${errorCode}).`,
+          },
+        ],
+        complexity: "simple",
+      };
+      await sendCard(tgApi, chatId, result);
+      log.info(
+        { step: "succeeded", mode: "generic-error", chatId, errorCode, durationMs: Date.now() - start },
+        "notify-resolved",
       );
       return;
     }
 
-    await tgApi.sendMessage(chatId, "Transaction rejected in the app.");
+    const rejectedResult: IntentResult = {
+      status: "failed",
+      verb: rejectionVerb(planKind),
+      headline: "Transaction rejected",
+      fields: [{ label: "Reason", value: "Rejected in the Aegis app." }],
+      complexity: "simple",
+    };
+    await sendCard(tgApi, chatId, rejectedResult);
+    log.info(
+      { step: "succeeded", mode: "user-rejected", chatId, durationMs: Date.now() - start },
+      "notify-resolved",
+    );
   };
 }
 
-async function sendSuccessMessage(
-  tgApi: Api,
-  chainId: number,
-  chatId: number,
-  txHash: string | undefined,
-  data: string | undefined,
-): Promise<void> {
-  const explorerUrl = txHash ? getExplorerTxUrl(chainId, txHash) : null;
-  const keyboard = explorerUrl
-    ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
-    : undefined;
-
-  // Try to decode an ERC20 transfer for a friendly recap. Yields/swaps don't
-  // contain a bare `transfer` selector so this returns null and we fall back
-  // to a generic "transaction submitted" line — still with the explorer
-  // button when available.
-  const decoded = decodeErc20Transfer(data, chainId);
-  let text: string;
-  if (decoded) {
-    const symbol = decoded.isUsdc
-      ? "USDC"
-      : shortenAddress(decoded.tokenAddress);
-    const recipient = shortenAddress(decoded.recipient);
-    text = [
-      "*Transaction confirmed.*",
-      "",
-      `You sent *${decoded.amountHuman}* *${symbol}* to \`${recipient}\`.`,
-    ].join("\n");
-  } else if (txHash) {
-    text = "Transaction submitted.";
-  } else {
-    // No txHash → likely a manual-path resolution that didn't carry one. Keep
-    // the legacy fallback so we never go silent.
-    text = "Transaction submitted.";
-  }
-
-  try {
-    await tgApi.sendMessage(chatId, text, {
-      parse_mode: "Markdown",
-      ...(keyboard ? { reply_markup: keyboard } : {}),
-    });
-  } catch (err) {
-    // Markdown can choke on rare hash characters or future symbol additions.
-    // Retry plain so the user always gets *some* confirmation.
-    log.warn(
-      { err, chatId },
-      "tx success message markdown send failed — retrying plain",
-    );
-    await tgApi.sendMessage(
-      chatId,
-      stripMarkdown(text),
-      keyboard ? { reply_markup: keyboard } : {},
-    );
-  }
+function rejectionVerb(
+  planKind: SigningResolutionEvent["planKind"],
+): IntentVerb {
+  if (planKind === "recovery") return "stock_buy";
+  return "send";
 }
 
-async function sendRecoverySuccessMessage(
-  tgApi: Api,
+function buildSuccessResult(
   chainId: number,
-  chatId: number,
   txHash: string | undefined,
+  data: string | undefined,
+): IntentResult {
+  const decoded = decodeErc20Transfer(data, chainId);
+  if (decoded) {
+    const symbol = decoded.isUsdc ? "USDC" : shortenAddress(decoded.tokenAddress);
+    return {
+      status: "success",
+      verb: "send",
+      headline: `You sent ${decoded.amountHuman} ${symbol}`,
+      fields: [
+        { label: "Amount", value: `${decoded.amountHuman} ${symbol}`, emphasis: "primary" },
+        { label: "To", value: shortenAddress(decoded.recipient) },
+      ],
+      txHashes: txHash ? [{ hash: txHash, chainId }] : undefined,
+      complexity: "simple",
+    };
+  }
+  return {
+    status: "success",
+    verb: "send",
+    headline: "Transaction confirmed",
+    fields: [{ label: "Status", value: "Submitted" }],
+    txHashes: txHash ? [{ hash: txHash, chainId }] : undefined,
+    complexity: "simple",
+  };
+}
+
+function buildRecoverySuccessResult(
+  chainId: number,
+  txHash: string | undefined,
+): IntentResult {
+  return {
+    status: "success",
+    verb: "stock_buy",
+    headline: "Funds returned",
+    fields: [
+      { label: "Status", value: "Your collateral was bridged back to your home chain." },
+    ],
+    txHashes: txHash ? [{ hash: txHash, chainId }] : undefined,
+    complexity: "simple",
+  };
+}
+
+async function sendCard(
+  tgApi: Api,
+  chatId: number,
+  result: IntentResult,
 ): Promise<void> {
-  const explorerUrl = txHash ? getExplorerTxUrl(chainId, txHash) : null;
-  const keyboard = explorerUrl
-    ? new InlineKeyboard().url("🔍 View on explorer", explorerUrl)
-    : undefined;
-  const text = [
-    "*Funds returned.*",
-    "",
-    "Your collateral was bridged back to your home chain.",
-  ].join("\n");
+  const rendered = renderResultCard({ result });
   try {
-    await tgApi.sendMessage(chatId, text, {
-      parse_mode: "Markdown",
-      ...(keyboard ? { reply_markup: keyboard } : {}),
+    await tgApi.sendMessage(chatId, rendered.text, {
+      parse_mode: rendered.parseMode,
+      ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
     });
   } catch (err) {
-    log.warn({ err, chatId }, "recovery success markdown send failed — retrying plain");
-    await tgApi.sendMessage(
-      chatId,
-      stripMarkdown(text),
-      keyboard ? { reply_markup: keyboard } : {},
-    );
+    log.warn({ err, chatId, verb: result.verb }, "result-card markdownV2 send failed — retrying plain");
+    const plain =
+      `${result.headline}\n` +
+      result.fields.map((f) => `${f.label}: ${f.value}`).join("\n");
+    await tgApi.sendMessage(chatId, plain, {
+      ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
+    });
   }
 }
 
 /**
- * Maps Aster stock-trading errorCodes to user-facing chat messages. These
- * codes are the lockstep contract with FE `interpretSignError.ts` (Phase 2
- * impl plan P2.5b). Returns null when the code is not a stock code so the
- * caller falls through to its existing branch.
+ * Maps Aster stock-trading errorCodes to user-facing messages. Lockstep
+ * contract with FE `interpretSignError.ts` — add new codes here in the same
+ * PR that introduces them on the FE.
  */
 function stockErrorMessage(code: string | undefined): string | null {
   switch (code) {
@@ -249,9 +314,6 @@ function stockErrorMessage(code: string | undefined): string | null {
     case "aster_oracle_stale":
       return "The stock price oracle is stale. Please try again in a moment.";
     case "aster_insufficient_collateral":
-      // Recovery is triggered by the capability layer when the failure
-      // happens mid-flight (post-bridge); here we can only acknowledge the
-      // code in case it surfaces standalone.
       return "Not enough collateral landed on BSC to open the position. Funds will be returned to your home chain.";
     case "stock_recovery_failed":
       return "Recovery failed — please contact support so we can manually return your funds.";
@@ -265,6 +327,3 @@ function shortenAddress(addr: string): string {
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
 }
 
-function stripMarkdown(s: string): string {
-  return s.replace(/[*_`]/g, "");
-}

@@ -111,7 +111,11 @@ export class GetTransferHistoryTool implements ITool {
 
       if (page.items.length === 0) {
         log.info({ step: "succeeded", userId: this.userId, requestId, count: 0 }, "history-tool");
-        return { success: true, data: "No transfers found for the given window." };
+        return {
+          success: true,
+          data: "No transfers found for the given window.",
+          structured: { kind: "transfer_history", items: [], nextCursor: null },
+        };
       }
 
       const rows: string[] = [
@@ -141,7 +145,27 @@ export class GetTransferHistoryTool implements ITool {
         { step: "succeeded", userId: this.userId, requestId, count: page.items.length },
         "history-tool",
       );
-      return { success: true, data: rows.join("\n") };
+      return {
+        success: true,
+        data: rows.join("\n"),
+        structured: {
+          kind: "transfer_history",
+          items: page.items.map((it) => ({
+            direction: it.direction,
+            tokenSymbol: it.tokenSymbol || (it.isNative ? "(native)" : "(unknown)"),
+            amountFormatted: it.amountFormatted,
+            counterparty:
+              it.direction === "out" ? it.to :
+              it.direction === "in" ? it.from :
+              it.from,
+            timestampEpoch: it.timestampEpoch,
+            txHash: it.txHash,
+            chainId: it.chainId,
+            label: it.label ?? null,
+          })),
+          nextCursor: page.nextCursor ?? null,
+        },
+      };
     } catch (err) {
       if (isRateLimitedError(err)) {
         log.warn({ step: "failed", userId: this.userId, requestId, reason: "rate-limited" }, "history-tool");
