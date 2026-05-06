@@ -33,6 +33,21 @@ try {
   throw new Error("ASTER_BROKER_ID must be a uint integer string");
 }
 
+// §P1.2 — slippage/dust haircut on the bridged collateral before the venue
+// open leg. Default 100 bps (1%) so realistic Relay slippage doesn't revert
+// `transferFrom(amountIn)` when delivered USDC.bsc < quoted expectedOut. The
+// remainder is recovered by the existing post-close return-swap path.
+const openSlippageBps = Number(process.env.ASTER_OPEN_SLIPPAGE_BPS ?? 100);
+if (
+  !Number.isFinite(openSlippageBps) ||
+  openSlippageBps < 0 ||
+  openSlippageBps >= 10_000
+) {
+  throw new Error(
+    "ASTER_OPEN_SLIPPAGE_BPS must be a non-negative integer < 10000",
+  );
+}
+
 export const ASTER_ENV = {
   diamondAddressBsc: rawDiamond.toLowerCase() as `0x${string}`,
   brokerId,
@@ -40,4 +55,5 @@ export const ASTER_ENV = {
   priceTtlSec,
   recoveryEnabled: (process.env.STOCK_RECOVERY_ENABLED ?? "true") === "true",
   bscRpcUrl: process.env.BSC_RPC_URL?.trim() || undefined,
+  openSlippageBps,
 } as const;

@@ -788,7 +788,13 @@ export class AssistantInject {
     const sqlDB = this.getSqlDB();
 
     // Register capabilities here. Order does not matter.
-    registry.register(new BuyCapability(sqlDB.userProfiles, this.getChainId()));
+    registry.register(
+      new BuyCapability(
+        sqlDB.userProfiles,
+        this.getChainId(),
+        this.getStockPairRegistry(),
+      ),
+    );
 
     const sendDeps = {
       intentUseCase: this.getIntentUseCase(),
@@ -882,6 +888,9 @@ export class AssistantInject {
             miniAppRequestCache: this.getMiniAppRequestCache(),
             loyaltyUseCase: this.getLoyaltyUseCase(),
             isStockCapabilityDisabled: () => this.isStockCapabilityDisabled(),
+            tokenDelegationDB: this.getTokenDelegationRepo(),
+            pendingIntentStore: this.getPendingIntentStore(),
+            tokenRegistry: this.getTokenRegistryService(),
           }),
         );
       } catch (err) {

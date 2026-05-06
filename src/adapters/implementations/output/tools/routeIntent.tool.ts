@@ -36,7 +36,9 @@ const InputSchema = z.object({
   command: z
     .enum(COMMAND_VALUES)
     .describe(
-      "Slash command for the matching capability. Choose the most specific one for the user's stated action.",
+      "Slash command for the matching capability. Pick the most specific one. " +
+        "`/buy` is the USDC fiat onramp (deposit address or card payment); never " +
+        "use it for stock symbols — use the `stock_open` tool for stocks.",
     ),
   rest: z
     .string()
@@ -74,7 +76,10 @@ export class RouteIntentTool implements ITool {
         "yield, or buy/short/close a stock. Pass the user's verbatim remainder as `rest`. " +
         "Do NOT call this for read-only questions (balances, positions, prices, history) — those " +
         "have dedicated tools. The capability layer renders the user-facing UI; you only need to " +
-        "write a brief closing acknowledgement after this returns.",
+        "write a brief closing acknowledgement after this returns. " +
+        "When `command=\"/buy\"` is the candidate but the user's text mentions a stock " +
+        "symbol (AAPL, TSLA, NVDA, GOOG, META, AMZN, etc.) or words like \"stock\"/\"shares\", " +
+        "call `stock_open` instead — `/buy` is for the USDC fiat onramp only.",
       inputSchema: z.toJSONSchema(InputSchema),
     };
   }
@@ -111,13 +116,16 @@ export class RouteIntentTool implements ITool {
         { step: "succeeded", userId: this.deps.userId, command, handled: result.handled },
         "route_intent dispatch returned",
       );
-      // The dispatcher already rendered the user-facing artifact. The string
-      // here only feeds back to the LLM — keep it short so the model writes
-      // a concise closing line instead of paraphrasing the receipt.
+      // The dispatcher already rendered the user-facing artifact. Tell the
+      // LLM explicitly NOT to write a follow-up — historically a "flow
+      // started" sentence here leaked into Telegram before the user had
+      // tapped the mini-app button (or chose not to), which read as a false
+      // confirmation. The system prompt also instructs an empty reply on
+      // success; this is the matching tool-side signal.
       return {
         success: true,
         data: result.handled
-          ? `${command} flow started — the user has been shown the next step.`
+          ? "Capability rendered the user's next step. Reply with an empty string — do not write any follow-up."
           : `Could not start the ${command} flow.`,
       };
     } catch (err) {

@@ -603,13 +603,20 @@ export class HttpApiServer {
       if (
         message === 'SIGNING_REQUEST_NOT_FOUND' ||
         message === 'SIGNING_REQUEST_EXPIRED' ||
-        message === 'SIGNING_REQUEST_FORBIDDEN'
+        message === 'SIGNING_REQUEST_FORBIDDEN' ||
+        message === 'SIGNING_REQUEST_DUPLICATE_HASH'
       ) {
         await this.miniAppRequestCache!.delete(body.requestId).catch(() => undefined);
       }
       if (message === 'SIGNING_REQUEST_NOT_FOUND') return this.sendJson(res, 404, { error: 'Request not found' });
       if (message === 'SIGNING_REQUEST_EXPIRED') return this.sendJson(res, 410, { error: 'Request expired' });
       if (message === 'SIGNING_REQUEST_FORBIDDEN') return this.sendJson(res, 403, { error: 'Forbidden' });
+      // Stale-hash reuse: the FE handed us a txHash already consumed by a
+      // different recent requestId for this user. 409 Conflict is the
+      // semantically correct status; the FE doesn't currently surface a
+      // toast for it (we want quiet failure since the upstream cause is
+      // the FE itself reusing the hash) but logs make it investigable.
+      if (message === 'SIGNING_REQUEST_DUPLICATE_HASH') return this.sendJson(res, 409, { error: 'Stale txHash — already consumed by a prior request' });
       throw err;
     }
 

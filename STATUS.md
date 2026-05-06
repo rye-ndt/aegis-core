@@ -150,7 +150,7 @@ Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid()
 | Command | Behavior |
 |---|---|
 | `/start`, `/auth`, `/logout`, `/new`, `/history`, `/confirm`, `/cancel`, `/portfolio`, `/wallet`, `/sign` | Auth + meta |
-| `/buy <amount>` | BuyCapability — onramp keyboard (copy SCA address or MoonPay mini-app) |
+| `/buy <amount>` | BuyCapability — onramp keyboard (copy SCA address or MoonPay mini-app). When the argument resolves to a stock symbol via `IStockPairRegistry` (e.g. `/buy 100 AAPL`), the capability emits a chat redirect with a `stock:reroute:<SYMBOL>` button instead of dropping into the USDC onramp prompt. The reroute is silent if the stock catalogue isn't loaded — the onramp continues to work for amount-only and "buy with card" inputs. |
 | `/send`, `/money`, `/convert`, `/topup`, `/dca`, `/sell` | SendCapability — compile→resolve→Aegis Guard→sign (native + ERC-20 both auto-sign) |
 | `/swap` | SwapCapability — Relay cross/same-chain |
 | `/yield`, `/withdraw` | YieldCapability — Aave v3 deposit/withdraw. Also handles `rebalance:y/n` callbacks emitted by the per-user rebalance scan (sticky-winner protocol switch via `withdrawAll(old) → supply(new)` in one mini-app session). |

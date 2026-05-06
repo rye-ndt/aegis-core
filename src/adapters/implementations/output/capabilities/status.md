@@ -1,5 +1,48 @@
 # Capabilities Status
 
+## route_intent: suppress LLM acknowledgment + onramp/dedup hardening — 2026-05-05
+
+**What was done:**
+- `assistant.usecase.ts` system prompt now instructs the LLM to reply with an
+  empty string after `route_intent` returns. The capability already rendered
+  the user-facing artifact (mini-app prompt or result card); a "flow started"
+  acknowledgment was firing before the user clicked the WebApp button (or
+  chose not to), which read as a false confirmation.
+- `routeIntent.tool.ts` returns matching tool-side text:
+  `"Capability rendered the user's next step. Reply with an empty string —
+  do not write any follow-up."`
+- `assistantChatCapability.ts` now returns `{ kind: "noop" }` when the LLM's
+  prose reply is empty/whitespace, so a blank chat bubble never reaches
+  Telegram.
+- `signingRequest.usecase.ts` adds a per-user recent-txHash guard
+  (`RECENT_TXHASH_TTL_MS = 10 min`). On `resolveRequest` with a `txHash`,
+  if a *different* recent requestId from the same user already claimed
+  that hash, throw `SIGNING_REQUEST_DUPLICATE_HASH`. Same-requestId reuse
+  remains idempotent (FE retries on flaky network are unaffected).
+- `httpServer.ts` maps the new error to `409 Conflict` and deletes the
+  mini-app cache entry like the other terminal-error branches.
+
+**Why over alternatives:**
+- For the "flow started" message: gating on click would require a callback
+  back into the LLM turn; suppressing the line entirely is cleaner because
+  the mini-app prompt already conveys "tap below to..." and the result-card
+  framework handles every other follow-up surface.
+- For the dedup: server-side is the correct trust boundary. The FE's
+  payload-keyed dedupe (`recentBroadcasts.ts`) collided with legitimate
+  user-initiated repeats (e.g. `/send 0.01 USDC` twice → second send
+  silently reused the first hash). The FE was rekeyed by `requestId`
+  instead, but the BE guard ensures future FE bugs can't fake success.
+
+**New convention:**
+- `route_intent` (and any future single-call dispatcher tool) MUST instruct
+  the LLM to reply empty. Acknowledgment lines belong in the artifact
+  (`promptText`, `result_card`), not in LLM prose.
+- New error code: `SIGNING_REQUEST_DUPLICATE_HASH` → HTTP 409. Add to the
+  same branch as `NOT_FOUND/EXPIRED/FORBIDDEN` in `httpServer.ts` so the
+  mini-app cache entry is dropped on terminal failures.
+
+
+
 ## /send — in-code SEND_MANIFEST + direct ERC-20 calldata — 2026-05-05
 
 **What was done:**
@@ -685,3 +728,31 @@ Implemented Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalanc
 **Convention introduced:**
 - The fallback chat capability is **scope-locked to crypto/on-chain topics**. Any future change to `DEFAULT_SYSTEM_PROMPT` must preserve the `SCOPE — STRICT` paragraph (or replace it with an equivalent guard). Do not loosen it without an explicit product decision recorded here.
 - Refusal phrasing is intentionally short and tool-free — the LLM must not call `route_intent` or any read tool when refusing.
+
+---
+
+## 2026-05-05 — `/stock buy` flow patches (P0/P1 from `2026-05-05-buy-stock-flow-fixes.md`)
+
+**What changed:**
+- **Aegis-Guard pre-flight on `runOpen`** (§P0.1). `StockCapability.runOpen` now runs `checkTokenDelegation` against home-chain USDC at the top of the flow, mirroring `swapCapability`. On insufficient delegation it persists a `PendingIntent` keyed on the reapproval `requestId` and returns the reapproval mini-app artifact directly; `signingRequest.usecase.resumePendingIntent` re-enters `run()` with the same params after the user approves. New deps on `StockCapabilityDeps`: `tokenDelegationDB`, `pendingIntentStore`, `tokenRegistry`.
+- **`/buy <stock>` reroute** (§P0.3). `BuyCapability` now takes an optional `IStockPairRegistry`. When the user types `/buy AAPL` (or any free-text containing a stock symbol that resolves through `resolveByQuery`), it returns a chat artifact pointing the user at `/stock buy …` with an inline-keyboard button → `stock:reroute:<SYMBOL>` callback. The callback re-prompts for an amount (no default) and resumes via the new `awaiting_amount` state in `StockCapability.collect`.
+- **Recovery success/failure copy** (§P0.4). `notifyResolved` now branches on `planKind === "recovery"` BEFORE the generic error/rejection branches: success says "Funds returned — your USDC is back on $homeChain"; rejection says "Recovery failed — contact support with this request id". `SigningResolutionEvent.requestId` is a new field threaded from `signingRequest.usecase`.
+- **Synthetic-perp wording in preview** (§P0.5). The first preview field on `runOpen` is now an explicit `"What this is"` line clarifying the position is a synthetic perp tracking the symbol's price, not company shares. Plus updated `/stock` usage hint copy.
+- **Close → return-swap chaining race fix** (§P1.1). `executeSignSteps` gained an opt-in `onStepResolved` hook fired AFTER each successful resolution (`resolution.txHash` known) but BEFORE the loop advances. `runClose` uses it on the last close step to call `buildReturnSwapPlan` and pre-queue the first return-swap step into the mini-app cache, then passes that requestId to the chained `executeSignSteps` call via `firstStepRequestId` so step 0 reuses the pre-queued record instead of double-writing.
+- **Open-leg slippage haircut** (§P1.2). `stock.usecase.buildOpenPlan` haircuts `swap.expectedOutRaw` by `ASTER_ENV.openSlippageBps` (default 100 = 1%) before computing `qty1e10` AND before passing to `buildOpenPositionTxs`, so realistic Relay slippage doesn't revert the venue `transferFrom(amountIn)`. New env: `ASTER_OPEN_SLIPPAGE_BPS`.
+
+**Why this approach:**
+- The guard pre-flight is identical in spirit to `swapCapability` — copy/paste keeps the resume contract uniform across capabilities and avoids divergent reapproval UX.
+- The `/buy <stock>` reroute is deterministic (regex + registry lookup), no LLM round-trip; gives the user a clear path even when they typed the wrong slash command.
+- Pre-queuing the next request inside the resolution callback (instead of after `executeSignSteps` returns) closes a real race where the FE's `fetchNextRequest` fires immediately after `reportTxHash` resolves and finds nothing queued yet.
+
+**New conventions:**
+- New `StockCapabilityDeps` fields are all optional (`tokenDelegationDB`, `pendingIntentStore`, `tokenRegistry`); the capability silently skips the guard pre-flight if any are missing — Redis-less boot still works.
+- `executeSignSteps` accepts `onStepResolved(i, txHash)` — fired after each successful step, errors are logged but never abort the loop. Use this for any future "queue follow-up before advancing" pattern.
+- `executeSignSteps` accepts `firstStepRequestId` — when set with `continueSession: true`, step 0 skips create+store and reuses the pre-queued requestId. Pair with `queueFirstStepIntoCache`.
+- `SigningResolutionEvent.requestId` is now mandatory. Any new resolution-event consumer can rely on it for support copy / correlation.
+- Recovery-flow signing records take precedence in `notifyResolved` over generic error / rejection branches. Don't shadow the recovery branch with new generic handlers.
+- Preview field copy convention: open previews lead with a `"What this is"` muted-line description before mechanical fields (Symbol, Notional, Mark, Leverage). Mirror this on any future synthetic-asset preview.
+- Slippage haircut is applied in the use-case (`stock.usecase`) before sizing — never in the capability or broker. The user-facing notional is still the input value (no double-display).
+
+**Files touched:** `stockCapability.ts`, `buyCapability.ts`, `notifyResolved.ts`, `stock.usecase.ts`, `asterEnv.ts`, `routeIntent.tool.ts`, `stockOpen.tool.ts`, `signingRequest.{interface,usecase}.ts`, `aster/status.md`, `assistant.di.ts`.

@@ -9,6 +9,9 @@ import type {
  * with recovery nudges).
  */
 export type SigningResolutionEvent = {
+  /** Original signing request id — surfaced to users in support copy on
+   * recovery-flow failures (§P0.4) so we can correlate from the chat side. */
+  requestId: string;
   chatId: number;
   userId: string;
   txHash?: string;

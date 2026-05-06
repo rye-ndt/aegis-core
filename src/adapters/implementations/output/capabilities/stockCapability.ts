@@ -1,10 +1,13 @@
 import { InlineKeyboard } from "grammy";
 import { ASTER_ENV } from "../../../../helpers/env/asterEnv";
+import { CHAIN_CONFIG, getUsdcAddress } from "../../../../helpers/chainConfig";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { interpretError } from "../../../../helpers/errors/errorCatalog";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
+import { toRaw } from "../../../../helpers/bigint";
+import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import type {
   IntentResult,
   IntentVerb,
@@ -24,8 +27,11 @@ import type { IStockPairRegistry } from "../../../../use-cases/interface/output/
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
+import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
 import type { SignRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { SigningRequestRecord } from "../../../../use-cases/interface/output/cache/signingRequest.cache";
+import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import { buildPreview } from "./buildPreview";
 
 const log = createLogger("stockCapability");
@@ -74,6 +80,20 @@ export interface StockCapabilityDeps {
   miniAppRequestCache?: IMiniAppRequestCache;
   loyaltyUseCase?: ILoyaltyUseCase;
   isStockCapabilityDisabled?: () => boolean;
+  /**
+   * Aegis-Guard pre-flight on home-chain USDC. When provided, `runOpen` runs
+   * a delegation check at the start of the flow (see plan §P0.1) so users
+   * with insufficient delegation get a clean re-approval mini-app instead of
+   * an opaque user-op revert mid-bridge. Optional to keep the construction
+   * site flexible (the boot path skips wiring when Redis is unavailable).
+   */
+  tokenDelegationDB?: ITokenDelegationDB;
+  pendingIntentStore?: IPendingIntentStore;
+  /**
+   * Used during the §P0.1 guard pre-flight to resolve the home-chain USDC
+   * record (decimals, symbol) needed by `checkTokenDelegation`.
+   */
+  tokenRegistry?: ITokenRegistryService;
 }
 
 /**
@@ -109,6 +129,31 @@ export class StockCapability implements Capability<StockParams> {
       return this.handleCallback(ctx, ctx.input.data, resuming);
     }
     if (ctx.input.kind !== "text") return this.abort("Unexpected input.");
+
+    // Resuming an `awaiting_amount` ask from a /buy reroute (§P0.3). The user
+    // tapped the stock:reroute callback and is now sending the amount as text.
+    if (resuming) {
+      const state = resuming as { stage?: string; symbol?: string };
+      if (state.stage === "awaiting_amount" && state.symbol) {
+        const cleaned = ctx.input.text.trim().replace(/^\$/, "");
+        if (!/^\d+(?:\.\d+)?$/.test(cleaned)) {
+          return {
+            kind: "ask",
+            question: "Please reply with a number, e.g. 50.",
+            state: { stage: "awaiting_amount", symbol: state.symbol },
+          };
+        }
+        return {
+          kind: "ok",
+          params: {
+            kind: "open",
+            verb: "buy",
+            symbol: state.symbol,
+            amountUsd: cleaned,
+          },
+        };
+      }
+    }
 
     const text = ctx.input.text.trim();
     const stripped = text.replace(/^\/stock\s*/i, "").trim();
@@ -228,6 +273,77 @@ export class StockCapability implements Capability<StockParams> {
       "stock open started",
     );
 
+    // §P0.1 — Aegis-Guard pre-flight on home-chain USDC. Without this the
+    // user-op simulation reverts mid-bridge with an opaque error when the
+    // delegation budget is insufficient. Mirrors swapCapability.ts:156–195.
+    if (this.deps.tokenDelegationDB && this.deps.tokenRegistry) {
+      const usdcHome = getUsdcAddress(CHAIN_CONFIG.chainId);
+      if (usdcHome) {
+        const usdcHomeRow = await this.deps.tokenRegistry.findByAddressAndChain(
+          usdcHome,
+          CHAIN_CONFIG.chainId,
+        );
+        if (usdcHomeRow) {
+          const amountRaw = toRaw(params.amountUsd, usdcHomeRow.decimals);
+          const guard = await checkTokenDelegation({
+            userId: ctx.userId,
+            fromToken: usdcHomeRow,
+            amountHuman: params.amountUsd,
+            amountRaw,
+            tokenDelegationDB: this.deps.tokenDelegationDB,
+          });
+          if (!guard.ok) {
+            if (this.deps.pendingIntentStore) {
+              try {
+                await this.deps.pendingIntentStore.save({
+                  approvalRequestId: guard.reapprovalRequest.requestId,
+                  capabilityId: this.id,
+                  params: JSON.parse(JSON.stringify(params)) as Record<
+                    string,
+                    unknown
+                  >,
+                  userId: ctx.userId,
+                  channelId: ctx.channelId,
+                  expiresAt: guard.reapprovalRequest.expiresAt,
+                });
+                log.info(
+                  {
+                    step: "guard-blocked",
+                    userId: ctx.userId,
+                    approvalRequestId: guard.reapprovalRequest.requestId,
+                  },
+                  "stock open blocked by aegis-guard — reapproval required",
+                );
+              } catch (err) {
+                log.error(
+                  {
+                    err,
+                    approvalRequestId: guard.reapprovalRequest.requestId,
+                  },
+                  "failed to persist pending stock-open intent",
+                );
+              }
+            } else {
+              log.warn(
+                { userId: ctx.userId },
+                "guard blocked but no pendingIntentStore — user must re-issue command after approval",
+              );
+            }
+            return {
+              kind: "mini_app",
+              request: guard.reapprovalRequest,
+              promptText: guard.displayMessage,
+              buttonText: "Approve More",
+            };
+          }
+          log.info(
+            { step: "guard-passed", userId: ctx.userId },
+            "stock open guard passed",
+          );
+        }
+      }
+    }
+
     const plan = await this.deps.stockUseCase.buildOpenPlan({
       userId: ctx.userId,
       symbol: params.symbol,
@@ -257,6 +373,17 @@ export class StockCapability implements Capability<StockParams> {
             ? `${openVerbLabel} $${params.amountUsd} of ${plan.symbol}`
             : headlineForOpen(s.label),
         fields: [
+          {
+            // §P0.5 — make the synthetic-perp nature unmistakable in the
+            // preview modal so users who confuse the stock with a hypothetical
+            // token can back out before signing.
+            label: "What this is",
+            value:
+              `A synthetic ${plan.symbol} stock position on Aster — settled in ` +
+              `USDC on BSC. Not the ${plan.symbol} company shares; a perp ` +
+              `tracking ${plan.symbol}'s price.`,
+            emphasis: "muted" as const,
+          },
           { label: "Symbol", value: plan.symbol, emphasis: "primary" },
           { label: "Notional", value: `$${params.amountUsd}` },
           ...(plan.markPriceUsd
@@ -468,48 +595,79 @@ export class StockCapability implements Capability<StockParams> {
         ],
       }),
     );
+    // §P1.1 — pre-queue the first return-swap step DURING the close-step
+    // resolution callback so the FE's `fetchNextRequest` poll finds it on the
+    // very next tick after `reportTxHash` returns. Without this, the FE can
+    // close the mini-app between the close success and the return-swap
+    // emission, leaving the queued request to expire silently.
+    let returnPlan: import("../../../../use-cases/interface/input/stock.interface").StockExecutionPlan | null = null;
+    let preQueuedReturnRequestId: string | null = null;
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.steps,
       buttonText: "Execute Close",
       promptText: "Tap below to close the position.",
       previews: previewsForClose,
+      onStepResolved: async (i, _hash) => {
+        if (i !== plan.steps.length - 1) return;
+        try {
+          returnPlan = await this.deps.stockUseCase.buildReturnSwapPlan({
+            userId: ctx.userId,
+          });
+        } catch (err) {
+          log.error(
+            { err, userId: ctx.userId, step: "return-swap-plan-failed" },
+            "post-close return-swap plan failed",
+          );
+          returnPlan = null;
+          return;
+        }
+        if (returnPlan && returnPlan.steps.length > 0) {
+          preQueuedReturnRequestId = await this.queueFirstStepIntoCache(
+            ctx,
+            returnPlan.steps[0]!,
+            {
+              label:
+                returnPlan.steps.length === 1
+                  ? returnPlan.steps[0]!.label
+                  : `${returnPlan.steps[0]!.label} (1/${returnPlan.steps.length})`,
+              planKind: "recovery",
+            },
+          );
+          log.info(
+            {
+              step: "return-swap-prequeued",
+              userId: ctx.userId,
+              requestId: preQueuedReturnRequestId,
+              stepCount: returnPlan.steps.length,
+            },
+            "return-swap first step pre-queued",
+          );
+        }
+      },
     });
     if (result.aborted) return result.artifact;
 
-    // Plan P3.1 step 3 — append the venue→home return swap so freed
-    // collateral lands back on the user's home chain in the same mini-app
-    // session. `buildReturnSwapPlan` reads the live SCA balance, so the
-    // close tx must have settled (executeSignSteps awaits the receipt
-    // resolution before returning).
-    const returnPlan = await this.deps.stockUseCase
-      .buildReturnSwapPlan({ userId: ctx.userId })
-      .catch((err) => {
-        log.error(
-          { err, userId: ctx.userId, step: "return-swap-plan-failed" },
-          "post-close return-swap plan failed",
-        );
-        return null;
-      });
-
     let returnTxHashes: string[] = [];
-    if (returnPlan && returnPlan.steps.length > 0) {
+    if (returnPlan && (returnPlan as { steps: { length: number } }).steps.length > 0) {
+      const rPlan = returnPlan as import("../../../../use-cases/interface/input/stock.interface").StockExecutionPlan;
       log.info(
         {
           step: "return-swap-started",
           userId: ctx.userId,
           symbol: plan.symbol,
-          stepCount: returnPlan.steps.length,
+          stepCount: rPlan.steps.length,
         },
         "appending return swap after close",
       );
       const returnResult = await this.executeSignSteps({
         ctx,
-        steps: returnPlan.steps,
+        steps: rPlan.steps,
         buttonText: "Return Funds",
         promptText: "Returning your USDC to the home chain.",
         continueSession: true,
         planKind: "recovery",
+        firstStepRequestId: preQueuedReturnRequestId ?? undefined,
       });
       if (returnResult.aborted) {
         log.warn(
@@ -682,6 +840,21 @@ export class StockCapability implements Capability<StockParams> {
      * chains through `?after=<prev>`.
      */
     previews?: (IntentResult | undefined)[];
+    /**
+     * §P1.1 — fired after each successful step signature, BEFORE the loop
+     * advances to the next step or the function returns. Lets the caller
+     * pre-queue follow-up work (e.g. the post-close return-swap) so the FE's
+     * `fetchNextRequest` poll finds it on the very next tick. Errors thrown
+     * here propagate — the caller must catch.
+     */
+    onStepResolved?: (i: number, txHash: string) => Promise<void>;
+    /**
+     * §P1.1 — when set, step `i = 0` skips creating + caching a fresh
+     * signing-request record and instead awaits this pre-existing requestId
+     * (queued by the caller via `queueFirstStepIntoCache`). Only meaningful
+     * with `continueSession: true`. Avoids double-write to the cache.
+     */
+    firstStepRequestId?: string;
   }): Promise<
     | {
         aborted: true;
@@ -692,63 +865,81 @@ export class StockCapability implements Capability<StockParams> {
       }
     | { aborted: false; txHashes: string[] }
   > {
-    const { ctx, steps, buttonText, promptText, continueSession, planKind, preview, previews } = opts;
+    const {
+      ctx,
+      steps,
+      buttonText,
+      promptText,
+      continueSession,
+      planKind,
+      preview,
+      previews,
+      onStepResolved,
+      firstStepRequestId,
+    } = opts;
     const signing = this.deps.signingRequestUseCase;
     const chatId = Number(ctx.channelId);
     const txHashes: string[] = [];
 
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i]!;
-      const requestId = newUuid();
+      // §P1.1 — when the first step was already queued by the caller (close
+      // path's onStepResolved hook), reuse its requestId and skip the
+      // redundant create/store. waitFor still drives the loop forward.
+      const reusePreQueued = i === 0 && firstStepRequestId !== undefined;
+      const requestId = reusePreQueued ? firstStepRequestId! : newUuid();
       const now = newCurrentUTCEpoch();
       const label =
         steps.length === 1 ? step.label : `${step.label} (${i + 1}/${steps.length})`;
 
       const previewForStep =
         previews?.[i] ?? (i === 0 && !continueSession ? preview : undefined);
-      const record: SigningRequestRecord = {
-        id: requestId,
-        userId: ctx.userId,
-        chatId,
-        to: step.to,
-        value: step.value,
-        data: step.data,
-        description: label,
-        status: "pending",
-        createdAt: now,
-        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
-        autoSign: true,
-        tokenAddress: step.spendTokenAddress,
-        amountRaw: step.spendAmountRaw,
-        preview: previewForStep,
-        ...(planKind ? { planKind } : {}),
-      };
-      await signing.create(record);
 
-      const miniAppRequest: SignRequest = {
-        requestId,
-        requestType: "sign",
-        userId: ctx.userId,
-        to: step.to,
-        value: step.value,
-        data: step.data,
-        description: label,
-        autoSign: true,
-        chainId: step.chainId,
-        createdAt: now,
-        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
-        preview: previewForStep,
-      };
+      if (!reusePreQueued) {
+        const record: SigningRequestRecord = {
+          id: requestId,
+          userId: ctx.userId,
+          chatId,
+          to: step.to,
+          value: step.value,
+          data: step.data,
+          description: label,
+          status: "pending",
+          createdAt: now,
+          expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+          autoSign: true,
+          tokenAddress: step.spendTokenAddress,
+          amountRaw: step.spendAmountRaw,
+          preview: previewForStep,
+          ...(planKind ? { planKind } : {}),
+        };
+        await signing.create(record);
 
-      if (i === 0 && !continueSession) {
-        await ctx.emit({
-          kind: "mini_app",
-          request: miniAppRequest,
-          promptText,
-          buttonText,
-        });
-      } else if (this.deps.miniAppRequestCache) {
-        await this.deps.miniAppRequestCache.store(miniAppRequest);
+        const miniAppRequest: SignRequest = {
+          requestId,
+          requestType: "sign",
+          userId: ctx.userId,
+          to: step.to,
+          value: step.value,
+          data: step.data,
+          description: label,
+          autoSign: true,
+          chainId: step.chainId,
+          createdAt: now,
+          expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+          preview: previewForStep,
+        };
+
+        if (i === 0 && !continueSession) {
+          await ctx.emit({
+            kind: "mini_app",
+            request: miniAppRequest,
+            promptText,
+            buttonText,
+          });
+        } else if (this.deps.miniAppRequestCache) {
+          await this.deps.miniAppRequestCache.store(miniAppRequest);
+        }
       }
 
       log.debug(
@@ -820,9 +1011,83 @@ export class StockCapability implements Capability<StockParams> {
           },
           "stock step signed",
         );
+        if (onStepResolved) {
+          try {
+            await onStepResolved(i, resolution.txHash);
+          } catch (err) {
+            log.error(
+              { err, userId: ctx.userId, stepIndex: i },
+              "onStepResolved hook threw — continuing",
+            );
+          }
+        }
       }
     }
     return { aborted: false, txHashes };
+  }
+
+  /**
+   * §P1.1 — pre-queue a follow-up sign step into the mini-app request cache
+   * AND persist its signing-request record so the FE's `fetchNextRequest`
+   * poll finds it on the very next tick after a previous step resolves.
+   * Returns the new requestId so the caller can `signing.waitFor` on it
+   * (typically by passing `firstStepRequestId` into the chained
+   * `executeSignSteps` call).
+   */
+  private async queueFirstStepIntoCache(
+    ctx: CapabilityCtx,
+    step: StockExecutionStep,
+    opts: {
+      label?: string;
+      planKind?: "recovery";
+      preview?: IntentResult;
+    } = {},
+  ): Promise<string> {
+    const requestId = newUuid();
+    const now = newCurrentUTCEpoch();
+    const chatId = Number(ctx.channelId);
+    const description = opts.label ?? step.label;
+    const record: SigningRequestRecord = {
+      id: requestId,
+      userId: ctx.userId,
+      chatId,
+      to: step.to,
+      value: step.value,
+      data: step.data,
+      description,
+      status: "pending",
+      createdAt: now,
+      expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+      autoSign: true,
+      tokenAddress: step.spendTokenAddress,
+      amountRaw: step.spendAmountRaw,
+      preview: opts.preview,
+      ...(opts.planKind ? { planKind: opts.planKind } : {}),
+    };
+    await this.deps.signingRequestUseCase.create(record);
+
+    if (this.deps.miniAppRequestCache) {
+      const miniAppRequest: SignRequest = {
+        requestId,
+        requestType: "sign",
+        userId: ctx.userId,
+        to: step.to,
+        value: step.value,
+        data: step.data,
+        description,
+        autoSign: true,
+        chainId: step.chainId,
+        createdAt: now,
+        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+        preview: opts.preview,
+      };
+      await this.deps.miniAppRequestCache.store(miniAppRequest);
+    }
+    log.debug(
+      { step: "pre-queued", userId: ctx.userId, requestId, chainId: step.chainId },
+      "follow-up step pre-queued into mini-app cache",
+    );
+    return requestId;
   }
 
   private async emitRecoveryMiniApp(
@@ -937,10 +1202,28 @@ export class StockCapability implements Capability<StockParams> {
   private async handleCallback(
     ctx: CapabilityCtx,
     data: string,
-    _resuming?: Record<string, unknown>,
+    resuming?: Record<string, unknown>,
   ): Promise<CollectResult<StockParams>> {
     // stock:close-pick:<tradeHashShort>
     const suffix = data.replace(/^stock:/, "");
+    // stock:reroute:<SYMBOL> — sent by /buy AAPL fallback (§P0.3). We re-prompt
+    // for the amount rather than picking a default, so the user sets the exact
+    // notional they want for the stock.
+    if (suffix.startsWith("reroute:")) {
+      const symbol = suffix.slice("reroute:".length).toUpperCase();
+      if (!symbol) {
+        return this.terminal("Could not start stock flow — symbol missing.");
+      }
+      log.info(
+        { step: "reroute-callback", userId: ctx.userId, symbol },
+        "stock reroute callback",
+      );
+      return {
+        kind: "ask",
+        question: `How much USD of ${symbol} would you like to buy? Reply with a number, e.g. 50.`,
+        state: { stage: "awaiting_amount", symbol },
+      };
+    }
     if (suffix.startsWith("close-pick:")) {
       const short = suffix.slice("close-pick:".length);
       const positions = await this.deps.stockUseCase.listPositions(ctx.userId);
@@ -1000,7 +1283,8 @@ export class StockCapability implements Capability<StockParams> {
       artifact: {
         kind: "chat",
         text:
-          "Try `/stock buy $100 AAPL` · `/stock short $100 TSLA` · " +
+          "Trade tokenized stock perps on Aster (settled in USDC). Try " +
+          "`/stock buy $100 AAPL` · `/stock short $100 TSLA` · " +
           "`/stock close NVDA` · `/stock sl AAPL 150` · `/stock tp AAPL 220`.",
         parseMode: "Markdown",
       },

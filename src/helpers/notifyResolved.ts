@@ -42,7 +42,7 @@ export function buildNotifyResolved(
   userRepo?: IUserDB,
 ): (event: SigningResolutionEvent) => Promise<void> {
   return async (event: SigningResolutionEvent): Promise<void> => {
-    const { chatId, txHash, rejected, errorCode, errorMessage, data, planKind } = event;
+    const { requestId, chatId, txHash, rejected, errorCode, errorMessage, data, planKind } = event;
     const start = Date.now();
     log.info(
       { step: "started", chatId, userId: event.userId, rejected, errorCode, hasTxHash: !!txHash, planKind },
@@ -102,6 +102,26 @@ export function buildNotifyResolved(
         }
       }
 
+      return;
+    }
+
+    // §P0.4 — recovery-flow failures get a distinct, support-friendly card so
+    // the user knows the funds may be stranded on the venue. Must run BEFORE
+    // the generic error / rejection branches so they don't shadow it.
+    if (planKind === "recovery") {
+      const result = buildRecoveryFailureResult(requestId);
+      await sendCard(tgApi, chatId, result);
+      log.info(
+        {
+          step: "succeeded",
+          mode: "recovery-failed",
+          chatId,
+          requestId,
+          errorCode,
+          durationMs: Date.now() - start,
+        },
+        "notify-resolved",
+      );
       return;
     }
 
@@ -264,14 +284,39 @@ function buildRecoverySuccessResult(
   chainId: number,
   txHash: string | undefined,
 ): IntentResult {
+  // §P0.4 — recovery success copy: lead with the user-relevant fact ("funds
+  // back on home chain"), name the chain so they don't have to guess.
   return {
     status: "success",
     verb: "stock_buy",
     headline: "Funds returned",
     fields: [
-      { label: "Status", value: "Your collateral was bridged back to your home chain." },
+      {
+        label: "Status",
+        value: `Your USDC is back on ${CHAIN_CONFIG.name}.`,
+        emphasis: "primary",
+      },
     ],
     txHashes: txHash ? [{ hash: txHash, chainId }] : undefined,
+    complexity: "simple",
+  };
+}
+
+function buildRecoveryFailureResult(requestId: string): IntentResult {
+  // §P0.4 — recovery failure copy: tell the user funds may still be on the
+  // venue and surface the requestId for support correlation.
+  return {
+    status: "failed",
+    verb: "stock_buy",
+    headline: "Recovery failed",
+    fields: [
+      {
+        label: "Reason",
+        value:
+          "Funds may still be on the trading venue. Contact support with this request id.",
+      },
+      { label: "Request id", value: requestId, emphasis: "muted" },
+    ],
     complexity: "simple",
   };
 }

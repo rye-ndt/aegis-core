@@ -42,14 +42,15 @@ export class StockOpenTool implements ITool {
       name: "stock_open",
       description:
         "Open a tokenized-stock position (long or short) on Aster (BSC). " +
+        "Use this for ANY user request to buy, long, or short a stock — including " +
+        "phrasings like 'buy AAPL', 'buy $10 of TSLA', 'I want some Apple shares'. " +
+        "Do NOT use `route_intent` with `command=\"/buy\"` for stock symbols — " +
+        "`/buy` is the USDC fiat-onramp and is the wrong tool for stocks. " +
         "Supported symbols: AAPL, AMZN, TSLA, NVDA, GOOG, META. " +
         "The user is shown a mini-app confirmation modal before any signing — " +
         "this tool does NOT execute silently. " +
-        "Use this when the user asks to buy, long, or short a stock by USD notional " +
-        "(e.g. 'buy $10 of AAPL', 'long $25 TSLA', 'short $50 of NVDA'). " +
         "For closing or setting SL/TP, instruct the user to use /stock close, " +
-        "/stock sl, or /stock tp — those flows need disambiguation that this tool " +
-        "cannot provide.",
+        "/stock sl, or /stock tp.",
       inputSchema: z.toJSONSchema(InputSchema),
     };
   }

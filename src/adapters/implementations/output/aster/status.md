@@ -198,6 +198,17 @@ on every queued recovery step.
 
 Subsequent change: `stock_open` LLM tool — see `be/constructions/2026-05-05-stock-open-llm-tool.md`.
 
+## Venue-chain (BSC) delegation policy — 2026-05-05
+
+Venue-chain (BSC) sign requests are intentionally emitted without
+`tokenAddress`/`amountRaw` so the signing-request layer skips delegation
+enforcement. The home-chain USDC spend is the budget anchor; BSC funds are
+transient (bridged in, opened, closed, returned). When we add a per-token
+budget on USDC.bsc, ship a `delegation_grant` migration first AND set
+`spendTokenAddress` on the venue open step. Until then, do not assume
+`signingRequest.usecase.preFlight` enforces a guard on the venue leg —
+tightening it without that migration will silently break /stock open.
+
 ## Out of scope (Phase 3+)
 
 - Verified `getPositionsV2` ABI struct (`TODO_VERIFY_ABI(positions)`) and

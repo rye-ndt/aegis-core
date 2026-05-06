@@ -89,6 +89,17 @@ export class AssistantChatCapability implements Capability<AssistantParams> {
       }
     }
 
+    // Empty/whitespace prose: the model intentionally suppressed its reply
+    // (e.g. after `route_intent` rendered the next step). Don't post a blank
+    // chat message to Telegram — that surfaces as a phantom bubble.
+    if (!response.reply || !response.reply.trim()) {
+      log.info(
+        { step: "succeeded", mode: "suppressed-empty", toolsUsed: response.toolsUsed.length },
+        "assistant-chat",
+      );
+      return { kind: "noop" };
+    }
+
     log.info(
       { step: "succeeded", mode: "prose", toolsUsed: response.toolsUsed.length },
       "assistant-chat",

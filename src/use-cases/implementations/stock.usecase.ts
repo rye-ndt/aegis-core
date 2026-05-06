@@ -20,6 +20,7 @@ import type { IUserProfileDB } from "../interface/output/repository/userProfile.
 import type { ITokenRegistryService } from "../interface/output/tokenRegistry.interface";
 import { divFixed, toRaw } from "../../helpers/bigint";
 import { CHAIN_CONFIG, getUsdcAddress } from "../../helpers/chainConfig";
+import { ASTER_ENV } from "../../helpers/env/asterEnv";
 import { createLogger } from "../../helpers/observability/logger";
 
 const log = createLogger("stockUseCase");
@@ -69,6 +70,10 @@ export class StockUseCaseImpl implements IStockUseCase {
     if (!usdcHomeRow) throw new Error("home USDC not in token registry");
 
     // 1. Mark price (used as the on-chain `price` field on openMarketTrade).
+    // TODO(§P2.1) — gate on mark-price freshness / market-hours. Aster's
+    // oracle can return stale or zero quotes outside market hours; openTrade
+    // would then fill at a bad price or revert. Boot-time verify-aster-pairs
+    // checks oracle presence; runtime drift is unhandled.
     const mark = await this.deps.oracle.markPrice(symbol);
     const markFixed1e8 = toRaw(mark.priceUsd, 8);
 
@@ -93,7 +98,21 @@ export class StockUseCaseImpl implements IStockUseCase {
     // 3. Derive qty from delivered collateral (post-fee/slippage). Sizing
     //    qty from the user's input USD would silently mis-leverage the open
     //    when the bridge fee eats into amountIn (fix #6).
-    const collateralAmountRaw = swap.expectedOutRaw;
+    //
+    //    §P1.2 — apply a small haircut (default 1%) on the quoted
+    //    expectedOutRaw before sizing qty AND before passing to
+    //    buildOpenPositionTxs. Real delivered USDC.bsc is sometimes lower than
+    //    Relay's quote (post-fee, post-slippage); without this the venue
+    //    `transferFrom(amountIn)` reverts when balance < quote. The trade-off
+    //    is that the user opens with slightly less notional than they typed
+    //    (typically ~1%); the leftover dust is swept home by the return-swap
+    //    on close. Display to the user remains the input value.
+    const slippageBps = BigInt(ASTER_ENV.openSlippageBps);
+    const haircutRaw = (
+      (BigInt(swap.expectedOutRaw) * (10_000n - slippageBps)) /
+      10_000n
+    ).toString();
+    const collateralAmountRaw = haircutRaw;
     const collateralDecimals = this.deps.broker.collateralToken.decimals;
     const collateralUsdHuman = formatUnits(
       BigInt(collateralAmountRaw),
@@ -115,7 +134,9 @@ export class StockUseCaseImpl implements IStockUseCase {
 
     // 5. Sequence steps. Tag the LAST swap leg with home-chain spend so the
     //    delegation row's spent_raw bumps once on success (matches
-    //    swapCapability's last-step convention).
+    //    swapCapability's last-step convention). Venue (BSC) steps are
+    //    intentionally untagged — see aster/status.md "Venue-chain (BSC)
+    //    delegation policy" for the rationale (§P0.2).
     const steps: StockExecutionStep[] = [];
     swap.txs.forEach((tx, i) => {
       const isLast = i === swap.txs.length - 1;

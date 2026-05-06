@@ -13,6 +13,14 @@ import type { ITokenDelegationDB } from "../interface/output/repository/tokenDel
 
 const log = createLogger("signingRequest");
 const POLL_INTERVAL_MS = 1500;
+// How long a successfully-claimed txHash blocks a different requestId from
+// re-claiming it. The FE's localStorage dedupe TTL is 10 min; pairing this
+// guard at the same window catches the cross-requestId reuse scenario:
+// the FE silently reusing an old hash (because legacy payload-keyed
+// dedupe matched) would otherwise fake a second success card. 10 min is
+// also longer than the signing request TTL (10 min) so any hash from a
+// still-resolvable request is also covered.
+const RECENT_TXHASH_TTL_MS = 10 * 60 * 1000;
 
 export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
   // Per-request cancel hooks installed by `waitFor`. Calling the fn flips the
@@ -22,6 +30,14 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
   // Reverse index so `cancelActiveForUser` can find every in-flight requestId
   // for a user without scanning the whole map.
   private readonly requestsByUserId = new Map<string, Set<string>>();
+  // Per-user recent successful txHashes. Used to reject a /response that
+  // claims a txHash already consumed by a *different* requestId — i.e. the
+  // FE silently reusing a stale hash from its localStorage dedupe cache.
+  // Keyed by userId, then by lowercased txHash.
+  private readonly recentTxHashByUser = new Map<
+    string,
+    Map<string, { requestId: string; ts: number }>
+  >();
 
   constructor(
     private readonly cache: ISigningRequestCache,
@@ -59,6 +75,31 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     if (record.expiresAt <= now) throw new Error("SIGNING_REQUEST_EXPIRED");
 
     const rejected = params.rejected === true;
+
+    // Reject hash reuse: a different requestId for the same user already
+    // claimed this txHash recently, which means the FE handed us a stale
+    // hash from its dedupe cache rather than broadcasting fresh. Without
+    // this guard we'd render a phantom success card for a tx the user
+    // never re-signed.
+    if (!rejected && params.txHash) {
+      const hashKey = params.txHash.toLowerCase();
+      const guard = this.checkAndRecordTxHash(record.userId, hashKey, params.requestId);
+      if (!guard.ok) {
+        log.warn(
+          {
+            step: "duplicate-txhash-rejected",
+            requestId: params.requestId,
+            priorRequestId: guard.priorRequestId,
+            userId: record.userId,
+            hash: hashKey,
+            ageMs: guard.ageMs,
+          },
+          "FE submitted a txHash already consumed by another requestId",
+        );
+        throw new Error("SIGNING_REQUEST_DUPLICATE_HASH");
+      }
+    }
+
     await this.cache.resolve(
       params.requestId,
       rejected ? "rejected" : "approved",
@@ -120,6 +161,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     }
 
     this.onResolved({
+      requestId: record.id,
       chatId: record.chatId,
       userId: record.userId,
       txHash: params.txHash,
@@ -245,6 +287,45 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
         }
       }
     }
+  }
+
+  /**
+   * Returns ok=true if the (userId, txHash) pair is fresh OR already owned
+   * by the same requestId (the latter keeps repeated /response calls for the
+   * same request idempotent — e.g. the FE retrying after a flaky network).
+   * Returns ok=false when a *different* recent requestId already claimed
+   * this hash, indicating stale-hash reuse.
+   *
+   * On ok=true the entry is recorded so subsequent attempts are caught.
+   */
+  private checkAndRecordTxHash(
+    userId: string,
+    hashKey: string,
+    requestId: string,
+  ): { ok: true } | { ok: false; priorRequestId: string; ageMs: number } {
+    const now = Date.now();
+    let bucket = this.recentTxHashByUser.get(userId);
+    if (bucket) {
+      // Prune entries past TTL to keep memory bounded without a global timer.
+      for (const [k, v] of bucket) {
+        if (now - v.ts > RECENT_TXHASH_TTL_MS) bucket.delete(k);
+      }
+    }
+    const existing = bucket?.get(hashKey);
+    if (existing) {
+      if (existing.requestId === requestId) return { ok: true }; // idempotent retry
+      return {
+        ok: false,
+        priorRequestId: existing.requestId,
+        ageMs: now - existing.ts,
+      };
+    }
+    if (!bucket) {
+      bucket = new Map();
+      this.recentTxHashByUser.set(userId, bucket);
+    }
+    bucket.set(hashKey, { requestId, ts: now });
+    return { ok: true };
   }
 
   cancelActiveForUser(userId: string): number {

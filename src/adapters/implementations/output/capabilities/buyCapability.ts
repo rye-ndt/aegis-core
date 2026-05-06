@@ -1,6 +1,7 @@
 import { InlineKeyboard } from "grammy";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
+import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import type {
@@ -13,6 +14,9 @@ import type {
 import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
 import type { OnrampRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IStockPairRegistry } from "../../../../use-cases/interface/output/stocks/stockPair.interface";
+
+const log = createLogger("buyCapability");
 
 type BuyParams = { choice: "deposit" | "card"; amount: number };
 
@@ -37,6 +41,13 @@ export class BuyCapability implements Capability<BuyParams> {
   constructor(
     private readonly userProfileRepo: IUserProfileDB,
     private readonly chainId: number = CHAIN_CONFIG.chainId,
+    /**
+     * Optional — when present, `/buy <stockSymbol>` is intercepted and the
+     * user is redirected to `/stock buy …` instead of being dropped into the
+     * USDC onramp flow. Skipped silently when the catalogue is empty so a
+     * stalled crawler never blocks the onramp. See plan §P0.3.
+     */
+    private readonly stockPairRegistry?: IStockPairRegistry,
   ) {}
 
   async collect(
@@ -63,6 +74,53 @@ export class BuyCapability implements Capability<BuyParams> {
 
     // ── Text ───────────────────────────────────────────────────────────
     const text = ctx.input.text;
+
+    // §P0.3 reroute — if the user typed `/buy AAPL` (or "100 AAPL" while
+    // resuming an awaiting_amount prompt), the right capability is /stock,
+    // not the USDC onramp. Skip silently when the catalogue isn't loaded so
+    // an offline stock crawler never blocks the onramp.
+    if (this.stockPairRegistry && this.stockPairRegistry.symbols().length > 0) {
+      const stripped = text.replace(/^\/buy\b/i, "").trim();
+      const tokens = stripped.split(/\s+/).filter((t) => t.length > 0);
+      let parsedAmount: string | undefined;
+      let stockSymbol: string | undefined;
+      for (const tok of tokens) {
+        const cleanedAmt = tok.replace(/^\$/, "");
+        if (!parsedAmount && /^\d+(?:\.\d+)?$/.test(cleanedAmt)) {
+          parsedAmount = cleanedAmt;
+          continue;
+        }
+        if (!stockSymbol) {
+          const resolved = this.stockPairRegistry.resolveByQuery(tok);
+          if (resolved) stockSymbol = resolved.symbol;
+        }
+      }
+      if (stockSymbol) {
+        log.info(
+          { step: "rerouted-to-stock", symbol: stockSymbol },
+          "/buy <stock> rerouted",
+        );
+        const amountForExample = parsedAmount ?? "100";
+        const buttonLabel = `Buy ${amountForExample} USD of ${stockSymbol} stock`;
+        const keyboard = new InlineKeyboard().text(
+          buttonLabel,
+          `stock:reroute:${stockSymbol}`,
+        );
+        const message =
+          `You typed \`/buy ${stockSymbol}\`, which is for buying USDC ` +
+          `(the dollar stablecoin). Did you mean to buy a stock? ` +
+          `Try \`/stock buy $${amountForExample} ${stockSymbol}\`.`;
+        return {
+          kind: "terminal",
+          artifact: {
+            kind: "chat",
+            text: message,
+            parseMode: "Markdown",
+            keyboard,
+          },
+        };
+      }
+    }
 
     // Resuming an "awaiting_amount" prompt with a bare number.
     if (state?.stage === "awaiting_amount") {
