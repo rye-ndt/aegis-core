@@ -8,6 +8,8 @@ export const users = pgTable("users", {
   privyDid: text("privy_did").unique(),
   status: text("status").notNull(),
   loyaltyStatus: text("loyalty_status").notNull().default("normal"),
+  telegramUsername: text("telegram_username"),
+  telegramFirstName: text("telegram_first_name"),
   createdAtEpoch: integer("created_at_epoch").notNull(),
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });

@@ -77,10 +77,39 @@ export function buildNotifyResolved(
 
       if (event.recipientTelegramUserId && recipientNotificationUseCase) {
         let senderDisplayName: string | null = null;
+        let senderHandle: string | null = null;
         if (userRepo) {
           try {
             const sender = await userRepo.findById(event.userId);
-            senderDisplayName = sender?.userName ?? null;
+            senderHandle = sender?.telegramUsername ?? null;
+            senderDisplayName =
+              sender?.telegramFirstName ??
+              sanitizeUserName(sender?.userName ?? null);
+
+            // Backfill: if we have no handle stored but the sender is on
+            // Telegram, ask the Bot API. Persist so we only pay this once.
+            if (!senderHandle && sender) {
+              const resolved = await resolveTelegramHandleViaBot(
+                tgApi,
+                event.chatId,
+              );
+              if (resolved) {
+                senderHandle = resolved.username ?? null;
+                senderDisplayName = senderDisplayName ?? resolved.firstName ?? null;
+                // Only write fields we actually resolved — avoids hammering the
+                // row with `username: null` updates for users who have no @handle.
+                if (resolved.username || resolved.firstName) {
+                  const patch: { username?: string; firstName?: string } = {};
+                  if (resolved.username) patch.username = resolved.username;
+                  if (resolved.firstName) patch.firstName = resolved.firstName;
+                  await userRepo
+                    .setTelegramProfile(sender.id, patch)
+                    .catch((err) =>
+                      log.warn({ err, userId: sender.id }, "telegram-handle-backfill-persist-failed"),
+                    );
+                }
+              }
+            }
           } catch (err) {
             log.warn({ err, userId: event.userId }, "sender-lookup-failed");
           }
@@ -91,7 +120,7 @@ export function buildNotifyResolved(
             senderUserId: event.userId,
             senderChatId: String(event.chatId),
             senderDisplayName,
-            senderHandle: null,
+            senderHandle,
             tokenSymbol: event.tokenSymbol ?? "UNKNOWN",
             amountFormatted: event.amountFormatted ?? "",
             chainId,
@@ -370,5 +399,33 @@ function stockErrorMessage(code: string | undefined): string | null {
 function shortenAddress(addr: string): string {
   if (addr.length <= 10) return addr;
   return `${addr.slice(0, 6)}…${addr.slice(-4)}`;
+}
+
+// Synthetic usernames produced by the Privy fallback email path
+// (`tg_<telegramUserId>@privy.local`) leak the numeric id into notifications.
+// Reject them so the renderer falls back to display-name / "someone".
+function sanitizeUserName(name: string | null): string | null {
+  if (!name) return null;
+  if (/^tg_\d+$/.test(name)) return null;
+  return name;
+}
+
+async function resolveTelegramHandleViaBot(
+  tgApi: Api,
+  chatId: number,
+): Promise<{ username: string | null; firstName: string | null } | null> {
+  try {
+    const chat = (await tgApi.getChat(chatId)) as {
+      username?: string;
+      first_name?: string;
+    };
+    return {
+      username: chat.username ?? null,
+      firstName: chat.first_name ?? null,
+    };
+  } catch (err) {
+    log.warn({ err, chatId }, "getChat-handle-resolve-failed");
+    return null;
+  }
 }
 

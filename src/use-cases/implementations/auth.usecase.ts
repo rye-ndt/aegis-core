@@ -35,7 +35,7 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     if (!this.privyAuthService) throw new Error("PRIVY_NOT_CONFIGURED");
 
     const profile = await this.privyAuthService.verifyToken(input.privyToken);
-    const { privyDid, email } = profile;
+    const { privyDid, email, telegramUsername } = profile;
 
     // When a telegramChatId is provided, the user opening the Mini App is already
     // known to the bot via telegram_sessions. Reuse that existing userId so that
@@ -67,7 +67,9 @@ export class AuthUseCaseImpl implements IAuthUseCase {
     if (!user) {
       const userId = newUuid();
       const now = newCurrentUTCEpoch();
-      const userName = email.split("@")[0] ?? "user";
+      // Prefer the real Telegram @handle as userName; fall back to the local
+      // part of email (which for telegram-only users is `tg_<id>`).
+      const userName = telegramUsername ?? email.split("@")[0] ?? "user";
 
       await this.userDB.create({
         id: userId,
@@ -75,11 +77,36 @@ export class AuthUseCaseImpl implements IAuthUseCase {
         email,
         privyDid,
         status: USER_STATUSES.ACTIVE,
+        telegramUsername: telegramUsername ?? null,
         createdAtEpoch: now,
         updatedAtEpoch: now,
       });
 
-      user = { id: userId, email, userName, privyDid, status: USER_STATUSES.ACTIVE, loyaltyStatus: LOYALTY_STATUSES.NORMAL, createdAtEpoch: now, updatedAtEpoch: now } satisfies IUser;
+      user = {
+        id: userId,
+        email,
+        userName,
+        privyDid,
+        status: USER_STATUSES.ACTIVE,
+        loyaltyStatus: LOYALTY_STATUSES.NORMAL,
+        telegramUsername: telegramUsername ?? null,
+        telegramFirstName: null,
+        createdAtEpoch: now,
+        updatedAtEpoch: now,
+      } satisfies IUser;
+    } else if (telegramUsername && user.telegramUsername !== telegramUsername) {
+      // Backfill / refresh telegram handle for existing users — e.g. accounts
+      // created before this column existed, or users who changed their @handle.
+      // We deliberately do NOT rewrite `userName` here: it may be referenced by
+      // other surfaces (history rendering, unique constraints) and changing it
+      // mid-lifecycle is a separate migration. Notification path reads
+      // `telegramUsername` first, so the visible bug is already resolved.
+      await this.userDB
+        .setTelegramProfile(user.id, { username: telegramUsername })
+        .catch((err) => {
+          log.warn({ err, userId: user!.id }, "telegram-username-backfill-failed");
+        });
+      user = { ...user, telegramUsername };
     }
 
     const expiresAtEpoch = newCurrentUTCEpoch() + SESSION_TTL_SECONDS;

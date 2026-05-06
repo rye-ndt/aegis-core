@@ -70,11 +70,23 @@ export class StockUseCaseImpl implements IStockUseCase {
     if (!usdcHomeRow) throw new Error("home USDC not in token registry");
 
     // 1. Mark price (used as the on-chain `price` field on openMarketTrade).
-    // TODO(§P2.1) — gate on mark-price freshness / market-hours. Aster's
-    // oracle can return stale or zero quotes outside market hours; openTrade
-    // would then fill at a bad price or revert. Boot-time verify-aster-pairs
-    // checks oracle presence; runtime drift is unhandled.
+    // §P2.1 partial — guard against zero/missing mark before sizing. Aster's
+    // oracle returns "0" for US-stock symbols outside market hours; without
+    // this guard, `divFixed(collateralUsd, 0, …)` throws "division by zero",
+    // which `errorCatalog` falls back to a generic "internal" message. By
+    // throwing `MARKET_CLOSED` here we hit the dedicated catalog entry that
+    // tells the user to try again when markets reopen. Freshness/staleness
+    // (non-zero but old quotes) is still unhandled — that's the rest of §P2.1.
     const mark = await this.deps.oracle.markPrice(symbol);
+    if (!mark.priceUsd || Number(mark.priceUsd) <= 0) {
+      log.warn(
+        { step: "failed", symbol, priceUsd: mark.priceUsd ?? null },
+        "oracle returned zero mark price — likely outside trading hours",
+      );
+      throw new Error(
+        `MARKET_CLOSED — oracle returned no mark price for ${symbol}`,
+      );
+    }
     const markFixed1e8 = toRaw(mark.priceUsd, 8);
 
     // 2. Cross-chain swap leg via the port (fix #8).

@@ -9,6 +9,8 @@ export interface UserInit {
   privyDid?: string;
   status: USER_STATUSES;
   loyaltyStatus?: LOYALTY_STATUSES;
+  telegramUsername?: string | null;
+  telegramFirstName?: string | null;
   createdAtEpoch: number;
   updatedAtEpoch: number;
 }
@@ -30,6 +32,10 @@ export interface IUserDB {
   create(user: UserInit): Promise<void>;
   update(user: UserUpdate): Promise<void>;
   linkPrivyDid(userId: string, privyDid: string): Promise<void>;
+  setTelegramProfile(
+    userId: string,
+    fields: { username?: string | null; firstName?: string | null },
+  ): Promise<void>;
   findById(id: string): Promise<IUser | undefined>;
   findByEmail(email: string): Promise<IUser | null>;
   findByPrivyDid(privyDid: string): Promise<IUser | null>;

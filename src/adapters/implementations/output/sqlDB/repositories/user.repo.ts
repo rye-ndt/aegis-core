@@ -22,9 +22,22 @@ export class DrizzleUserRepo implements IUserDB {
       email: user.email,
       privyDid: user.privyDid ?? null,
       status: user.status,
+      telegramUsername: user.telegramUsername ?? null,
+      telegramFirstName: user.telegramFirstName ?? null,
       createdAtEpoch: user.createdAtEpoch,
       updatedAtEpoch: user.updatedAtEpoch,
     });
+  }
+
+  async setTelegramProfile(
+    userId: string,
+    fields: { username?: string | null; firstName?: string | null },
+  ): Promise<void> {
+    const patch: { telegramUsername?: string | null; telegramFirstName?: string | null } = {};
+    if (fields.username !== undefined) patch.telegramUsername = fields.username;
+    if (fields.firstName !== undefined) patch.telegramFirstName = fields.firstName;
+    if (Object.keys(patch).length === 0) return;
+    await this.db.update(users).set(patch).where(eq(users.id, userId));
   }
 
   async update(user: UserUpdate): Promise<void> {
@@ -86,6 +99,8 @@ export class DrizzleUserRepo implements IUserDB {
       privyDid: row.privyDid ?? undefined,
       status: row.status as USER_STATUSES,
       loyaltyStatus: (row.loyaltyStatus as LOYALTY_STATUSES) ?? LOYALTY_STATUSES.NORMAL,
+      telegramUsername: row.telegramUsername ?? null,
+      telegramFirstName: row.telegramFirstName ?? null,
       createdAtEpoch: row.createdAtEpoch,
       updatedAtEpoch: row.updatedAtEpoch,
     };

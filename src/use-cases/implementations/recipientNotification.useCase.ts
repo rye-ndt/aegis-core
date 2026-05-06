@@ -143,23 +143,38 @@ export class RecipientNotificationUseCase {
   }
 
   private renderSingle(r: RecipientNotificationRow): string {
-    const sender = r.senderHandle
-      ? `@${r.senderHandle}`
-      : (r.senderDisplayName ?? "someone");
+    const sender = this.formatSender(r);
     const chain = getChainName(r.chainId);
     const tx = r.txHash
       ? `\n[View on explorer](${getExplorerTxUrl(r.chainId, r.txHash)})`
       : "";
-    return `*${sender}* sent you *${r.amountFormatted} ${r.tokenSymbol}* on ${chain}.${tx}`;
+    const amount = escapeMarkdown(`${r.amountFormatted} ${r.tokenSymbol}`);
+    return `*${sender}* sent you *${amount}* on ${escapeMarkdown(chain)}.${tx}`;
   }
 
   private renderDigest(rows: RecipientNotificationRow[]): string {
     const lines = rows.map((r) => {
-      const sender = r.senderHandle
-        ? `@${r.senderHandle}`
-        : (r.senderDisplayName ?? "someone");
-      return `• ${sender} → ${r.amountFormatted} ${r.tokenSymbol} on ${getChainName(r.chainId)}`;
+      const sender = this.formatSender(r);
+      const amount = escapeMarkdown(`${r.amountFormatted} ${r.tokenSymbol}`);
+      return `• ${sender} → ${amount} on ${escapeMarkdown(getChainName(r.chainId))}`;
     });
     return `Welcome back! While you were away you received:\n\n${lines.join("\n")}`;
   }
+
+  // Returns the sender label already escaped for legacy Markdown parse mode.
+  // Real Telegram @handles routinely contain `_`, which would otherwise be
+  // interpreted as italic and break parsing — Telegram then rejects the entire
+  // message and the row would be marked failed.
+  private formatSender(r: RecipientNotificationRow): string {
+    if (r.senderHandle) return `@${escapeMarkdown(r.senderHandle)}`;
+    if (r.senderDisplayName) return escapeMarkdown(r.senderDisplayName);
+    return "someone";
+  }
+}
+
+// Escape characters that legacy Telegram Markdown treats as formatting
+// delimiters. Keep in sync with `parse_mode: "Markdown"` send sites in this
+// module — switch to `MarkdownV2` if richer formatting is ever needed.
+function escapeMarkdown(s: string): string {
+  return s.replace(/([_*`\[])/g, "\\$1");
 }

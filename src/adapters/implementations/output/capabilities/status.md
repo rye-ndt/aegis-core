@@ -756,3 +756,29 @@ Implemented Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalanc
 - Slippage haircut is applied in the use-case (`stock.usecase`) before sizing — never in the capability or broker. The user-facing notional is still the input value (no double-display).
 
 **Files touched:** `stockCapability.ts`, `buyCapability.ts`, `notifyResolved.ts`, `stock.usecase.ts`, `asterEnv.ts`, `routeIntent.tool.ts`, `stockOpen.tool.ts`, `signingRequest.{interface,usecase}.ts`, `aster/status.md`, `assistant.di.ts`.
+
+---
+
+## 2026-05-06 — `/stock buy` slot-fill for missing amount
+
+**What changed:**
+- `StockCapability.collect` no longer rejects symbol-only invocations (e.g. natural-language "buy apple stock" or `/stock buy AAPL` with no amount). When `parseAmountSymbol` resolves a symbol but no amount, it now returns `kind: "ask"` with `state: { stage: "awaiting_amount", symbol, verb }`, reusing the existing `awaiting_amount` resume handler that previously only served the `/buy <stock>` reroute path.
+- `parseAmountSymbol` return type changed from `{ amountUsd, symbol } | null` to `{ amountUsd?, symbol? }` — partial results are now first-class so the caller can distinguish "no symbol recognized" (→ `usageHint`) from "symbol-only" (→ ask).
+- The `awaiting_amount` resume branch now reads `verb` from state instead of hard-coding `"buy"`, so a user who said "short apple" and is then asked for an amount resumes as a short.
+- `stock_open` LLM tool: `amountUsd` is now `optional` in the input schema, with the description telling the model to OMIT the field (not invent a default) when the user didn't specify one. When omitted, the dispatched command is `/stock <side> <SYMBOL>` (no `$<amount>`), and the tool result tells the model the user has been asked for the amount and to wait for their reply.
+
+**Why this approach:**
+- Reusing the already-shipped `awaiting_amount` slot-fill avoided introducing the manifest-driven `getMissingRequiredFields` / `generateMissingParamQuestion` pipeline that `sendCapability` and `swapCapability` use — that pipeline requires a `CapabilityManifest`, which `stockCapability` doesn't have. Both entry points (LLM tool, direct slash command) now share a single ask path.
+- Making `amountUsd` optional at the tool layer is the upstream fix: previously the model would hallucinate an amount to satisfy the required-string schema, which is how "buy apple stock" was reaching the mini-app's confirm button without ever asking the user.
+
+**New conventions:**
+- When a regex/parser-driven capability has required slots, the parser should return *partial* matches rather than null-on-missing, and the `collect` caller decides whether to ask or hint. Don't conflate "input was unparseable" with "input parsed but a slot is missing."
+- LLM tool schemas for capabilities that have a slot-fill path SHOULD mark the slot-fillable fields `optional` in zod and explicitly tell the model to omit (not default) — otherwise the model invents values.
+
+**Files touched:** `stockCapability.ts`, `stockOpen.tool.ts`, `assistant.usecase.ts`, `stock.usecase.ts`.
+
+**Follow-up #3 (same day):** "buy tesla stock" → "5" → cryptic "Something went wrong" with code. Root cause: `stock.usecase.buildOpenPlan` called `divFixed(collateralUsd, mark.priceUsd, 10)` with `mark.priceUsd === "0"` because Aster's oracle returns 0 for US tickers outside market hours (this was the long-standing §P2.1 TODO). The "divFixed: division by zero" throw didn't match any errorCatalog pattern, so it fell through to `code: "internal"` and the generic message. Fix: validate `mark.priceUsd` immediately after `oracle.markPrice` and throw `MARKET_CLOSED — oracle returned no mark price for <SYMBOL>`, which the catalog maps to the friendly "US markets are closed right now. Try again when they reopen." Convention: any sizing math that consumes oracle prices MUST validate the price is positive before passing it to `divFixed`/`toRaw`/etc., and surface a catalog-recognised error so the user gets a meaningful message instead of an opaque request id. Freshness/staleness (non-zero but old quotes) remains unhandled — still part of §P2.1.
+
+**Follow-up #2 (same day):** the `awaiting_amount` resume handler was eating fresh stock commands ("buy tesla stock" while a previous "buy apple stock" left the user in `awaiting_amount`) as malformed amount replies, and re-asking with a contextless "Please reply with a number, e.g. 50." Two fixes: (a) when the resume input is non-numeric, sniff for a fresh-command shape (`/`-prefix, or starts with `buy|short|sell|close|sl|tp|long|stock`) and fall through to the normal parse path so the new command takes over; (b) the re-ask question is now self-contained — "I didn't catch a number. How much USD would you like to buy of AAPL? Reply with just a number, e.g. 50." Convention: any slot-fill resume handler that reads free text MUST detect fresh-command inputs and drop pending state rather than trapping the user in the slot.
+
+**Follow-up (same day):** the model paraphrased the capability's "How much USD…" prompt back to the user, producing a duplicated question. Fixed by (a) extending the assistant system prompt's "reply with an empty string" rule from `route_intent` to also cover `stock_open`, and (b) tightening the tool's `data` string to explicitly tell the model not to ask, rephrase, or acknowledge — the capability has already shown the prompt. Convention: any tool whose dispatch results in a user-visible chat message (mini-app, ask, result card) MUST end its `data` string with "Reply with an empty string; do NOT acknowledge or rephrase," and the system prompt's empty-reply rule must list the tool name explicitly.

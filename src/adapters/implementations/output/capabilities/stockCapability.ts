@@ -21,6 +21,7 @@ import type {
 } from "../../../../use-cases/interface/input/capability.interface";
 import type {
   IStockUseCase,
+  StockExecutionPlan,
   StockExecutionStep,
 } from "../../../../use-cases/interface/input/stock.interface";
 import type { IStockPairRegistry } from "../../../../use-cases/interface/output/stocks/stockPair.interface";
@@ -133,25 +134,51 @@ export class StockCapability implements Capability<StockParams> {
     // Resuming an `awaiting_amount` ask from a /buy reroute (§P0.3). The user
     // tapped the stock:reroute callback and is now sending the amount as text.
     if (resuming) {
-      const state = resuming as { stage?: string; symbol?: string };
+      const state = resuming as {
+        stage?: string;
+        symbol?: string;
+        verb?: StockVerb;
+      };
       if (state.stage === "awaiting_amount" && state.symbol) {
         const cleaned = ctx.input.text.trim().replace(/^\$/, "");
-        if (!/^\d+(?:\.\d+)?$/.test(cleaned)) {
+        const resumeVerb: "buy" | "short" =
+          state.verb === "short" ? "short" : "buy";
+        const sideWord = resumeVerb === "short" ? "short" : "buy";
+        if (/^\d+(?:\.\d+)?$/.test(cleaned)) {
           return {
-            kind: "ask",
-            question: "Please reply with a number, e.g. 50.",
-            state: { stage: "awaiting_amount", symbol: state.symbol },
+            kind: "ok",
+            params: {
+              kind: "open",
+              verb: resumeVerb,
+              symbol: state.symbol,
+              amountUsd: cleaned,
+            },
           };
         }
-        return {
-          kind: "ok",
-          params: {
-            kind: "open",
-            verb: "buy",
-            symbol: state.symbol,
-            amountUsd: cleaned,
-          },
-        };
+        // Non-numeric reply. Two cases:
+        //   1. Looks like a fresh command (`/stock …`, `buy …`, `short …`,
+        //      starts with a slash): drop the awaiting_amount state and let
+        //      the normal parse path below handle it. Otherwise the user is
+        //      stuck — every new request gets eaten as a malformed amount.
+        //   2. Otherwise: re-ask, but with a self-contained question that
+        //      reminds the user what we're asking for.
+        const lc = cleaned.toLowerCase();
+        const looksLikeNewCommand =
+          ctx.input.text.trim().startsWith("/") ||
+          /^(buy|short|sell|close|sl|tp|long|stock)\b/.test(lc);
+        if (looksLikeNewCommand) {
+          log.info(
+            { step: "resume-abandoned", userId: ctx.userId, symbol: state.symbol },
+            "user typed a fresh command while in awaiting_amount — dropping pending state",
+          );
+          // Fall through to the normal parse below.
+        } else {
+          return {
+            kind: "ask",
+            question: `I didn't catch a number. How much USD would you like to ${sideWord} of ${state.symbol}? Reply with just a number, e.g. 50.`,
+            state: { stage: "awaiting_amount", symbol: state.symbol, verb: resumeVerb },
+          };
+        }
       }
     }
 
@@ -175,7 +202,21 @@ export class StockCapability implements Capability<StockParams> {
         );
       }
       const parsed = parseAmountSymbol(tokens.slice(1), this.deps.stockPairRegistry);
-      if (!parsed) return this.usageHint();
+      if (!parsed.symbol) return this.usageHint();
+      if (!parsed.amountUsd) {
+        // Slot-fill: symbol resolved but no amount given (e.g. "buy apple
+        // stock"). Mirrors the `/buy AAPL` reroute branch above so both entry
+        // points share the same `awaiting_amount` resume handler.
+        log.info(
+          { step: "awaiting_amount", userId: ctx.userId, symbol: parsed.symbol, side: verb },
+          "stock open missing amount — asking user",
+        );
+        return {
+          kind: "ask",
+          question: `How much USD would you like to ${verb === "short" ? "short" : "buy"} of ${parsed.symbol}? Reply with a number, e.g. 50.`,
+          state: { stage: "awaiting_amount", symbol: parsed.symbol, verb },
+        };
+      }
       return {
         kind: "ok",
         params: {
@@ -273,76 +314,8 @@ export class StockCapability implements Capability<StockParams> {
       "stock open started",
     );
 
-    // §P0.1 — Aegis-Guard pre-flight on home-chain USDC. Without this the
-    // user-op simulation reverts mid-bridge with an opaque error when the
-    // delegation budget is insufficient. Mirrors swapCapability.ts:156–195.
-    if (this.deps.tokenDelegationDB && this.deps.tokenRegistry) {
-      const usdcHome = getUsdcAddress(CHAIN_CONFIG.chainId);
-      if (usdcHome) {
-        const usdcHomeRow = await this.deps.tokenRegistry.findByAddressAndChain(
-          usdcHome,
-          CHAIN_CONFIG.chainId,
-        );
-        if (usdcHomeRow) {
-          const amountRaw = toRaw(params.amountUsd, usdcHomeRow.decimals);
-          const guard = await checkTokenDelegation({
-            userId: ctx.userId,
-            fromToken: usdcHomeRow,
-            amountHuman: params.amountUsd,
-            amountRaw,
-            tokenDelegationDB: this.deps.tokenDelegationDB,
-          });
-          if (!guard.ok) {
-            if (this.deps.pendingIntentStore) {
-              try {
-                await this.deps.pendingIntentStore.save({
-                  approvalRequestId: guard.reapprovalRequest.requestId,
-                  capabilityId: this.id,
-                  params: JSON.parse(JSON.stringify(params)) as Record<
-                    string,
-                    unknown
-                  >,
-                  userId: ctx.userId,
-                  channelId: ctx.channelId,
-                  expiresAt: guard.reapprovalRequest.expiresAt,
-                });
-                log.info(
-                  {
-                    step: "guard-blocked",
-                    userId: ctx.userId,
-                    approvalRequestId: guard.reapprovalRequest.requestId,
-                  },
-                  "stock open blocked by aegis-guard — reapproval required",
-                );
-              } catch (err) {
-                log.error(
-                  {
-                    err,
-                    approvalRequestId: guard.reapprovalRequest.requestId,
-                  },
-                  "failed to persist pending stock-open intent",
-                );
-              }
-            } else {
-              log.warn(
-                { userId: ctx.userId },
-                "guard blocked but no pendingIntentStore — user must re-issue command after approval",
-              );
-            }
-            return {
-              kind: "mini_app",
-              request: guard.reapprovalRequest,
-              promptText: guard.displayMessage,
-              buttonText: "Approve More",
-            };
-          }
-          log.info(
-            { step: "guard-passed", userId: ctx.userId },
-            "stock open guard passed",
-          );
-        }
-      }
-    }
+    const blocked = await this.preFlightHomeUsdcGuard(ctx, params);
+    if (blocked) return blocked;
 
     const plan = await this.deps.stockUseCase.buildOpenPlan({
       userId: ctx.userId,
@@ -516,6 +489,83 @@ export class StockCapability implements Capability<StockParams> {
     return { kind: "result_card", result: successCard };
   }
 
+  /**
+   * §P0.1 — Aegis-Guard pre-flight on home-chain USDC. Returns a reapproval
+   * mini-app artifact when the user's delegation budget is insufficient,
+   * otherwise null. Mirrors `swapCapability`'s guard contract — without it
+   * the user-op simulation would revert mid-bridge with an opaque error.
+   *
+   * Skips silently when any of `tokenDelegationDB` / `tokenRegistry` /
+   * `usdcHome` / the home-USDC token-registry row is missing — the boot
+   * path may run without Redis or the token-registry seed.
+   */
+  private async preFlightHomeUsdcGuard(
+    ctx: CapabilityCtx,
+    params: StockOpenParams,
+  ): Promise<Artifact | null> {
+    if (!this.deps.tokenDelegationDB || !this.deps.tokenRegistry) return null;
+    const usdcHome = getUsdcAddress(CHAIN_CONFIG.chainId);
+    if (!usdcHome) return null;
+    const usdcHomeRow = await this.deps.tokenRegistry.findByAddressAndChain(
+      usdcHome,
+      CHAIN_CONFIG.chainId,
+    );
+    if (!usdcHomeRow) return null;
+
+    const amountRaw = toRaw(params.amountUsd, usdcHomeRow.decimals);
+    const guard = await checkTokenDelegation({
+      userId: ctx.userId,
+      fromToken: usdcHomeRow,
+      amountHuman: params.amountUsd,
+      amountRaw,
+      tokenDelegationDB: this.deps.tokenDelegationDB,
+    });
+    if (guard.ok) {
+      log.info(
+        { step: "guard-passed", userId: ctx.userId },
+        "stock open guard passed",
+      );
+      return null;
+    }
+
+    if (this.deps.pendingIntentStore) {
+      try {
+        await this.deps.pendingIntentStore.save({
+          approvalRequestId: guard.reapprovalRequest.requestId,
+          capabilityId: this.id,
+          params: JSON.parse(JSON.stringify(params)) as Record<string, unknown>,
+          userId: ctx.userId,
+          channelId: ctx.channelId,
+          expiresAt: guard.reapprovalRequest.expiresAt,
+        });
+        log.info(
+          {
+            step: "guard-blocked",
+            userId: ctx.userId,
+            approvalRequestId: guard.reapprovalRequest.requestId,
+          },
+          "stock open blocked by aegis-guard — reapproval required",
+        );
+      } catch (err) {
+        log.error(
+          { err, approvalRequestId: guard.reapprovalRequest.requestId },
+          "failed to persist pending stock-open intent",
+        );
+      }
+    } else {
+      log.warn(
+        { userId: ctx.userId },
+        "guard blocked but no pendingIntentStore — user must re-issue command after approval",
+      );
+    }
+    return {
+      kind: "mini_app",
+      request: guard.reapprovalRequest,
+      promptText: guard.displayMessage,
+      buttonText: "Approve More",
+    };
+  }
+
   // ── close ────────────────────────────────────────────────────────────────
 
   private async runClose(
@@ -600,8 +650,14 @@ export class StockCapability implements Capability<StockParams> {
     // very next tick after `reportTxHash` returns. Without this, the FE can
     // close the mini-app between the close success and the return-swap
     // emission, leaving the queued request to expire silently.
-    let returnPlan: import("../../../../use-cases/interface/input/stock.interface").StockExecutionPlan | null = null;
-    let preQueuedReturnRequestId: string | null = null;
+    //
+    // Hold the captured plan + reqId on an object so TS preserves the
+    // narrowing across the closure boundary (plain `let` mutated inside an
+    // async callback widens back to the declared type after the await).
+    const captured: {
+      plan: StockExecutionPlan | null;
+      reqId: string | null;
+    } = { plan: null, reqId: null };
     const result = await this.executeSignSteps({
       ctx,
       steps: plan.steps,
@@ -611,7 +667,7 @@ export class StockCapability implements Capability<StockParams> {
       onStepResolved: async (i, _hash) => {
         if (i !== plan.steps.length - 1) return;
         try {
-          returnPlan = await this.deps.stockUseCase.buildReturnSwapPlan({
+          captured.plan = await this.deps.stockUseCase.buildReturnSwapPlan({
             userId: ctx.userId,
           });
         } catch (err) {
@@ -619,27 +675,24 @@ export class StockCapability implements Capability<StockParams> {
             { err, userId: ctx.userId, step: "return-swap-plan-failed" },
             "post-close return-swap plan failed",
           );
-          returnPlan = null;
           return;
         }
-        if (returnPlan && returnPlan.steps.length > 0) {
-          preQueuedReturnRequestId = await this.queueFirstStepIntoCache(
-            ctx,
-            returnPlan.steps[0]!,
-            {
-              label:
-                returnPlan.steps.length === 1
-                  ? returnPlan.steps[0]!.label
-                  : `${returnPlan.steps[0]!.label} (1/${returnPlan.steps.length})`,
-              planKind: "recovery",
-            },
-          );
+        if (captured.plan && captured.plan.steps.length > 0) {
+          const firstStep = captured.plan.steps[0]!;
+          const queued = await this.queueFirstStepIntoCache(ctx, firstStep, {
+            label:
+              captured.plan.steps.length === 1
+                ? firstStep.label
+                : `${firstStep.label} (1/${captured.plan.steps.length})`,
+            planKind: "recovery",
+          });
+          captured.reqId = queued.requestId;
           log.info(
             {
               step: "return-swap-prequeued",
               userId: ctx.userId,
-              requestId: preQueuedReturnRequestId,
-              stepCount: returnPlan.steps.length,
+              requestId: queued.requestId,
+              stepCount: captured.plan.steps.length,
             },
             "return-swap first step pre-queued",
           );
@@ -649,25 +702,24 @@ export class StockCapability implements Capability<StockParams> {
     if (result.aborted) return result.artifact;
 
     let returnTxHashes: string[] = [];
-    if (returnPlan && (returnPlan as { steps: { length: number } }).steps.length > 0) {
-      const rPlan = returnPlan as import("../../../../use-cases/interface/input/stock.interface").StockExecutionPlan;
+    if (captured.plan && captured.plan.steps.length > 0) {
       log.info(
         {
           step: "return-swap-started",
           userId: ctx.userId,
           symbol: plan.symbol,
-          stepCount: rPlan.steps.length,
+          stepCount: captured.plan.steps.length,
         },
         "appending return swap after close",
       );
       const returnResult = await this.executeSignSteps({
         ctx,
-        steps: rPlan.steps,
+        steps: captured.plan.steps,
         buttonText: "Return Funds",
         promptText: "Returning your USDC to the home chain.",
         continueSession: true,
         planKind: "recovery",
-        firstStepRequestId: preQueuedReturnRequestId ?? undefined,
+        firstStepRequestId: captured.reqId ?? undefined,
       });
       if (returnResult.aborted) {
         log.warn(
@@ -1027,12 +1079,16 @@ export class StockCapability implements Capability<StockParams> {
   }
 
   /**
-   * §P1.1 — pre-queue a follow-up sign step into the mini-app request cache
-   * AND persist its signing-request record so the FE's `fetchNextRequest`
-   * poll finds it on the very next tick after a previous step resolves.
-   * Returns the new requestId so the caller can `signing.waitFor` on it
-   * (typically by passing `firstStepRequestId` into the chained
-   * `executeSignSteps` call).
+   * Persist a signing-request record for `step` and (by default) push the
+   * matching `SignRequest` into the mini-app cache so the FE's
+   * `fetchNextRequest` poll finds it on the very next tick after a previous
+   * step resolves. Returns both the new id and the built `SignRequest` so
+   * callers can either `signing.waitFor` on the id (chained close path) or
+   * embed the request in a `mini_app` artifact (recovery path).
+   *
+   * Set `cache: false` when the step travels via a `mini_app` artifact
+   * directly (recovery's first step) — caching it would let an unrelated
+   * `?after=<prev>` poll pick it up as a follow-up.
    */
   private async queueFirstStepIntoCache(
     ctx: CapabilityCtx,
@@ -1041,12 +1097,15 @@ export class StockCapability implements Capability<StockParams> {
       label?: string;
       planKind?: "recovery";
       preview?: IntentResult;
+      cache?: boolean;
     } = {},
-  ): Promise<string> {
+  ): Promise<{ requestId: string; signRequest: SignRequest }> {
     const requestId = newUuid();
     const now = newCurrentUTCEpoch();
     const chatId = Number(ctx.channelId);
     const description = opts.label ?? step.label;
+    const cache = opts.cache ?? true;
+
     const record: SigningRequestRecord = {
       id: requestId,
       userId: ctx.userId,
@@ -1066,28 +1125,29 @@ export class StockCapability implements Capability<StockParams> {
     };
     await this.deps.signingRequestUseCase.create(record);
 
-    if (this.deps.miniAppRequestCache) {
-      const miniAppRequest: SignRequest = {
-        requestId,
-        requestType: "sign",
-        userId: ctx.userId,
-        to: step.to,
-        value: step.value,
-        data: step.data,
-        description,
-        autoSign: true,
-        chainId: step.chainId,
-        createdAt: now,
-        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
-        preview: opts.preview,
-      };
-      await this.deps.miniAppRequestCache.store(miniAppRequest);
+    const signRequest: SignRequest = {
+      requestId,
+      requestType: "sign",
+      userId: ctx.userId,
+      to: step.to,
+      value: step.value,
+      data: step.data,
+      description,
+      autoSign: true,
+      chainId: step.chainId,
+      createdAt: now,
+      expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
+      preview: opts.preview,
+    };
+
+    if (cache && this.deps.miniAppRequestCache) {
+      await this.deps.miniAppRequestCache.store(signRequest);
     }
     log.debug(
-      { step: "pre-queued", userId: ctx.userId, requestId, chainId: step.chainId },
-      "follow-up step pre-queued into mini-app cache",
+      { step: "pre-queued", userId: ctx.userId, requestId, chainId: step.chainId, cached: cache },
+      "follow-up step pre-queued",
     );
-    return requestId;
+    return { requestId, signRequest };
   }
 
   private async emitRecoveryMiniApp(
@@ -1100,58 +1160,13 @@ export class StockCapability implements Capability<StockParams> {
         "No funds to recover. Contact support if you believe this is wrong.",
       );
     }
-    const chatId = Number(ctx.channelId);
-    const requestIds: string[] = [];
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i]!;
-      const requestId = newUuid();
-      const now = newCurrentUTCEpoch();
-      const label =
-        steps.length === 1 ? step.label : `${step.label} (${i + 1}/${steps.length})`;
-      const record: SigningRequestRecord = {
-        id: requestId,
-        userId: ctx.userId,
-        chatId,
-        to: step.to,
-        value: step.value,
-        data: step.data,
-        description: label,
-        status: "pending",
-        createdAt: now,
-        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
-        autoSign: true,
-        planKind: "recovery",
-      };
-      await this.deps.signingRequestUseCase.create(record);
+    const labelFor = (i: number) =>
+      steps.length === 1 ? steps[i]!.label : `${steps[i]!.label} (${i + 1}/${steps.length})`;
 
-      const req: SignRequest = {
-        requestId,
-        requestType: "sign",
-        userId: ctx.userId,
-        to: step.to,
-        value: step.value,
-        data: step.data,
-        description: label,
-        autoSign: true,
-        chainId: step.chainId,
-        createdAt: now,
-        expiresAt: now + SIGN_REQUEST_TTL_SECONDS,
-      };
-      requestIds.push(requestId);
-
-      if (i === 0) {
-        // First step is returned as the terminal mini-app artifact below;
-        // subsequent steps queue into the cache for FE chaining.
-      } else if (this.deps.miniAppRequestCache) {
-        await this.deps.miniAppRequestCache.store(req);
-      }
-    }
-
-    // Emit the first recovery step as the terminal mini-app artifact. The
-    // remaining steps were queued in the cache above. notifyResolved emits
-    // the final user-facing message via the standard resolve path.
-    const firstStep = steps[0]!;
-    const firstRequestId = requestIds[0]!;
+    // Step 0 carries the recovery preview and travels via the `mini_app`
+    // artifact directly. Skip the mini-app cache for it so an unrelated
+    // `?after=<prev>` poll cannot pick it up as a follow-up to a stale
+    // request — the FE opens the WebApp with `?reqId=<step0>` instead.
     const recoveryPreview = buildPreview({
       verb: "stock_close",
       headline: "Return your funds to your home chain",
@@ -1170,28 +1185,28 @@ export class StockCapability implements Capability<StockParams> {
         },
       ],
     });
-    const firstReq: SignRequest = {
-      requestId: firstRequestId,
-      requestType: "sign",
-      userId: ctx.userId,
-      to: firstStep.to,
-      value: firstStep.value,
-      data: firstStep.data,
-      description:
-        steps.length === 1 ? firstStep.label : `${firstStep.label} (1/${steps.length})`,
-      autoSign: true,
-      chainId: firstStep.chainId,
-      createdAt: newCurrentUTCEpoch(),
-      expiresAt: newCurrentUTCEpoch() + SIGN_REQUEST_TTL_SECONDS,
+    const first = await this.queueFirstStepIntoCache(ctx, steps[0]!, {
+      label: labelFor(0),
+      planKind: "recovery",
       preview: recoveryPreview,
-    };
+      cache: false,
+    });
+
+    // Steps 1..N queue into the cache for FE chaining via `?after=`.
+    for (let i = 1; i < steps.length; i++) {
+      await this.queueFirstStepIntoCache(ctx, steps[i]!, {
+        label: labelFor(i),
+        planKind: "recovery",
+      });
+    }
+
     log.info(
       { step: "recovery-emitted", userId: ctx.userId, stepCount: steps.length },
       "recovery mini-app emitted",
     );
     return {
       kind: "mini_app",
-      request: firstReq,
+      request: first.signRequest,
       promptText: "Tap below to return your funds to your home chain.",
       buttonText: "Return Funds",
     };
@@ -1316,13 +1331,13 @@ const STOP_WORDS = new Set([
  * registry's `resolveByQuery` — so tickers ("AAPL"), company names ("apple"),
  * and aliases ("alphabet" → GOOG) all work. No LLM. Stop words are skipped.
  *
- * Returns null when no amount is present or when no token resolves to a
- * known symbol.
+ * Returns whatever was found. Callers decide how to handle partial results
+ * (e.g. symbol-only triggers an `awaiting_amount` slot-fill ask).
  */
 function parseAmountSymbol(
   tokens: string[],
   registry: IStockPairRegistry,
-): { amountUsd: string; symbol: string } | null {
+): { amountUsd?: string; symbol?: string } {
   let amount: string | undefined;
   let symbol: string | undefined;
   for (const t of tokens) {
@@ -1339,7 +1354,6 @@ function parseAmountSymbol(
       if (resolved) symbol = resolved.symbol;
     }
   }
-  if (!amount || !symbol) return null;
   return { amountUsd: amount, symbol };
 }
 

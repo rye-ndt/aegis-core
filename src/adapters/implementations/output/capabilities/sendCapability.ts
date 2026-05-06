@@ -1,8 +1,19 @@
 import { encodeFunctionData, erc20Abi } from "viem";
 import { toRaw } from "../../../../helpers/bigint";
+import {
+  getUsdcAddress,
+  isNativeAddress,
+} from "../../../../helpers/chainConfig";
+import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
 import { INTENT_COMMAND } from "../../../../helpers/enums/intentCommand.enum";
 import { RESOLVER_FIELD } from "../../../../helpers/enums/resolverField.enum";
 import { TOOL_CATEGORY } from "../../../../helpers/enums/toolCategory.enum";
+import { MAX_TOOL_ROUNDS } from "../../../../helpers/env/assistantEnv";
+import { interpretError } from "../../../../helpers/errors/errorCatalog";
+import { createLogger } from "../../../../helpers/observability/logger";
+import type { CapabilityManifest } from "../../../../helpers/types/manifest";
+import { newUuid } from "../../../../helpers/uuid";
+import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
 import type {
   Artifact,
   Capability,
@@ -16,26 +27,18 @@ import {
   type ResolvedPayload,
   DisambiguationRequiredError,
 } from "../../../../use-cases/interface/input/intent.interface";
-import type { CapabilityManifest } from "../../../../helpers/types/manifest";
-import { getUsdcAddress, isNativeAddress } from "../../../../helpers/chainConfig";
-import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
-import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
-import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
-import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
-import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
-import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
-import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
-import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
-import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
-import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
-import { checkTokenDelegation } from "../../../../use-cases/implementations/aegisGuardInterceptor";
-import { createLogger } from "../../../../helpers/observability/logger";
-import { MAX_TOOL_ROUNDS } from "../../../../helpers/env/assistantEnv";
-import { deriveScaAddress } from "../../../../helpers/deriveScaAddress";
-import { interpretError } from "../../../../helpers/errors/errorCatalog";
-import { newUuid } from "../../../../helpers/uuid";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { IntentResult } from "../../../../use-cases/interface/input/resultCard.types";
+import type { IPendingIntentStore } from "../../../../use-cases/interface/output/cache/pendingIntent.cache";
+import type { IDelegationRequestBuilder } from "../../../../use-cases/interface/output/delegation/delegationRequestBuilder.interface";
+import type { IPrivyAuthService } from "../../../../use-cases/interface/output/privyAuth.interface";
+import type { IPendingDelegationDB } from "../../../../use-cases/interface/output/repository/pendingDelegation.repo";
+import type { ITokenDelegationDB } from "../../../../use-cases/interface/output/repository/tokenDelegation.repo";
+import type { IUserProfileDB } from "../../../../use-cases/interface/output/repository/userProfile.repo";
+import type { IResolverEngine } from "../../../../use-cases/interface/output/resolver.interface";
+import type { ITelegramHandleResolver } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import { TelegramHandleNotFoundError } from "../../../../use-cases/interface/output/telegramResolver.interface";
+import type { ITokenRegistryService } from "../../../../use-cases/interface/output/tokenRegistry.interface";
 import { buildPreview } from "./buildPreview";
 import {
   buildDelegationPrompt,
@@ -65,8 +68,7 @@ const SEND_MANIFEST: CapabilityManifest = {
   // confirmations (`Autonomous execution for ${manifest.name}`).
   name: "ERC-20 Token Transfer",
   category: TOOL_CATEGORY.ERC20_TRANSFER,
-  description:
-    "Send tokens to a recipient address or telegram handle",
+  description: "Send tokens to a recipient address or telegram handle",
   // Verbatim from drizzle/0023_seed_send_tool.sql:36 (and 0024_seed_send_tool_fix.sql:32).
   // Preserve exact field names, descriptions, and required[] so that
   // OpenAISchemaCompiler extracts identically across capability instances.
@@ -179,8 +181,18 @@ export class SendCapability implements Capability<SendParams> {
 
     // Fresh entry. Every command bound to SendCapability shares the same
     // in-code transfer manifest — the dynamic-tool-registry path was retired.
-    log.info({ step: "tool-selected", command: this.command, toolId: SEND_MANIFEST.toolId }, "compiling schema");
-    return this.initSessionFromTool(ctx, text, { toolId: SEND_MANIFEST.toolId, manifest: SEND_MANIFEST });
+    log.info(
+      {
+        step: "tool-selected",
+        command: this.command,
+        toolId: SEND_MANIFEST.toolId,
+      },
+      "compiling schema",
+    );
+    return this.initSessionFromTool(ctx, text, {
+      toolId: SEND_MANIFEST.toolId,
+      manifest: SEND_MANIFEST,
+    });
   }
 
   async run(params: SendParams, ctx: CapabilityCtx): Promise<Artifact> {
@@ -194,11 +206,15 @@ export class SendCapability implements Capability<SendParams> {
       if (!recipient) {
         throw new Error("transfer: missing recipient address");
       }
-      const amountHumanStr = params.partialParams.amountHuman as string | undefined;
+      const amountHumanStr = params.partialParams.amountHuman as
+        | string
+        | undefined;
       const partialRaw = params.partialParams.amountRaw as string | undefined;
       const amountRaw =
         partialRaw ??
-        (amountHumanStr ? toRaw(amountHumanStr, fromToken.decimals) : undefined);
+        (amountHumanStr
+          ? toRaw(amountHumanStr, fromToken.decimals)
+          : undefined);
       if (!amountRaw) {
         throw new Error("transfer: missing amount");
       }
@@ -234,30 +250,30 @@ export class SendCapability implements Capability<SendParams> {
           : [{ label: "Try again", kind: "command", payload: "/send" }],
         complexity: "simple",
         requestId: interpreted.requestId,
-    errorCode: interpreted.code,
+        errorCode: interpreted.code,
       };
       return { kind: "result_card", result };
     }
 
     const fromToken = params.resolvedFrom;
 
-    log.debug({
-      hasFromToken: !!fromToken,
-      isNative: fromToken?.isNative,
-      symbol: fromToken?.symbol,
-      hasTokenDelegationDB: !!this.deps.tokenDelegationDB,
-      usesDualSchema: params.usesDualSchema,
-    }, "autosign guard check");
+    log.debug(
+      {
+        hasFromToken: !!fromToken,
+        isNative: fromToken?.isNative,
+        symbol: fromToken?.symbol,
+        hasTokenDelegationDB: !!this.deps.tokenDelegationDB,
+        usesDualSchema: params.usesDualSchema,
+      },
+      "autosign guard check",
+    );
 
     // Auto-sign path: delegation already sufficient.
     // Native is allowed: the SCA's session-key validator (sudo policy) already
     // authorises arbitrary value transfers on-chain; the tokenDelegations row
     // (keyed on NATIVE_PSEUDO_ADDRESS) is the off-chain spend budget, identical
     // in shape to ERC-20 delegations. No on-chain approve() exists or is needed.
-    if (
-      fromToken &&
-      this.deps.tokenDelegationDB
-    ) {
+    if (fromToken && this.deps.tokenDelegationDB) {
       const guard = await checkTokenDelegation({
         userId: ctx.userId,
         fromToken,
@@ -266,16 +282,23 @@ export class SendCapability implements Capability<SendParams> {
         tokenDelegationDB: this.deps.tokenDelegationDB,
       });
       if (guard.ok) {
-        log.info({ step: "auto-sign", userId: ctx.userId }, "delegation sufficient — pushing auto-sign request");
+        log.info(
+          { step: "auto-sign", userId: ctx.userId },
+          "delegation sufficient — pushing auto-sign request",
+        );
         // Pre-sign Telegram chat ("Check the Aegis mini app...") removed —
         // the renderer's standard "Tap below to execute silently." prompt
         // attached to the sign_calldata artifact replaces it. The richer
         // recipient/amount summary now lives on `preview` inside the modal.
-        const amountHumanStr = params.partialParams.amountHuman as string | undefined;
+        const amountHumanStr = params.partialParams.amountHuman as
+          | string
+          | undefined;
         const partialRaw = params.partialParams.amountRaw as string | undefined;
         const computedAmountRaw =
           partialRaw ??
-          (amountHumanStr ? toRaw(amountHumanStr, fromToken.decimals) : undefined);
+          (amountHumanStr
+            ? toRaw(amountHumanStr, fromToken.decimals)
+            : undefined);
         await ctx.emit({
           kind: "sign_calldata",
           to: calldata.to,
@@ -297,12 +320,19 @@ export class SendCapability implements Capability<SendParams> {
           }),
         });
         if (this.command === INTENT_COMMAND.SEND) {
-          void this.deps.loyaltyUseCase?.awardPoints({
-            userId: ctx.userId,
-            actionType: params.resolvedFrom?.isNative ? "send_native" : "send_erc20",
-          }).catch(() => undefined);
+          void this.deps.loyaltyUseCase
+            ?.awardPoints({
+              userId: ctx.userId,
+              actionType: params.resolvedFrom?.isNative
+                ? "send_native"
+                : "send_erc20",
+            })
+            .catch(() => undefined);
         }
-        log.debug({ userId: ctx.userId }, "skip delegation prompt — existing delegation covers spend");
+        log.debug(
+          { userId: ctx.userId },
+          "skip delegation prompt — existing delegation covers spend",
+        );
         return { kind: "noop" };
       }
 
@@ -315,7 +345,10 @@ export class SendCapability implements Capability<SendParams> {
           await this.deps.pendingIntentStore.save({
             approvalRequestId: guard.reapprovalRequest.requestId,
             capabilityId: this.id,
-            params: JSON.parse(JSON.stringify(params)) as Record<string, unknown>,
+            params: JSON.parse(JSON.stringify(params)) as Record<
+              string,
+              unknown
+            >,
             userId: ctx.userId,
             channelId: ctx.channelId,
             expiresAt: guard.reapprovalRequest.expiresAt,
@@ -349,7 +382,9 @@ export class SendCapability implements Capability<SendParams> {
     // emitted — its content moves into `preview` so the user reviews the
     // summary inside the mini-app modal alongside the approve/reject footer,
     // not as a separate Telegram message before tapping the button.
-    const amountHumanStr = params.partialParams.amountHuman as string | undefined;
+    const amountHumanStr = params.partialParams.amountHuman as
+      | string
+      | undefined;
     await ctx.emit({
       kind: "sign_calldata",
       to: calldata.to,
@@ -370,7 +405,9 @@ export class SendCapability implements Capability<SendParams> {
     });
 
     if (this.command === INTENT_COMMAND.SEND) {
-      void this.deps.loyaltyUseCase?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" }).catch(() => undefined);
+      void this.deps.loyaltyUseCase
+        ?.awardPoints({ userId: ctx.userId, actionType: "send_erc20" })
+        .catch(() => undefined);
     }
     await this.tryEmitDelegationRequest(ctx, params, params.resolvedFrom);
     return { kind: "noop" };
@@ -405,7 +442,10 @@ export class SendCapability implements Capability<SendParams> {
         ...compileResult.resolverFields,
         [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: usdc,
       };
-      compileResult.tokenSymbols = { ...compileResult.tokenSymbols, from: "USDC" };
+      compileResult.tokenSymbols = {
+        ...compileResult.tokenSymbols,
+        from: "USDC",
+      };
     }
 
     const state: SessionState = {
@@ -420,14 +460,22 @@ export class SendCapability implements Capability<SendParams> {
     };
 
     if (compileResult.telegramHandle && !state.recipientTelegramUserId) {
-      const ok = await this.resolveRecipientHandle(ctx, compileResult.telegramHandle, state);
+      const ok = await this.resolveRecipientHandle(
+        ctx,
+        compileResult.telegramHandle,
+        state,
+      );
       // resolveRecipientHandle has already emitted the specific user-facing
       // error message via ctx.emit — abort silently to avoid a duplicate.
       if (!ok) return this.silentAbort();
     }
 
     if (compileResult.missingQuestion) {
-      return { kind: "ask", question: compileResult.missingQuestion, state: toPlain(state) };
+      return {
+        kind: "ask",
+        question: compileResult.missingQuestion,
+        state: toPlain(state),
+      };
     }
 
     return this.finishCompileOrResolve(ctx, state);
@@ -468,22 +516,39 @@ export class SendCapability implements Capability<SendParams> {
         ...compileResult.resolverFields,
         [RESOLVER_FIELD.FROM_TOKEN_SYMBOL]: usdc,
       };
-      compileResult.tokenSymbols = { ...compileResult.tokenSymbols, from: "USDC" };
+      compileResult.tokenSymbols = {
+        ...compileResult.tokenSymbols,
+        from: "USDC",
+      };
     }
 
     state.partialParams = { ...state.partialParams, ...compileResult.params };
-    state.tokenSymbols = { ...state.tokenSymbols, ...compileResult.tokenSymbols };
-    state.resolverFields = { ...state.resolverFields, ...(compileResult.resolverFields ?? {}) };
+    state.tokenSymbols = {
+      ...state.tokenSymbols,
+      ...compileResult.tokenSymbols,
+    };
+    state.resolverFields = {
+      ...state.resolverFields,
+      ...(compileResult.resolverFields ?? {}),
+    };
 
     if (compileResult.telegramHandle && !state.recipientTelegramUserId) {
-      const ok = await this.resolveRecipientHandle(ctx, compileResult.telegramHandle, state);
+      const ok = await this.resolveRecipientHandle(
+        ctx,
+        compileResult.telegramHandle,
+        state,
+      );
       // resolveRecipientHandle has already emitted the specific user-facing
       // error message via ctx.emit — abort silently to avoid a duplicate.
       if (!ok) return this.silentAbort();
     }
 
     if (compileResult.missingQuestion) {
-      return { kind: "ask", question: compileResult.missingQuestion, state: toPlain(state) };
+      return {
+        kind: "ask",
+        question: compileResult.missingQuestion,
+        state: toPlain(state),
+      };
     }
 
     return this.finishCompileOrResolve(ctx, state);
@@ -495,12 +560,16 @@ export class SendCapability implements Capability<SendParams> {
     ctx: CapabilityCtx,
     state: SessionState,
   ): Promise<CollectResult<SendParams>> {
-    const missing = getMissingRequiredFields(state.manifest, state.partialParams);
+    const missing = getMissingRequiredFields(
+      state.manifest,
+      state.partialParams,
+    );
     if (missing.length > 0) {
-      const question = await this.deps.intentUseCase.generateMissingParamQuestion(
-        state.manifest,
-        missing,
-      );
+      const question =
+        await this.deps.intentUseCase.generateMissingParamQuestion(
+          state.manifest,
+          missing,
+        );
       return { kind: "ask", question, state: toPlain(state) };
     }
 
@@ -525,7 +594,8 @@ export class SendCapability implements Capability<SendParams> {
     // disambiguation.
     if (state.messages.some(detectStablecoinIntent)) {
       const current = state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL];
-      const isAddress = typeof current === "string" && /^0x[0-9a-fA-F]{40}$/.test(current);
+      const isAddress =
+        typeof current === "string" && /^0x[0-9a-fA-F]{40}$/.test(current);
       if (!isAddress) {
         const usdc = getUsdcAddress(this.deps.chainId);
         if (!usdc) {
@@ -548,9 +618,12 @@ export class SendCapability implements Capability<SendParams> {
       if (resolved.recipientTelegramUserId) {
         state.recipientTelegramUserId = resolved.recipientTelegramUserId;
       }
-      if (resolved.rawAmount) state.partialParams.amountRaw = resolved.rawAmount;
-      if (resolved.recipientAddress) state.partialParams.recipient = resolved.recipientAddress;
-      if (resolved.senderAddress) state.partialParams.userAddress = resolved.senderAddress;
+      if (resolved.rawAmount)
+        state.partialParams.amountRaw = resolved.rawAmount;
+      if (resolved.recipientAddress)
+        state.partialParams.recipient = resolved.recipientAddress;
+      if (resolved.senderAddress)
+        state.partialParams.userAddress = resolved.senderAddress;
 
       return {
         kind: "ok",
@@ -580,8 +653,10 @@ export class SendCapability implements Capability<SendParams> {
   ): CollectResult<SendParams> {
     state.stage = "token_disambig";
     state.disambiguation = {
-      resolvedFrom: err.slot === "to" ? state.resolved?.fromToken ?? null : null,
-      resolvedTo: err.slot === "from" ? state.resolved?.toToken ?? null : null,
+      resolvedFrom:
+        err.slot === "to" ? (state.resolved?.fromToken ?? null) : null,
+      resolvedTo:
+        err.slot === "from" ? (state.resolved?.toToken ?? null) : null,
       awaitingSlot: err.slot,
       fromCandidates: err.slot === "from" ? err.candidates : [],
       toCandidates: err.slot === "to" ? err.candidates : [],
@@ -605,31 +680,45 @@ export class SendCapability implements Capability<SendParams> {
 
     state.disambigTurns += 1;
     if (state.disambigTurns > MAX_DISAMBIG_TURNS) {
-      return this.abort("Token selection timed out after too many attempts. Please start over.");
+      return this.abort(
+        "Token selection timed out after too many attempts. Please start over.",
+      );
     }
 
     const candidates =
-      pending.awaitingSlot === "from" ? pending.fromCandidates : pending.toCandidates;
+      pending.awaitingSlot === "from"
+        ? pending.fromCandidates
+        : pending.toCandidates;
     const selected = pickCandidateByInput(text, candidates);
-    if (!selected) return this.abort("Disambiguation cancelled. Please repeat your request.");
+    if (!selected)
+      return this.abort(
+        "Disambiguation cancelled. Please repeat your request.",
+      );
 
     const usesDualSchema = this.usesDualSchema(state.manifest);
 
     if (pending.awaitingSlot === "from") {
       pending.resolvedFrom = selected;
-      if (usesDualSchema) state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] = selected.address;
+      if (usesDualSchema)
+        state.resolverFields[RESOLVER_FIELD.FROM_TOKEN_SYMBOL] =
+          selected.address;
       if (pending.toCandidates.length > 1) {
         pending.awaitingSlot = "to";
         return {
           kind: "ask",
-          question: buildDisambiguationPrompt("to", state.tokenSymbols.to ?? "", pending.toCandidates),
+          question: buildDisambiguationPrompt(
+            "to",
+            state.tokenSymbols.to ?? "",
+            pending.toCandidates,
+          ),
           state: toPlain(state),
         };
       }
       pending.resolvedTo = pending.toCandidates[0] ?? null;
     } else {
       pending.resolvedTo = selected;
-      if (usesDualSchema) state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL] = selected.address;
+      if (usesDualSchema)
+        state.resolverFields[RESOLVER_FIELD.TO_TOKEN_SYMBOL] = selected.address;
     }
 
     state.disambiguation = undefined;
@@ -675,7 +764,10 @@ export class SendCapability implements Capability<SendParams> {
         );
       }
       const usdcRecord = this.deps.tokenRegistryService
-        ? await this.deps.tokenRegistryService.findByAddressAndChain(usdc, chainId)
+        ? await this.deps.tokenRegistryService.findByAddressAndChain(
+            usdc,
+            chainId,
+          )
         : undefined;
       if (!usdcRecord) {
         log.warn(
@@ -689,7 +781,10 @@ export class SendCapability implements Capability<SendParams> {
     }
 
     if (fromCandidates.length === 0 && state.tokenSymbols.from) {
-      fromCandidates = await this.deps.intentUseCase.searchTokens(state.tokenSymbols.from, chainId);
+      fromCandidates = await this.deps.intentUseCase.searchTokens(
+        state.tokenSymbols.from,
+        chainId,
+      );
       if (fromCandidates.length === 0) {
         return this.abort(
           `Token not found: ${state.tokenSymbols.from}. Make sure it is supported on this chain.`,
@@ -697,7 +792,10 @@ export class SendCapability implements Capability<SendParams> {
       }
     }
     if (state.tokenSymbols.to) {
-      toCandidates = await this.deps.intentUseCase.searchTokens(state.tokenSymbols.to, chainId);
+      toCandidates = await this.deps.intentUseCase.searchTokens(
+        state.tokenSymbols.to,
+        chainId,
+      );
       if (toCandidates.length === 0) {
         return this.abort(
           `Token not found: ${state.tokenSymbols.to}. Make sure it is supported on this chain.`,
@@ -705,7 +803,8 @@ export class SendCapability implements Capability<SendParams> {
       }
     }
 
-    const resolvedFrom = fromCandidates.length === 1 ? fromCandidates[0]! : null;
+    const resolvedFrom =
+      fromCandidates.length === 1 ? fromCandidates[0]! : null;
     const resolvedTo = toCandidates.length === 1 ? toCandidates[0]! : null;
 
     if (fromCandidates.length > 1) {
@@ -719,7 +818,11 @@ export class SendCapability implements Capability<SendParams> {
       };
       return {
         kind: "ask",
-        question: buildDisambiguationPrompt("from", state.tokenSymbols.from!, fromCandidates),
+        question: buildDisambiguationPrompt(
+          "from",
+          state.tokenSymbols.from!,
+          fromCandidates,
+        ),
         state: toPlain(state),
       };
     }
@@ -735,7 +838,11 @@ export class SendCapability implements Capability<SendParams> {
       };
       return {
         kind: "ask",
-        question: buildDisambiguationPrompt("to", state.tokenSymbols.to!, toCandidates),
+        question: buildDisambiguationPrompt(
+          "to",
+          state.tokenSymbols.to!,
+          toCandidates,
+        ),
         state: toPlain(state),
       };
     }
@@ -803,24 +910,47 @@ export class SendCapability implements Capability<SendParams> {
     // The renderer animates dots; we never edit it after the fact — the final
     // dot frame stays in chat. Errors are emitted as a separate message after.
     const statusId = `resolve_recipient_${handle}_${Date.now()}`;
-    await ctx.emit({ kind: "chat_status_start", id: statusId, text: "Finding your receiver" });
+    await ctx.emit({
+      kind: "chat_status_start",
+      id: statusId,
+      text: "Finding your receiver",
+    });
 
     let telegramUserId: string;
     let recipientAddress: string;
     try {
-      telegramUserId = await this.deps.telegramHandleResolver.resolveHandle(handle);
-      const recipientEoa = await this.deps.privyAuthService.getOrCreateWalletByTelegramId(telegramUserId);
-      const existingProfile = await this.deps.userProfileRepo?.findByEoaAddress(recipientEoa);
+      telegramUserId =
+        await this.deps.telegramHandleResolver.resolveHandle(handle);
+      const recipientEoa =
+        await this.deps.privyAuthService.getOrCreateWalletByTelegramId(
+          telegramUserId,
+        );
+      const existingProfile =
+        await this.deps.userProfileRepo?.findByEoaAddress(recipientEoa);
       if (existingProfile?.smartAccountAddress) {
         recipientAddress = existingProfile.smartAccountAddress;
         log.info(
-          { step: "wallet-resolved", source: "db", telegramUserId, wallet: recipientAddress },
+          {
+            step: "wallet-resolved",
+            source: "db",
+            telegramUserId,
+            wallet: recipientAddress,
+          },
           "recipient SCA from DB",
         );
       } else {
-        recipientAddress = await deriveScaAddress(recipientEoa as `0x${string}`, this.deps.chainId);
+        recipientAddress = await deriveScaAddress(
+          recipientEoa as `0x${string}`,
+          this.deps.chainId,
+        );
         log.info(
-          { step: "wallet-resolved", source: "derived", telegramUserId, eoa: recipientEoa, wallet: recipientAddress },
+          {
+            step: "wallet-resolved",
+            source: "derived",
+            telegramUserId,
+            eoa: recipientEoa,
+            wallet: recipientAddress,
+          },
           "recipient SCA derived",
         );
       }
@@ -866,14 +996,20 @@ export class SendCapability implements Capability<SendParams> {
     try {
       const profile = await this.deps.userProfileRepo.findByUserId(ctx.userId);
       if (!profile?.sessionKeyAddress) return;
-      const amountRaw = toRaw(params.partialParams.amountHuman as string, resolvedFrom.decimals);
+      const amountRaw = toRaw(
+        params.partialParams.amountHuman as string,
+        resolvedFrom.decimals,
+      );
       const delegationMsg = this.deps.delegationBuilder.buildErc20Spend({
         sessionKeyAddress: profile.sessionKeyAddress,
         target: resolvedFrom.address,
         valueLimit: amountRaw,
         chainId: this.deps.chainId,
       });
-      await this.deps.pendingDelegationRepo.create({ userId: ctx.userId, zerodevMessage: delegationMsg });
+      await this.deps.pendingDelegationRepo.create({
+        userId: ctx.userId,
+        zerodevMessage: delegationMsg,
+      });
       await ctx.emit({
         kind: "chat",
         text: buildDelegationPrompt(delegationMsg, {

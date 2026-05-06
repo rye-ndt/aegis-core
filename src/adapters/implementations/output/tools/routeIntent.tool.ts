@@ -37,8 +37,14 @@ const InputSchema = z.object({
     .enum(COMMAND_VALUES)
     .describe(
       "Slash command for the matching capability. Pick the most specific one. " +
-        "`/buy` is the USDC fiat onramp (deposit address or card payment); never " +
-        "use it for stock symbols — use the `stock_open` tool for stocks.",
+        "`/buy` is the USDC fiat onramp (deposit address or card payment) — use it " +
+        "when the user wants to fund/add money to/deposit into their account from " +
+        "fiat; never use it for stock symbols (use the `stock_open` tool for stocks). " +
+        "`/topup` is for crypto-to-USDC top-up of the account. " +
+        "`/yield` is ONLY for earn/yield/APY flows — pick it only when the user " +
+        "explicitly mentions yield, earn, APY, interest, or optimizing idle USDC. " +
+        "Generic phrases like \"fund the account\", \"add funds\", \"deposit money\" " +
+        "are NOT yield — they are `/buy` (fiat) or `/topup` (crypto).",
     ),
   rest: z
     .string()

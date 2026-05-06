@@ -21,8 +21,12 @@ const InputSchema = z.object({
   amountUsd: z
     .string()
     .regex(/^\d+(\.\d+)?$/, "Decimal USD amount, e.g. '10' or '12.5'")
+    .optional()
     .describe(
-      "Notional collateral in USD. Funded from the user's home-chain USDC balance.",
+      "Notional collateral in USD. Funded from the user's home-chain USDC " +
+        "balance. OMIT this field when the user did not specify an amount " +
+        "(e.g. 'buy apple stock') — the system will then prompt them for it. " +
+        "Do NOT invent or default an amount.",
     ),
 });
 
@@ -80,10 +84,15 @@ export class StockOpenTool implements ITool {
     }
 
     const { side, symbol, amountUsd } = parsed.data;
-    const text = `/stock ${side} $${amountUsd} ${symbol.toUpperCase()}`;
+    // Omit `$<amount>` from the dispatched command when the model didn't
+    // collect an amount — the capability's `awaiting_amount` slot-fill will
+    // prompt the user before reaching the mini-app.
+    const text = amountUsd
+      ? `/stock ${side} $${amountUsd} ${symbol.toUpperCase()}`
+      : `/stock ${side} ${symbol.toUpperCase()}`;
 
     log.info(
-      { step: "started", userId: this.deps.userId, side, symbol: symbol.toUpperCase(), amountUsd },
+      { step: "started", userId: this.deps.userId, side, symbol: symbol.toUpperCase(), amountUsd: amountUsd ?? null },
       "stock-open dispatching to /stock capability",
     );
 
@@ -104,7 +113,9 @@ export class StockOpenTool implements ITool {
       return {
         success: true,
         data: result.handled
-          ? `Stock ${side} flow started for $${amountUsd} ${symbol.toUpperCase()} — the user has been shown a confirmation modal.`
+          ? amountUsd
+            ? `Stock ${side} flow started for $${amountUsd} ${symbol.toUpperCase()} — the user has been shown a confirmation modal. Reply with an empty string; do NOT acknowledge or rephrase.`
+            : `Stock ${side} flow started for ${symbol.toUpperCase()} — the capability has already asked the user for the USD amount. Reply with an empty string; do NOT ask the same question, rephrase it, or acknowledge — that would duplicate the user-visible prompt.`
           : `Could not start the ${side} flow for ${symbol.toUpperCase()}.`,
       };
     } catch (err) {
