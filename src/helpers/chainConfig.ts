@@ -181,9 +181,6 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     ],
     privyNetwork: "bnb-smart-chain",
     aliases: ["bsc", "bnb", "bnb-chain", "binance-smart-chain"],
-    // Phase 2: enabled. The stock capability bundles cross-chain USDC.avax →
-    // USDC.bsc as part of every /stock buy|short, and the return swap on
-    // close/recovery, so Relay must accept BSC as an origin and destination.
     relayEnabled: true,
     usdcEnvKey: "BSC_USDC",
     ankrBlockchain: "bsc",
@@ -294,14 +291,6 @@ export const NATIVE_PSEUDO_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
  * exclusively, so adapters bridging to those APIs use this constant.
  */
 export const RELAY_NATIVE_SENTINEL = "0x0000000000000000000000000000000000000000" as const;
-
-/**
- * Default Aster Diamond proxy address on BSC (chain id 56) — entrypoint for
- * the perpetuals venue used by `/stock` capabilities. Held here rather than
- * inline in `helpers/env/asterEnv.ts` because it is a chain-pinned on-chain
- * address. Override via `ASTER_DIAMOND_ADDRESS_BSC` env at runtime.
- */
-export const ASTER_DIAMOND_DEFAULT_BSC = "0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0" as const;
 
 export function isNativeAddress(address: string | null | undefined): boolean {
   if (!address) return false;

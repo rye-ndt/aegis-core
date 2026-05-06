@@ -29,10 +29,6 @@ export function routeStructuredToolResult(
   switch (payload.kind) {
     case "transfer_history":
       return routeTransferHistory(payload);
-    case "stock_positions":
-      return routeStockPositions(payload);
-    case "stock_quote":
-      return routeStockQuote(payload);
     case "portfolio":
       return routePortfolio(payload);
     default:
@@ -96,75 +92,6 @@ function routeTransferHistory(
     txHashes: head
       .map((it) => ({ hash: it.txHash, chainId: it.chainId }))
       .slice(0, 3),
-    complexity: "simple",
-  };
-}
-
-function routeStockPositions(
-  payload: Extract<StructuredToolPayload, { kind: "stock_positions" }>,
-): IntentResult {
-  const items = payload.items;
-  if (items.length === 0) {
-    return {
-      status: "success",
-      verb: "positions_query",
-      headline: "No open stock positions",
-      fields: [
-        { label: "Status", value: "Nothing open right now", emphasis: "muted" },
-      ],
-      nextActions: [{ label: "Browse stocks", kind: "command", payload: "/stock" }],
-      complexity: "simple",
-    };
-  }
-  const head = items.slice(0, MAX_FIELDS);
-  const tail = items.slice(MAX_FIELDS);
-  const fmt = (p: typeof items[number]): ResultField => {
-    const sign = p.unrealizedPnlUsd.startsWith("-") ? "" : "+";
-    return {
-      label: `${p.symbol} (${p.side})`,
-      value: `Mark $${p.markPriceUsd} · P&L ${sign}$${p.unrealizedPnlUsd}`,
-    };
-  };
-  return {
-    status: "success",
-    verb: "positions_query",
-    headline: `Open positions: ${items.length}`,
-    fields: head.map(fmt),
-    details: tail.length > 0 ? tail.map(fmt) : undefined,
-    nextActions: [{ label: "Open another", kind: "command", payload: "/stock" }],
-    complexity: "simple",
-  };
-}
-
-function routeStockQuote(
-  payload: Extract<StructuredToolPayload, { kind: "stock_quote" }>,
-): IntentResult {
-  const items = payload.items;
-  if (items.length === 0) {
-    return {
-      status: "success",
-      verb: "balance_query",
-      headline: "No marks available",
-      fields: [
-        { label: "Status", value: "Try again in a moment", emphasis: "muted" },
-      ],
-      complexity: "simple",
-    };
-  }
-  const head = items.slice(0, MAX_FIELDS);
-  const tail = items.slice(MAX_FIELDS);
-  const fmt = (m: typeof items[number]): ResultField => ({
-    label: m.symbol,
-    value: `$${m.priceUsd}`,
-    emphasis: "primary",
-  });
-  return {
-    status: "success",
-    verb: "balance_query",
-    headline: items.length === 1 ? `${items[0]!.symbol} quote` : `Stock quotes: ${items.length}`,
-    fields: head.map(fmt),
-    details: tail.length > 0 ? tail.map(fmt) : undefined,
-    nextActions: [{ label: "Buy this", kind: "command", payload: "/stock" }],
     complexity: "simple",
   };
 }

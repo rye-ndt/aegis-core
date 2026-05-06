@@ -16,8 +16,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "ts-node src/migrate.ts",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio",
-    "verify:aster": "tsx scripts/verify-aster-pairs.ts"
+    "db:studio": "drizzle-kit studio"
   },
   "keywords": [
     "hexagonal",

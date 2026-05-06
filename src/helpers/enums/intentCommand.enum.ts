@@ -11,8 +11,6 @@ export enum INTENT_COMMAND {
   WITHDRAW    = "/withdraw",
   POINTS      = "/points",
   LEADERBOARD = "/leaderboard",
-  STOCK       = "/stock",
-  POSITIONS   = "/positions",
 }
 
 /**

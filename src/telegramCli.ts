@@ -18,9 +18,6 @@ const log = createLogger("telegramCli");
   const inject = new AssistantInject();
   const sqlDB = inject.getSqlDB();
 
-  // Soft-fail stock-capability verification (fix #9).
-  await inject.verifyStockCapability();
-
   const tgApi = new Api(token);
 
   const rawBot = new Bot(token);

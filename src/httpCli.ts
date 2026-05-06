@@ -17,10 +17,6 @@ const log = createLogger("httpCli");
 
   const inject = new AssistantInject();
 
-  // Soft-fail stock-capability verification: failure disables stocks but
-  // never crashes the rest of the backend (fix #9).
-  await inject.verifyStockCapability();
-
   const tgApi = new Api(tgToken);
   const notifyResolved = buildNotifyResolved(tgApi);
 

@@ -26,8 +26,8 @@ interface AssistantParams {
  *
  * Result-card framework wiring (plan §5.2.5):
  * - When the underlying LLM round-tripped a read-only tool that knows how to
- *   produce a `StructuredToolPayload` (transfer history, stock positions,
- *   stock quote, portfolio), the use case surfaces it via
+ *   produce a `StructuredToolPayload` (transfer history, portfolio), the
+ *   use case surfaces it via
  *   `IChatResponse.lastStructuredToolResult`. We hand that payload to
  *   `assistantResultRouter` to build a clean `result_card`. The LLM's
  *   markdown reply is suppressed in that case.

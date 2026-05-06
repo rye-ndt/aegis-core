@@ -6,13 +6,9 @@ export type IntentVerb =
   | "yield_deposit"
   | "yield_withdraw"
   | "yield_rebalance"
-  | "stock_buy"
-  | "stock_close"
-  | "stock_set_exits"
   | "buy_onramp"
   | "history_query"
   | "balance_query"
-  | "positions_query"
   | "portfolio_summary"
   | "loyalty_query";
 

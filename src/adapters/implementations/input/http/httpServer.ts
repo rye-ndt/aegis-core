@@ -23,9 +23,6 @@ import type { ICapabilityDispatcher } from "../../../../use-cases/interface/inpu
 import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ITransferHistoryUseCase } from "../../../../use-cases/interface/input/transferHistory.interface";
-import type { IStockPairRegistry } from "../../../../use-cases/interface/output/stocks/stockPair.interface";
-import type { IStockPriceOracle } from "../../../../use-cases/interface/output/stocks/stockPriceOracle.interface";
-import type { IStockUseCase } from "../../../../use-cases/interface/input/stock.interface";
 import type { SubgraphPrincipalProvider } from "../../output/yield/subgraphPrincipalProvider";
 import { isRateLimitedError } from "../../../../helpers/errors/rateLimitedError";
 import { isUnsupportedChainError } from "../../../../helpers/errors/unsupportedChainError";
@@ -117,12 +114,6 @@ export class HttpApiServer {
     private readonly loyaltyUseCase?: ILoyaltyUseCase,
     private readonly userDB?: IUserDB,
     private readonly transferHistoryUseCase?: ITransferHistoryUseCase,
-    private readonly stockPairRegistry?: IStockPairRegistry,
-    private readonly stockPriceOracle?: IStockPriceOracle,
-    /** Returns true when boot-time Aster verification failed (fix #9). */
-    private readonly isStockCapabilityDisabled?: () => boolean,
-    /** Sync accessor — null until `verifyStockCapability` constructs it. */
-    private readonly getStockUseCase?: () => IStockUseCase | null,
     /** Optional — exposes subgraph health for /health response. */
     private readonly subgraphPrincipalProvider?: SubgraphPrincipalProvider,
     /** Optional — keyed by approval requestId; populated by /send and /swap when guard fails. */
@@ -207,9 +198,6 @@ export class HttpApiServer {
       "GET /loyalty/leaderboard":       (req, res, url) => this.handleGetLoyaltyLeaderboard(req, res, url),
       "GET /metrics":                   (req, res) => this.handleGetMetrics(req, res),
       "POST /health":                   (req, res) => this.handleHealth(req, res),
-      "GET /stocks/pairs":              (req, res) => this.handleGetStocksPairs(req, res),
-      "GET /stocks/quote":              (req, res, url) => this.handleGetStocksQuote(req, res, url),
-      "GET /stocks/positions":          (req, res) => this.handleGetStocksPositions(req, res),
     };
   }
 
@@ -835,8 +823,8 @@ export class HttpApiServer {
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
 
-    // chainId defaults to the home chain. Stocks (Phase 2) call this with
-    // ?chainId=56 to gather the BSC delegation set during onboarding.
+    // chainId defaults to the home chain; callers can override via ?chainId=…
+    // for cross-chain delegation flows.
     const chainIdRaw = url.searchParams.get("chainId");
     const chainId = chainIdRaw ? parseInt(chainIdRaw, 10) : CHAIN_CONFIG.chainId;
     if (!Number.isFinite(chainId)) {
@@ -1133,96 +1121,6 @@ export class HttpApiServer {
       return null;
     }
     return userId;
-  }
-
-  private async handleGetStocksPairs(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const reqId = this.reqLogIds.get(req) ?? "?";
-    if (this.isStockCapabilityDisabled?.()) {
-      log.warn({ reqId, route: "GET /stocks/pairs" }, "stocks-unavailable");
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    if (!this.stockPairRegistry) {
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    const pairs = this.stockPairRegistry.list();
-    res.setHeader("Cache-Control", "public, max-age=3600");
-    return this.sendJson(res, 200, { pairs });
-  }
-
-  private async handleGetStocksQuote(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-    url: URL,
-  ): Promise<void> {
-    const reqId = this.reqLogIds.get(req) ?? "?";
-    if (this.isStockCapabilityDisabled?.()) {
-      log.warn({ reqId, route: "GET /stocks/quote" }, "stocks-unavailable");
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    if (!this.stockPriceOracle || !this.stockPairRegistry) {
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    const raw = url.searchParams.get("symbols");
-    if (!raw) {
-      return this.sendJson(res, 400, { error: "symbols query parameter required" });
-    }
-    const supported = new Set(this.stockPairRegistry.symbols().map((s) => s.toUpperCase()));
-    const requested = raw
-      .split(",")
-      .map((s) => s.trim().toUpperCase())
-      .filter((s) => s.length > 0);
-    const unknown = requested.filter((s) => !supported.has(s));
-    if (unknown.length > 0) {
-      return this.sendJson(res, 400, { error: "unknown symbols", unknown });
-    }
-    if (requested.length === 0) {
-      return this.sendJson(res, 200, { marks: [] });
-    }
-    try {
-      const start = Date.now();
-      const marks = await this.stockPriceOracle.markPrices(requested);
-      log.info(
-        { reqId, route: "GET /stocks/quote", count: marks.length, durationMs: Date.now() - start },
-        "request-served",
-      );
-      res.setHeader("Cache-Control", "private, max-age=10");
-      return this.sendJson(res, 200, { marks });
-    } catch (err) {
-      log.error({ err, reqId, route: "GET /stocks/quote" }, "request-failed");
-      return this.sendJson(res, 502, { error: "quote_unavailable" });
-    }
-  }
-
-  private async handleGetStocksPositions(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    const reqId = this.reqLogIds.get(req) ?? "?";
-    if (this.isStockCapabilityDisabled?.()) {
-      log.warn({ reqId, route: "GET /stocks/positions" }, "stocks-unavailable");
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    const stockUseCase = this.getStockUseCase?.();
-    if (!stockUseCase) {
-      return this.sendJson(res, 503, { error: "stocks_unavailable" });
-    }
-    try {
-      const start = Date.now();
-      const positions = await stockUseCase.listPositions(userId);
-      log.info(
-        { reqId, route: "GET /stocks/positions", userId, count: positions.length, durationMs: Date.now() - start },
-        "request-served",
-      );
-      return this.sendJson(res, 200, { positions });
-    } catch (err) {
-      log.error({ err, reqId, userId, route: "GET /stocks/positions" }, "request-failed");
-      return this.sendJson(res, 502, { error: "positions_unavailable" });
-    }
   }
 
   private async extractUserId(req: http.IncomingMessage): Promise<string | null> {

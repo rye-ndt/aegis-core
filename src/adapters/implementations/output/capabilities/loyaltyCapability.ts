@@ -32,9 +32,6 @@ const ACTION_LABELS: Record<string, string> = {
   yield_hold_day: "Yield hold",
   referral: "Referral",
   manual_adjust: "Adjustment",
-  stock_open_long: "Stock buy",
-  stock_open_short: "Stock short",
-  stock_close: "Stock close",
 };
 
 const MAX_HISTORY_FIELDS = 4;

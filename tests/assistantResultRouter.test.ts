@@ -45,44 +45,6 @@ test("transfer_history with items → fields head + tx hashes", () => {
   assert.equal(card!.txHashes?.length, 1);
 });
 
-test("stock_positions empty → 'No open' headline + browse CTA", () => {
-  const card = routeStructuredToolResult("get_stock_positions", {
-    kind: "stock_positions",
-    items: [],
-  });
-  assert.ok(card);
-  assert.equal(card!.verb, "positions_query");
-  assert.equal(card!.nextActions?.[0]?.payload, "/stock");
-});
-
-test("stock_positions with items → P&L formatted with sign", () => {
-  const card = routeStructuredToolResult("get_stock_positions", {
-    kind: "stock_positions",
-    items: [
-      {
-        symbol: "AAPL",
-        side: "long",
-        entryPriceUsd: "180",
-        markPriceUsd: "190",
-        collateralUsd: "100",
-        unrealizedPnlUsd: "5.50",
-        tradeHash: "0x" + "a".repeat(64),
-      },
-    ],
-  });
-  assert.ok(card);
-  assert.match(card!.fields[0]!.value, /\+\$5\.50/);
-});
-
-test("stock_quote single symbol → single-symbol headline", () => {
-  const card = routeStructuredToolResult("get_stock_quote", {
-    kind: "stock_quote",
-    items: [{ symbol: "TSLA", priceUsd: "245.00", asOfEpoch: 0 }],
-  });
-  assert.ok(card);
-  assert.match(card!.headline, /TSLA quote/);
-});
-
 test("portfolio sorts balances by usdValue desc + total in headline", () => {
   const card = routeStructuredToolResult("get_portfolio", {
     kind: "portfolio",

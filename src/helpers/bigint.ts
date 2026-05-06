@@ -17,8 +17,6 @@ export function toRaw(amountHuman: string, decimals: number): string {
  *
  *   divFixed("100", "189.42", 10) ≈ "5279801498"   // 0.5279801498 with 1e10 scale
  *
- * Used by /stocks/quote and the Phase 2 stock use-case to size positions
- * from a USD amount + mark price.
  */
 export function divFixed(
   numHuman: string,

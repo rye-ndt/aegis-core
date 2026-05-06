@@ -192,24 +192,10 @@
       "breakpoints": true
     },
     {
-      "idx": 27,
-      "version": "7",
-      "when": 1778544000000,
-      "tag": "0027_seed_stock_loyalty_actions",
-      "breakpoints": true
-    },
-    {
       "idx": 28,
       "version": "7",
       "when": 1778630400000,
       "tag": "0028_seed_bsc_usdc",
-      "breakpoints": true
-    },
-    {
-      "idx": 29,
-      "version": "7",
-      "when": 1778716800000,
-      "tag": "0029_stock_pairs",
       "breakpoints": true
     },
     {
@@ -224,6 +210,13 @@
       "version": "7",
       "when": 1778803200000,
       "tag": "0031_narrow_lockheed",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1778889600000,
+      "tag": "0032_drop_stock_features",
       "breakpoints": true
     }
   ]

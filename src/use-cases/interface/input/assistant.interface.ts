@@ -9,7 +9,7 @@ export interface IChatInput {
   imageBase64Url?: string;
   /**
    * The input adapter's channel id (e.g. Telegram chat id stringified). Threaded
-   * through to the LLM tool registry so capability-bound tools (stock_open) can
+   * through to the LLM tool registry so capability-bound tools can
    * re-dispatch into ICapabilityDispatcher.handle, which binds the renderer's
    * emit to the correct user-facing channel.
    */

@@ -33,7 +33,6 @@ const COMMAND_VALUES = [
   // it back here AND register a real capability.
   INTENT_COMMAND.DCA,
   INTENT_COMMAND.YIELD,
-  INTENT_COMMAND.STOCK,
   INTENT_COMMAND.MONEY,
 ] as const;
 
@@ -43,8 +42,7 @@ const InputSchema = z.object({
     .describe(
       "Slash command for the matching capability. Pick the most specific one. " +
         "`/buy` is the USDC onramp — use it for ANY request to fund/top up/add " +
-        "money to/deposit into the account (fiat or otherwise). Never use `/buy` " +
-        "for stock symbols (use the `stock_open` tool for stocks). " +
+        "money to/deposit into the account (fiat or otherwise). " +
         "`/yield` is ONLY for earn/yield/APY flows — pick it only when the user " +
         "explicitly mentions yield, earn, APY, interest, or optimizing idle USDC. " +
         "Generic phrases like \"fund the account\", \"top up\", \"add funds\", " +
@@ -82,14 +80,11 @@ export class RouteIntentTool implements ITool {
       name: "route_intent",
       description:
         "Route the user's natural-language on-chain or money request to the matching capability. " +
-        "Call this for any request to swap, send, buy, sell, convert, top up, DCA, deposit/withdraw " +
-        "yield, or buy/short/close a stock. Pass the user's verbatim remainder as `rest`. " +
-        "Do NOT call this for read-only questions (balances, positions, prices, history) — those " +
+        "Call this for any request to swap, send, buy, sell, convert, top up, DCA, or deposit/withdraw " +
+        "yield. Pass the user's verbatim remainder as `rest`. " +
+        "Do NOT call this for read-only questions (balances, prices, history) — those " +
         "have dedicated tools. The capability layer renders the user-facing UI; you only need to " +
-        "write a brief closing acknowledgement after this returns. " +
-        "When `command=\"/buy\"` is the candidate but the user's text mentions a stock " +
-        "symbol (AAPL, TSLA, NVDA, GOOG, META, AMZN, etc.) or words like \"stock\"/\"shares\", " +
-        "call `stock_open` instead — `/buy` is for the USDC fiat onramp only.",
+        "write a brief closing acknowledgement after this returns.",
       inputSchema: z.toJSONSchema(InputSchema),
     };
   }

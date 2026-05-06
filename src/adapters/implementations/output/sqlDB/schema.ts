@@ -54,19 +54,6 @@ export const userProfiles = pgTable("user_profiles", {
   updatedAtEpoch: integer("updated_at_epoch").notNull(),
 });
 
-export const stockPairs = pgTable("stock_pairs", {
-  id: uuid("id").primaryKey(),
-  symbol: text("symbol").notNull(),               // canonical ticker, e.g. "AAPL"
-  name: text("name").notNull(),                   // human-readable, e.g. "Apple Inc." (from SEC EDGAR)
-  chainId: integer("chain_id").notNull(),         // venue chain (BSC = 56)
-  pairBase: text("pair_base").notNull(),          // synthetic on-venue address (lowercase 0x…)
-  isActive: boolean("is_active").notNull().default(true),
-  createdAtEpoch: integer("created_at_epoch").notNull(),
-  updatedAtEpoch: integer("updated_at_epoch").notNull(),
-}, (t) => ({
-  symbolChainUniq: unique().on(t.symbol, t.chainId),
-}));
-
 export const tokenRegistry = pgTable("token_registry", {
   id: uuid("id").primaryKey(),
   symbol: text("symbol").notNull(),

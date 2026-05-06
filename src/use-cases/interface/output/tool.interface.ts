@@ -5,9 +5,9 @@ export interface IToolInput {
 /**
  * A typed structured payload optionally returned alongside the tool's
  * markdown `data`. Read-only tools that the result-card framework knows how
- * to render directly (transfer history, balances, stock positions/quotes,
- * portfolio summary) populate this so `assistantResultRouter` can build a
- * `result_card` instead of letting the LLM re-format the markdown table.
+ * to render directly (transfer history, portfolio summary) populate this so
+ * `assistantResultRouter` can build a `result_card` instead of letting the
+ * LLM re-format the markdown table.
  *
  * The LLM still receives `data` (string) in its tool-result message — it
  * keeps seeing a human-readable table for context — but the capability
@@ -25,22 +25,6 @@ export type StructuredToolPayload =
       chainId: number;
       label?: string | null;
     }>; nextCursor?: string | null }
-  | { kind: "stock_positions"; items: Array<{
-      symbol: string;
-      side: "long" | "short";
-      entryPriceUsd: string;
-      markPriceUsd: string;
-      collateralUsd: string;
-      unrealizedPnlUsd: string;
-      stopLossUsd?: string | null;
-      takeProfitUsd?: string | null;
-      tradeHash: string;
-    }> }
-  | { kind: "stock_quote"; items: Array<{
-      symbol: string;
-      priceUsd: string;
-      asOfEpoch: number;
-    }> }
   | { kind: "portfolio"; walletAddress: string; walletLabel: string; balances: Array<{
       symbol: string;
       balance: string;

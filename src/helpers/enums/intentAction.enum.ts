@@ -4,6 +4,5 @@ export enum INTENT_ACTION {
   UNSTAKE = "unstake",
   CLAIM_REWARDS = "claim_rewards",
   TRANSFER = "transfer",
-  STOCK_TRADE = "stock_trade",
   UNKNOWN = "unknown",
 }

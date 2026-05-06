@@ -159,7 +159,7 @@ export class TelegramAssistantHandler {
       "_\"Send $50 to @john\"_ · _\"Buy $100 of Bitcoin\"_ · _\"How much do I have?\"_",
       "",
       "*Quick commands*",
-      "/positions · /buy · /sell · /swap · /stock · /send · /topup · /withdraw · /points · /leaderboard",
+      "/buy · /sell · /swap · /send · /topup · /withdraw · /points · /leaderboard",
       "",
       "*🔮 Works while you're away*",
       "Aegis watches the market, auto-collects your earnings, and quietly moves your money to where it earns the most. Like a financial advisor who never sleeps.",

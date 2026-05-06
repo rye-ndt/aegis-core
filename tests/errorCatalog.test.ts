@@ -71,11 +71,6 @@ test("recipient_unresolved matches recipient.*not.*resolved", () => {
   assert.equal(out.code, "recipient_unresolved");
 });
 
-test("stock_market_closed matches MARKET_CLOSED", () => {
-  const out = interpretError(new Error("MARKET_CLOSED"), CTX);
-  assert.equal(out.code, "stock_market_closed");
-});
-
 test("yield_winner_changed matches winner changed", () => {
   const out = interpretError(new Error("winner changed before submit"), CTX);
   assert.equal(out.code, "yield_winner_changed");

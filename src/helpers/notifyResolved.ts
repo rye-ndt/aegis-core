@@ -50,17 +50,14 @@ export function buildNotifyResolved(
     );
 
     if (!rejected) {
-      const result =
-        planKind === "recovery"
-          ? buildRecoverySuccessResult(chainId, txHash)
-          : buildSuccessResult(chainId, txHash, data);
+      const result = buildSuccessResult(chainId, txHash, data);
 
       try {
         await sendCard(tgApi, chatId, result);
         log.info(
           {
             step: "succeeded",
-            mode: planKind === "recovery" ? "recovery" : "default",
+            mode: "default",
             chatId,
             hash: txHash,
             durationMs: Date.now() - start,
@@ -134,26 +131,6 @@ export function buildNotifyResolved(
       return;
     }
 
-    // §P0.4 — recovery-flow failures get a distinct, support-friendly card so
-    // the user knows the funds may be stranded on the venue. Must run BEFORE
-    // the generic error / rejection branches so they don't shadow it.
-    if (planKind === "recovery") {
-      const result = buildRecoveryFailureResult(requestId);
-      await sendCard(tgApi, chatId, result);
-      log.info(
-        {
-          step: "succeeded",
-          mode: "recovery-failed",
-          chatId,
-          requestId,
-          errorCode,
-          durationMs: Date.now() - start,
-        },
-        "notify-resolved",
-      );
-      return;
-    }
-
     if (errorCode === "insufficient_token_balance") {
       const decoded = decodeErc20Transfer(data, chainId);
       if (decoded?.isUsdc) {
@@ -218,24 +195,6 @@ export function buildNotifyResolved(
       return;
     }
 
-    // Lockstep with FE `interpretSignError.ts` (Aster stock-trading codes).
-    const stockMessage = stockErrorMessage(errorCode);
-    if (stockMessage) {
-      const result: IntentResult = {
-        status: "failed",
-        verb: "stock_buy",
-        headline: "Stock action failed",
-        fields: [{ label: "Reason", value: stockMessage }],
-        complexity: "simple",
-      };
-      await sendCard(tgApi, chatId, result);
-      log.info(
-        { step: "succeeded", mode: "stock-error", chatId, errorCode, durationMs: Date.now() - start },
-        "notify-resolved",
-      );
-      return;
-    }
-
     if (errorCode) {
       const result: IntentResult = {
         status: "failed",
@@ -273,9 +232,8 @@ export function buildNotifyResolved(
 }
 
 function rejectionVerb(
-  planKind: SigningResolutionEvent["planKind"],
+  _planKind: SigningResolutionEvent["planKind"],
 ): IntentVerb {
-  if (planKind === "recovery") return "stock_buy";
   return "send";
 }
 
@@ -309,47 +267,6 @@ function buildSuccessResult(
   };
 }
 
-function buildRecoverySuccessResult(
-  chainId: number,
-  txHash: string | undefined,
-): IntentResult {
-  // §P0.4 — recovery success copy: lead with the user-relevant fact ("funds
-  // back on home chain"), name the chain so they don't have to guess.
-  return {
-    status: "success",
-    verb: "stock_buy",
-    headline: "Funds returned",
-    fields: [
-      {
-        label: "Status",
-        value: `Your USDC is back on ${CHAIN_CONFIG.name}.`,
-        emphasis: "primary",
-      },
-    ],
-    txHashes: txHash ? [{ hash: txHash, chainId }] : undefined,
-    complexity: "simple",
-  };
-}
-
-function buildRecoveryFailureResult(requestId: string): IntentResult {
-  // §P0.4 — recovery failure copy: tell the user funds may still be on the
-  // venue and surface the requestId for support correlation.
-  return {
-    status: "failed",
-    verb: "stock_buy",
-    headline: "Recovery failed",
-    fields: [
-      {
-        label: "Reason",
-        value:
-          "Funds may still be on the trading venue. Contact support with this request id.",
-      },
-      { label: "Request id", value: requestId, emphasis: "muted" },
-    ],
-    complexity: "simple",
-  };
-}
-
 async function sendCard(
   tgApi: Api,
   chatId: number,
@@ -369,30 +286,6 @@ async function sendCard(
     await tgApi.sendMessage(chatId, plain, {
       ...(rendered.keyboard ? { reply_markup: rendered.keyboard } : {}),
     });
-  }
-}
-
-/**
- * Maps Aster stock-trading errorCodes to user-facing messages. Lockstep
- * contract with FE `interpretSignError.ts` — add new codes here in the same
- * PR that introduces them on the FE.
- */
-function stockErrorMessage(code: string | undefined): string | null {
-  switch (code) {
-    case "aster_pair_inactive":
-      return "This stock pair is not currently tradable. Try a different symbol.";
-    case "aster_min_size":
-      return "Trade size is below the minimum. Try a larger amount.";
-    case "aster_max_position":
-      return "You've hit the per-user position limit for this asset.";
-    case "aster_oracle_stale":
-      return "The stock price oracle is stale. Please try again in a moment.";
-    case "aster_insufficient_collateral":
-      return "Not enough collateral landed on BSC to open the position. Funds will be returned to your home chain.";
-    case "stock_recovery_failed":
-      return "Recovery failed — please contact support so we can manually return your funds.";
-    default:
-      return null;
   }
 }
 

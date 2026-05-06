@@ -76,21 +76,10 @@ import { RedisSigningRequestCache } from "../implementations/output/cache/redis.
 import { RedisTransferHistoryCache } from "../implementations/output/cache/redis.transferHistory";
 import { RedisUserProfileCache } from "../implementations/output/cache/redis.userProfile";
 import { AssistantChatCapability } from "../implementations/output/capabilities/assistantChatCapability";
-import { PositionsCapability } from "../implementations/output/capabilities/positionsCapability";
 import { BuyCapability } from "../implementations/output/capabilities/buyCapability";
 import { LoyaltyCapability } from "../implementations/output/capabilities/loyaltyCapability";
 import { SendCapability } from "../implementations/output/capabilities/sendCapability";
-import { StockCapability } from "../implementations/output/capabilities/stockCapability";
 import { SwapCapability } from "../implementations/output/capabilities/swapCapability";
-import { StockUseCaseImpl } from "../../use-cases/implementations/stock.usecase";
-import { RelayCrossChainSwapPlanner } from "../implementations/output/stocks/relayCrossChainSwapPlanner";
-import {
-  AsterPositionsProvider,
-  CachedStockPositionsProvider,
-} from "../implementations/output/aster/asterPositionsProvider";
-import type { IStockUseCase } from "../../use-cases/interface/input/stock.interface";
-import type { IStockPositionsProvider } from "../../use-cases/interface/output/stocks/stockPositionsProvider.interface";
-import type { ICrossChainSwapPlanner } from "../../use-cases/interface/output/stocks/crossChainSwapPlanner.interface";
 import {
   YieldCapability,
   buildNudgeKeyboard,
@@ -123,7 +112,6 @@ import { GetPortfolioTool } from "../implementations/output/tools/getPortfolio.t
 import { RouteIntentTool } from "../implementations/output/tools/routeIntent.tool";
 import { RelaySwapTool } from "../implementations/output/tools/system/relaySwap.tool";
 import { WebSearchTool } from "../implementations/output/tools/webSearch.tool";
-import { StockOpenTool } from "../implementations/output/tools/stockOpen.tool";
 import { AnkrTransferHistoryProvider } from "../implementations/output/transferHistory/ankrTransferHistoryProvider";
 import { CachedTransferHistoryProvider } from "../implementations/output/transferHistory/cachedTransferHistoryProvider";
 import { PineconeVectorStore } from "../implementations/output/vectorDB/pinecone";
@@ -133,21 +121,6 @@ import { AaveV3Adapter } from "../implementations/output/yield/aaveV3Adapter";
 import { OnChainPositionDiscovery } from "../implementations/output/yield/onChainPositionDiscovery";
 import { SubgraphPrincipalProvider } from "../implementations/output/yield/subgraphPrincipalProvider";
 import { YieldProtocolRegistry } from "../implementations/output/yield/yieldProtocolRegistry";
-import { ASTER_ENV } from "../../helpers/env/asterEnv";
-import { AsterDiamondClient } from "../implementations/output/aster/asterDiamond.client";
-import { DbStockPairRegistry } from "../implementations/output/stocks/dbStockPairRegistry";
-import { AsterStockPairCrawler } from "../implementations/output/aster/asterStockPairCrawler";
-import { StockPairIngestionUseCase } from "../../use-cases/implementations/stockPairIngestion.usecase";
-import type { IStockPairIngestionUseCase } from "../../use-cases/interface/input/stockPairIngestion.interface";
-import { StockPairCrawlerJob } from "../implementations/input/jobs/stockPairCrawlerJob";
-import {
-  AsterPriceOracle,
-  CachedStockPriceOracle,
-} from "../implementations/output/aster/asterPriceOracle";
-import { AsterBrokerProvider } from "../implementations/output/aster/asterBrokerProvider";
-import type { IStockPairRegistry } from "../../use-cases/interface/output/stocks/stockPair.interface";
-import type { IStockPriceOracle } from "../../use-cases/interface/output/stocks/stockPriceOracle.interface";
-import type { IStockBrokerProvider } from "../../use-cases/interface/output/stocks/stockBrokerProvider.interface";
 import { renderResultCard } from "../implementations/output/artifactRenderer/resultCard.render";
 import type {
   IntentResult,
@@ -168,7 +141,6 @@ export class AssistantInject {
   private _schemaCompiler: OpenAISchemaCompiler | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
-  private _stockPairCrawlerJob: StockPairCrawlerJob | null = null;
   private _embeddingService: OpenAIEmbeddingService | null = null;
   private _toolVectorStore: PineconeVectorStore | null = null;
   private _toolIndexService: IToolIndexService | null = null;
@@ -205,16 +177,6 @@ export class AssistantInject {
   private _ankrTransferHistory: ITransferHistoryProvider | null = null;
   private _transferHistoryCache: ITransferHistoryCache | null = null;
   private _transferHistoryUseCase: ITransferHistoryUseCase | null = null;
-  // ----- Aster (tokenized stocks) -----
-  private _asterDiamondClient: AsterDiamondClient | null = null;
-  private _stockPairRegistry: IStockPairRegistry | null = null;
-  private _stockPriceOracle: IStockPriceOracle | null = null;
-  private _stockBrokerProvider: IStockBrokerProvider | null = null;
-  private _stockPositionsProvider: IStockPositionsProvider | null = null;
-  private _crossChainSwapPlanner: ICrossChainSwapPlanner | null = null;
-  private _stockUseCase: IStockUseCase | null = null;
-  /** Set true if boot-time `verifyStockCapability()` fails (fix #9 — soft fail). */
-  private _stockCapabilityDisabled = false;
   private _yieldJobsNoStartWarned = {
     poolScan: false,
     idleScan: false,
@@ -423,9 +385,8 @@ export class AssistantInject {
           add(tool);
         }
 
-        // route_intent + stock_open — both re-enter the capability dispatcher
-        // with a synthesized slash command. Lazy-resolve to break the
-        // construction-time cycle:
+        // route_intent re-enters the capability dispatcher with a synthesized
+        // slash command. Lazy-resolve to break the construction-time cycle:
         //   getCapabilityDispatcher → getUseCase (this factory) → getCapabilityDispatcher
         // (safe because this lambda runs per-message, after both are constructed).
         // route_intent is the unified NL → slash-command bridge: free-text
@@ -439,14 +400,6 @@ export class AssistantInject {
               channelId,
               conversationId,
               dispatcher,
-            }),
-          );
-          add(
-            new StockOpenTool({
-              userId,
-              channelId,
-              dispatcher,
-              isDisabled: () => this.isStockCapabilityDisabled(),
             }),
           );
         }
@@ -669,12 +622,6 @@ export class AssistantInject {
         this.getUserProfileCache(),
         this.getTransferHistoryUseCase(),
         this.getChainId(),
-        {
-          oracle: this.getStockPriceOracle(),
-          pairs: this.getStockPairRegistry(),
-          getStockUseCase: () => this.getStockUseCaseSync(),
-          isDisabled: () => this.isStockCapabilityDisabled(),
-        },
       );
     }
     return this._systemToolProvider;
@@ -789,11 +736,7 @@ export class AssistantInject {
 
     // Register capabilities here. Order does not matter.
     registry.register(
-      new BuyCapability(
-        sqlDB.userProfiles,
-        this.getChainId(),
-        this.getStockPairRegistry(),
-      ),
+      new BuyCapability(sqlDB.userProfiles, this.getChainId()),
     );
 
     const sendDeps = {
@@ -821,8 +764,6 @@ export class AssistantInject {
       if (command === INTENT_COMMAND.WITHDRAW) continue;
       if (command === INTENT_COMMAND.POINTS) continue;
       if (command === INTENT_COMMAND.LEADERBOARD) continue;
-      if (command === INTENT_COMMAND.STOCK) continue;
-      if (command === INTENT_COMMAND.POSITIONS) continue;
       // /topup is conceptually an onramp, not a transfer. Routing it through
       // SendCapability's compile→resolve pipeline causes the LLM extractor to
       // ask transfer-style questions ("Who should I send the USDC to?"). The
@@ -878,48 +819,6 @@ export class AssistantInject {
         loyaltyUseCase: this.getLoyaltyUseCase(),
         leaderboardDefaultLimit: LOYALTY_ENV.leaderboardDefaultLimit,
       }),
-    );
-
-    // /stock — Aster perpetuals capability. Requires the signing-request use
-    // case (mini-app autosign) and a working broker provider. Soft-disabled
-    // when boot verification fails (`isStockCapabilityDisabled`).
-    if (this._signingRequestUseCase) {
-      try {
-        const stockUseCase = await this.getStockUseCase();
-        registry.register(
-          new StockCapability({
-            stockUseCase,
-            signingRequestUseCase: this._signingRequestUseCase,
-            stockPairRegistry: this.getStockPairRegistry(),
-            miniAppRequestCache: this.getMiniAppRequestCache(),
-            loyaltyUseCase: this.getLoyaltyUseCase(),
-            isStockCapabilityDisabled: () => this.isStockCapabilityDisabled(),
-            tokenDelegationDB: this.getTokenDelegationRepo(),
-            pendingIntentStore: this.getPendingIntentStore(),
-            tokenRegistry: this.getTokenRegistryService(),
-          }),
-        );
-      } catch (err) {
-        log.error(
-          { err },
-          "/stock capability skipped — broker provider failed to initialise",
-        );
-      }
-    } else {
-      log.warn(
-        { reason: "redis_unavailable" },
-        "/stock capability skipped — signing-request use case not ready",
-      );
-    }
-
-    // /positions — chat-seeded summariser of open Aster positions. Delegates
-    // to the assistant LLM loop with a fixed prompt that nudges the agent
-    // toward the `get_stock_positions` tool.
-    registry.register(
-      new PositionsCapability(
-        () => this.getStockUseCaseSync(),
-        () => this.isStockCapabilityDisabled(),
-      ),
     );
 
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
@@ -1342,221 +1241,10 @@ export class AssistantInject {
       this.getLoyaltyUseCase(),
       this.getSqlDB().users,
       this.getTransferHistoryUseCase(),
-      this.getStockPairRegistry(),
-      this.getStockPriceOracle(),
-      () => this.isStockCapabilityDisabled(),
-      () => this.getStockUseCaseSync(),
       this.getSubgraphPrincipalProvider(),
       this.getPendingIntentStore(),
       () => this.getCapabilityDispatcher(),
     );
   }
 
-  // -------------------------------------------------------------------
-  // Aster (tokenized stocks) — Phase 1 wiring.
-  // -------------------------------------------------------------------
-
-  getAsterDiamondClient(): AsterDiamondClient {
-    if (!this._asterDiamondClient) {
-      this._asterDiamondClient = new AsterDiamondClient();
-    }
-    return this._asterDiamondClient;
-  }
-
-  getStockPairRegistry(): IStockPairRegistry {
-    if (!this._stockPairRegistry) {
-      // DB-backed; the in-memory snapshot is empty until `refresh()` runs.
-      // `verifyStockCapability` calls `refresh()` once at boot, and the
-      // crawler job (`getStockPairCrawlerJob`) refreshes after every tick.
-      this._stockPairRegistry = new DbStockPairRegistry(
-        this.getSqlDB().stockPairs,
-        this.getAsterBrokerVenueChainId(),
-      );
-    }
-    return this._stockPairRegistry;
-  }
-
-  /** Aster's venue chain id (BSC = 56). Sourced from the broker provider's
-   * `venueChainId` getter once it's been constructed; before that, falls back
-   * to the well-known constant 56. The fallback is intentional — at boot the
-   * registry is built before the broker (the broker depends on the registry)
-   * so we cannot transitively read `broker.venueChainId` here. */
-  getAsterBrokerVenueChainId(): number {
-    return this._stockBrokerProvider?.venueChainId ?? 56;
-  }
-
-  getStockPairCrawlerJob(): StockPairCrawlerJob {
-    if (!this._stockPairCrawlerJob) {
-      const intervalMs = parseInt(
-        process.env.STOCK_PAIR_CRAWLER_INTERVAL_MS ?? String(60 * 60 * 1000),
-        10,
-      );
-      const ingestion = new StockPairIngestionUseCase(
-        new AsterStockPairCrawler(this.getAsterDiamondClient()),
-        this.getSqlDB().stockPairs,
-      );
-      // Wrap so the registry's in-memory snapshot follows DB state without
-      // a second timer.
-      const wrapped: IStockPairIngestionUseCase = {
-        ingest: async (chainId: number) => {
-          await ingestion.ingest(chainId);
-          await this.getStockPairRegistry().refresh();
-        },
-      };
-      this._stockPairCrawlerJob = new StockPairCrawlerJob(
-        wrapped,
-        this.getAsterBrokerVenueChainId(),
-        intervalMs,
-      );
-    }
-    return this._stockPairCrawlerJob;
-  }
-
-  getStockPriceOracle(): IStockPriceOracle {
-    if (!this._stockPriceOracle) {
-      const inner = new AsterPriceOracle(
-        this.getAsterDiamondClient(),
-        this.getStockPairRegistry(),
-      );
-      this._stockPriceOracle = new CachedStockPriceOracle(inner, {
-        ttlSec: ASTER_ENV.priceTtlSec,
-      });
-    }
-    return this._stockPriceOracle;
-  }
-
-  /**
-   * Per-user-bound positions provider. Each call returns a fresh cached
-   * wrapper keyed by `userId` so users don't see one another's positions.
-   * The underlying `AsterPositionsProvider` is shared.
-   */
-  getStockPositionsProvider(_userId: string): IStockPositionsProvider {
-    // Per-process cache is fine; cache key includes the trader address so
-    // users with different SCAs never collide.
-    if (!this._stockPositionsProvider) {
-      // Decimals must come from the broker's collateral token, never
-      // hardcoded. `verifyStockCapability` eagerly constructs the broker
-      // at boot so this lookup is always satisfied by the time the
-      // capability dispatcher reaches positions.
-      if (!this._stockBrokerProvider) {
-        throw new Error(
-          "stock broker provider not initialised — call verifyStockCapability() first",
-        );
-      }
-      const inner = new AsterPositionsProvider(
-        this.getAsterDiamondClient(),
-        this.getStockPairRegistry(),
-        this._stockBrokerProvider.collateralToken.decimals,
-      );
-      this._stockPositionsProvider = new CachedStockPositionsProvider(inner, {
-        ttlSec: ASTER_ENV.positionsTtlSec,
-      });
-    }
-    return this._stockPositionsProvider;
-  }
-
-  getCrossChainSwapPlanner(): ICrossChainSwapPlanner {
-    if (!this._crossChainSwapPlanner) {
-      this._crossChainSwapPlanner = new RelayCrossChainSwapPlanner(
-        this.getRelayClient(),
-      );
-    }
-    return this._crossChainSwapPlanner;
-  }
-
-  /**
-   * Memoised stock use-case. Async because the broker construction reads
-   * `tokenRegistry`. Used by both the `/stock` capability dispatcher and
-   * the read-only HTTP routes (`/stocks/positions`).
-   */
-  async getStockUseCase(): Promise<IStockUseCase> {
-    if (!this._stockUseCase) {
-      const broker = await this.getStockBrokerProvider();
-      this._stockUseCase = new StockUseCaseImpl({
-        broker,
-        positions: (uid) => this.getStockPositionsProvider(uid),
-        oracle: this.getStockPriceOracle(),
-        pairs: this.getStockPairRegistry(),
-        crossChainSwap: this.getCrossChainSwapPlanner(),
-        userProfileRepo: this.getSqlDB().userProfiles,
-        tokenRegistry: this.getTokenRegistryService(),
-      });
-    }
-    return this._stockUseCase;
-  }
-
-  /** Sync accessor for the memoised stock use-case. Returns null if it has
-   * not yet been constructed (verifyStockCapability is the boot path that
-   * eagerly initialises it). */
-  getStockUseCaseSync(): IStockUseCase | null {
-    return this._stockUseCase;
-  }
-
-  /** Memoised broker provider (async because USDC.bsc decimals come from token_registry). */
-  async getStockBrokerProvider(): Promise<IStockBrokerProvider> {
-    if (!this._stockBrokerProvider) {
-      this._stockBrokerProvider = await AsterBrokerProvider.create(
-        this.getAsterDiamondClient(),
-        this.getStockPairRegistry(),
-        this.getTokenRegistryService(),
-      );
-    }
-    return this._stockBrokerProvider;
-  }
-
-  isStockCapabilityDisabled(): boolean {
-    return this._stockCapabilityDisabled;
-  }
-
-  /**
-   * Boot-time verification (fix #9 — soft fail). On failure, the soft-disable
-   * flag flips on; HTTP routes return 503 and (in Phase 2) the stock
-   * capability replies with a friendly "stocks unavailable" message.
-   * Non-stock features keep booting either way.
-   */
-  async verifyStockCapability(): Promise<void> {
-    try {
-      // 1. Eagerly construct the broker + use-case so collateral decimals
-      //    are available synchronously to `getStockPositionsProvider`
-      //    (sync factory) and the HTTP routes can hand off to a ready
-      //    use-case via `getStockUseCaseSync()`.
-      await this.getStockUseCase();
-
-      // 2. Always run a fresh ingest at boot. Upserts are idempotent and
-      //    cheap (~1–2s for one chain read + a few dozen rows). Doing it
-      //    unconditionally — instead of "only when empty" — means stale
-      //    rows from a prior partial run can't shadow the live pair list,
-      //    and a chain-side delisting is caught on restart instead of
-      //    waiting for the next cron tick. Subsequent refreshes follow the
-      //    crawler tick.
-      const registry = this.getStockPairRegistry();
-      log.info({ step: "bootstrap-ingest" }, "running stock_pairs ingest");
-      const ingestion = new StockPairIngestionUseCase(
-        new AsterStockPairCrawler(this.getAsterDiamondClient()),
-        this.getSqlDB().stockPairs,
-      );
-      await ingestion.ingest(this.getAsterBrokerVenueChainId());
-      await registry.refresh();
-
-      if (registry.symbols().length === 0) {
-        throw new Error(
-          "stock_pairs still empty after bootstrap ingest — check that the " +
-            "0029_stock_pairs migration ran and that the BSC RPC + SEC EDGAR " +
-            "are reachable",
-        );
-      }
-
-      log.info(
-        { step: "succeeded", count: registry.symbols().length },
-        "stock capability verified",
-      );
-    } catch (err) {
-      this._stockCapabilityDisabled = true;
-      const msg = err instanceof Error ? err.message : String(err);
-      log.error(
-        { err: msg },
-        "stock capability disabled — boot verification failed",
-      );
-    }
-  }
 }

@@ -20,9 +20,6 @@ const log = createLogger("workerCli");
   const inject = new AssistantInject();
   const sqlDB = inject.getSqlDB();
 
-  // Soft-fail stock-capability verification (fix #9).
-  await inject.verifyStockCapability();
-
   const tgApi = new Api(token);
 
   const rawBot = new Bot(token);
@@ -39,9 +36,6 @@ const log = createLogger("workerCli");
 
   const tokenCrawlerJob = inject.getTokenCrawlerJob();
   tokenCrawlerJob.start();
-
-  const stockPairCrawlerJob = inject.getStockPairCrawlerJob();
-  stockPairCrawlerJob.start();
 
   const yieldPoolScanJob = inject.getYieldPoolScanJob();
   yieldPoolScanJob?.start();
@@ -84,7 +78,6 @@ const log = createLogger("workerCli");
   process.on("SIGTERM", async () => {
     log.info("SIGTERM — shutting down…");
     tokenCrawlerJob.stop();
-    stockPairCrawlerJob.stop();
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
@@ -97,7 +90,6 @@ const log = createLogger("workerCli");
   process.on("SIGINT", async () => {
     log.info("SIGINT — shutting down…");
     tokenCrawlerJob.stop();
-    stockPairCrawlerJob.stop();
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();

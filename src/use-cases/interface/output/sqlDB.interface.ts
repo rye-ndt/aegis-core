@@ -7,7 +7,6 @@ import type { IToolManifestDB } from "./repository/toolManifest.repo";
 import type { IFeeRecordDB } from "./repository/feeRecord.repo";
 import type { IUserPreferencesDB } from "./repository/userPreference.repo";
 import type { ITokenDelegationDB } from "./repository/tokenDelegation.repo";
-import type { IStockPairDB } from "./repository/stockPair.repo";
 
 export interface IPostgresDB {
   close(): Promise<void>;
@@ -23,5 +22,4 @@ export interface ISqlDB extends IPostgresDB {
   feeRecords?: IFeeRecordDB;
   userPreferences?: IUserPreferencesDB;
   tokenDelegations?: ITokenDelegationDB;
-  stockPairs?: IStockPairDB;
 }

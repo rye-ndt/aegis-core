@@ -20,10 +20,6 @@ export type ErrorCode =
   | "recipient_unresolved"
   | "delegation_required"
   | "delegation_exceeded"
-  | "stock_market_closed"
-  | "stock_oracle_stale"
-  | "stock_min_size"
-  | "stock_pair_inactive"
   | "yield_winner_changed"
   | "yield_position_vanished"
   | "transfer_history_unavailable"
@@ -127,26 +123,6 @@ const PATTERNS: PatternEntry[] = [
     pattern: /recipient.*not.*resolved|unknown.*handle/i,
     code: "recipient_unresolved",
     friendly: "Couldn't find that recipient. Double-check the @handle or wallet address.",
-  },
-  {
-    pattern: /MARKET_CLOSED|outside.*trading hours/i,
-    code: "stock_market_closed",
-    friendly: "US markets are closed right now. Try again when they reopen.",
-  },
-  {
-    pattern: /STALE_PRICE|oracle.*stale/i,
-    code: "stock_oracle_stale",
-    friendly: "The stock price feed is briefly stale. Try again in a moment.",
-  },
-  {
-    pattern: /MIN_TRADE_SIZE|below.*minimum/i,
-    code: "stock_min_size",
-    friendly: "That trade is below the minimum size. Try a larger amount.",
-  },
-  {
-    pattern: /PAIR_INACTIVE/i,
-    code: "stock_pair_inactive",
-    friendly: "That stock isn't tradable right now.",
   },
   {
     pattern: /winner.*changed/i,

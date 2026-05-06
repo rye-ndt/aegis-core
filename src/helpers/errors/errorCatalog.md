@@ -28,10 +28,6 @@ The `friendly` string is the only text that ever reaches a user. `raw` and `code
 | `transfer_history_unavailable` | "transfer.?history.*unavailable" / "history.*unavailable.*chain" | "Transfer history isn't available on this chain right now." | — |
 | `service_unavailable` | `\b503\b` / "service unavailable" / `ECONNREFUSED` | "The service is briefly unavailable. Please try again in a moment." | — |
 | `recipient_unresolved` | "recipient.*not.*resolved" / "unknown.*handle" | "Couldn't find that recipient. Double-check the @handle or wallet address." | — |
-| `stock_market_closed` | `MARKET_CLOSED` / "outside.*trading hours" | "US markets are closed right now. Try again when they reopen." | — |
-| `stock_oracle_stale` | `STALE_PRICE` / "oracle.*stale" | "The stock price feed is briefly stale. Try again in a moment." | — |
-| `stock_min_size` | `MIN_TRADE_SIZE` / "below.*minimum" | "That trade is below the minimum size. Try a larger amount." | — |
-| `stock_pair_inactive` | `PAIR_INACTIVE` | "That stock isn't tradable right now." | — |
 | `yield_winner_changed` | "winner.*changed" | "The best pool changed before we could rebalance — no action taken." | — |
 | `yield_position_vanished` | "position.*not.*found" | "Looks like you already withdrew — nothing to rebalance." | — |
 | `unsupported_chain` | (instance check on `UnsupportedChainError`) | "That chain isn't supported yet." | — |
