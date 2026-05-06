@@ -46,15 +46,19 @@ const log = createLogger("workerCli");
   const yieldReportJob = inject.getYieldReportJob();
   yieldReportJob?.start();
 
+  const predictionMarketScanJob = inject.getPredictionMarketScanJob();
+  predictionMarketScanJob?.start();
+
   log.info(
     {
       jobs: {
         poolScan: !!yieldPoolScanJob,
         idleScan: !!userIdleScanJob,
         report: !!yieldReportJob,
+        predictionMarketScan: !!predictionMarketScanJob,
       },
     },
-    "yield jobs status",
+    "background jobs status",
   );
 
   const dispatcher = await inject.getCapabilityDispatcher();
@@ -81,6 +85,7 @@ const log = createLogger("workerCli");
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
+    predictionMarketScanJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();
@@ -93,6 +98,7 @@ const log = createLogger("workerCli");
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
+    predictionMarketScanJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();

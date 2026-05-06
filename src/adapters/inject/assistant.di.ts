@@ -65,6 +65,16 @@ import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
 import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
 import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
+import { PredictionMarketScanJob } from "../implementations/input/jobs/predictionMarketScanJob";
+import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
+import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
+import { PredictionMarketBroadcaster } from "../implementations/output/predictionMarket/predictionMarketBroadcaster";
+import { PredictionMarketScanUseCase } from "../../use-cases/implementations/predictionMarketScan.usecase";
+import { PREDICTION_MARKETS_ENV } from "../../helpers/env/predictionMarketEnv";
+import type { IPredictionMarketBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketBroadcaster";
+import type { IPredictionMarketClassifier } from "../../use-cases/interface/predictionMarket/IPredictionMarketClassifier";
+import type { IPredictionMarketProvider } from "../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
+import type { IPredictionMarketRepository } from "../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
 import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
@@ -182,6 +192,12 @@ export class AssistantInject {
     idleScan: false,
     report: false,
   };
+  private _predictionMarketProvider: IPredictionMarketProvider | null = null;
+  private _predictionMarketClassifier: IPredictionMarketClassifier | null = null;
+  private _predictionMarketBroadcaster: IPredictionMarketBroadcaster | null = null;
+  private _predictionMarketScanUseCase: PredictionMarketScanUseCase | null = null;
+  private _predictionMarketScanJob: PredictionMarketScanJob | null = null;
+  private _predictionMarketNoStartWarned = false;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -1216,6 +1232,100 @@ export class AssistantInject {
     if (!redis) return undefined;
     this._pendingIntentStore = new RedisPendingIntentStore(redis);
     return this._pendingIntentStore;
+  }
+
+  getPredictionMarketProvider(): IPredictionMarketProvider {
+    if (!this._predictionMarketProvider) {
+      this._predictionMarketProvider = new PolymarketProvider();
+    }
+    return this._predictionMarketProvider;
+  }
+
+  getPredictionMarketRepo(): IPredictionMarketRepository {
+    return this.getSqlDB().predictionMarkets;
+  }
+
+  getPredictionMarketClassifier(): IPredictionMarketClassifier | undefined {
+    if (this._predictionMarketClassifier) return this._predictionMarketClassifier;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return undefined;
+    const redis = this.getRedis();
+    const cache = redis ? makeRedisResponseCache(redis, "pm-cluster") : undefined;
+    this._predictionMarketClassifier = new OpenAIPredictionMarketClassifier({
+      apiKey,
+      model: PREDICTION_MARKETS_ENV.classifierModel,
+      cache,
+      maxCriteriaChars: PREDICTION_MARKETS_ENV.maxCriteriaChars,
+      promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
+      cacheTtlSec: PREDICTION_MARKETS_ENV.clusterCacheTtlSec,
+    });
+    return this._predictionMarketClassifier;
+  }
+
+  getPredictionMarketBroadcaster(): IPredictionMarketBroadcaster | undefined {
+    if (this._predictionMarketBroadcaster) return this._predictionMarketBroadcaster;
+    const redis = this.getRedis();
+    const bot = this.getBot();
+    if (!redis || !bot) return undefined;
+    const sqlDB = this.getSqlDB();
+    this._predictionMarketBroadcaster = new PredictionMarketBroadcaster({
+      tgApi: bot.api,
+      redis,
+      listActiveUserIds: () => sqlDB.telegramSessions.listActiveUserIds(),
+      getChatId: async (userId) => {
+        const session = await sqlDB.telegramSessions.findByUserId(userId);
+        return session?.telegramChatId ?? null;
+      },
+      concurrency: PREDICTION_MARKETS_ENV.broadcastConcurrency,
+    });
+    return this._predictionMarketBroadcaster;
+  }
+
+  getPredictionMarketScanUseCase(): PredictionMarketScanUseCase | undefined {
+    if (this._predictionMarketScanUseCase) return this._predictionMarketScanUseCase;
+    const classifier = this.getPredictionMarketClassifier();
+    if (!classifier) return undefined;
+    const broadcaster = this.getPredictionMarketBroadcaster() ?? null;
+    this._predictionMarketScanUseCase = new PredictionMarketScanUseCase(
+      this.getPredictionMarketProvider(),
+      classifier,
+      this.getPredictionMarketRepo(),
+      broadcaster,
+    );
+    return this._predictionMarketScanUseCase;
+  }
+
+  getPredictionMarketScanJob(): PredictionMarketScanJob | undefined {
+    if (!PREDICTION_MARKETS_ENV.enabled) {
+      if (!this._predictionMarketNoStartWarned) {
+        this._predictionMarketNoStartWarned = true;
+        log.info(
+          { feature: "predictionMarket", reason: "disabled" },
+          "predictionMarketScanJob not started — set PREDICTION_MARKETS_ENABLED=true to enable",
+        );
+      }
+      return undefined;
+    }
+    const useCase = this.getPredictionMarketScanUseCase();
+    const redis = this.getRedis();
+    if (!useCase || !redis) {
+      if (!this._predictionMarketNoStartWarned) {
+        this._predictionMarketNoStartWarned = true;
+        log.warn(
+          { feature: "predictionMarket", reason: "redis-or-classifier-missing" },
+          "predictionMarketScanJob not started",
+        );
+      }
+      return undefined;
+    }
+    if (!this._predictionMarketScanJob) {
+      this._predictionMarketScanJob = new PredictionMarketScanJob(
+        useCase,
+        redis,
+        PREDICTION_MARKETS_ENV.fetchIntervalMs,
+      );
+    }
+    return this._predictionMarketScanJob;
   }
 
   getHttpApiServer(

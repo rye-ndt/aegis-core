@@ -264,6 +264,50 @@ export const recipientNotifications = pgTable("recipient_notifications", {
   byCreatedAt: index("recipient_notif_created_at_idx").on(t.createdAtEpoch),
 }));
 
+export const predictionMarketRuns = pgTable("prediction_market_runs", {
+  runId: uuid("run_id").primaryKey(),
+  createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
+  universeHash: text("universe_hash").notNull(),
+  clusterSetHash: text("cluster_set_hash"),
+  status: text("status").notNull(),                                    // 'fetched' | 'clustered' | 'published' | 'failed'
+  isLatest: boolean("is_latest").notNull().default(false),
+}, (t) => ({
+  byCreatedAt: index("pm_runs_created_at_idx").on(t.createdAtEpoch),
+  byLatest: index("pm_runs_is_latest_idx").on(t.isLatest),
+}));
+
+export const predictionMarketSnapshots = pgTable("prediction_market_snapshots", {
+  runId: uuid("run_id").notNull(),
+  marketId: text("market_id").notNull(),
+  slug: text("slug").notNull(),
+  question: text("question").notNull(),
+  resolutionCriteria: text("resolution_criteria").notNull(),
+  category: text("category"),
+  resolutionEpochSec: bigint("resolution_epoch_sec", { mode: "number" }).notNull(),
+  yesPriceBp: integer("yes_price_bp").notNull(),                       // 0..10000
+  noPriceBp: integer("no_price_bp").notNull(),                         // 0..10000
+  openInterestUsdCents: bigint("open_interest_usd_cents", { mode: "number" }).notNull(),
+  volume7dUsdCents: bigint("volume_7d_usd_cents", { mode: "number" }).notNull(),
+  liquidityUsdCents: bigint("liquidity_usd_cents", { mode: "number" }).notNull(),
+  url: text("url").notNull(),
+}, (t) => ({
+  pk: unique("pm_snapshots_run_market_uniq").on(t.runId, t.marketId),
+  byRun: index("pm_snapshots_by_run").on(t.runId),
+}));
+
+export const predictionMarketClusters = pgTable("prediction_market_clusters", {
+  clusterId: uuid("cluster_id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  theme: text("theme").notNull(),
+  causalDriver: text("causal_driver").notNull(),
+  marketIds: jsonb("market_ids").notNull(),                            // string[]
+  expectedRelationships: jsonb("expected_relationships").notNull(),    // ExpectedRelationship[]
+  rationale: text("rationale").notNull(),
+  confidence: text("confidence").notNull(),                            // 'low' | 'medium' | 'high'
+}, (t) => ({
+  byRun: index("pm_clusters_by_run").on(t.runId),
+}));
+
 export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
   id:                  text("id").primaryKey(),
   userId:              uuid("user_id").notNull().references(() => users.id),

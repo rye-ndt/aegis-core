@@ -44,6 +44,9 @@ const log = createLogger("telegramCli");
   const yieldReportJob = inject.getYieldReportJob();
   yieldReportJob?.start();
 
+  const predictionMarketScanJob = inject.getPredictionMarketScanJob();
+  predictionMarketScanJob?.start();
+
   const dispatcher = await inject.getCapabilityDispatcher();
   if (!dispatcher) {
     log.error("Capability dispatcher unavailable — bot cannot start.");
@@ -68,6 +71,7 @@ const log = createLogger("telegramCli");
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
+    predictionMarketScanJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();

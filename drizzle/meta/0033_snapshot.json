@@ -1,6 +1,6 @@
 {
-  "id": "f2712735-6d69-4943-906f-558cae83555c",
-  "prevId": "3e5a0b6f-aea1-4ee3-95c5-a40ba0dca41d",
+  "id": "fbb241f3-1c71-48f7-a9e1-d18f56568bac",
+  "prevId": "f2712735-6d69-4943-906f-558cae83555c",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -892,6 +892,280 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.prediction_market_clusters": {
+      "name": "prediction_market_clusters",
+      "schema": "",
+      "columns": {
+        "cluster_id": {
+          "name": "cluster_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "theme": {
+          "name": "theme",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "causal_driver": {
+          "name": "causal_driver",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "market_ids": {
+          "name": "market_ids",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expected_relationships": {
+          "name": "expected_relationships",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "rationale": {
+          "name": "rationale",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "confidence": {
+          "name": "confidence",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "pm_clusters_by_run": {
+          "name": "pm_clusters_by_run",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.prediction_market_runs": {
+      "name": "prediction_market_runs",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "created_at_epoch": {
+          "name": "created_at_epoch",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "universe_hash": {
+          "name": "universe_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cluster_set_hash": {
+          "name": "cluster_set_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "status": {
+          "name": "status",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "is_latest": {
+          "name": "is_latest",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        }
+      },
+      "indexes": {
+        "pm_runs_created_at_idx": {
+          "name": "pm_runs_created_at_idx",
+          "columns": [
+            {
+              "expression": "created_at_epoch",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "pm_runs_is_latest_idx": {
+          "name": "pm_runs_is_latest_idx",
+          "columns": [
+            {
+              "expression": "is_latest",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.prediction_market_snapshots": {
+      "name": "prediction_market_snapshots",
+      "schema": "",
+      "columns": {
+        "run_id": {
+          "name": "run_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "market_id": {
+          "name": "market_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slug": {
+          "name": "slug",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "question": {
+          "name": "question",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "resolution_criteria": {
+          "name": "resolution_criteria",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "category": {
+          "name": "category",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resolution_epoch_sec": {
+          "name": "resolution_epoch_sec",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "yes_price_bp": {
+          "name": "yes_price_bp",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "no_price_bp": {
+          "name": "no_price_bp",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "open_interest_usd_cents": {
+          "name": "open_interest_usd_cents",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "volume_7d_usd_cents": {
+          "name": "volume_7d_usd_cents",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "liquidity_usd_cents": {
+          "name": "liquidity_usd_cents",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "url": {
+          "name": "url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "pm_snapshots_by_run": {
+          "name": "pm_snapshots_by_run",
+          "columns": [
+            {
+              "expression": "run_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "pm_snapshots_run_market_uniq": {
+          "name": "pm_snapshots_run_market_uniq",
+          "nullsNotDistinct": false,
+          "columns": [
+            "run_id",
+            "market_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

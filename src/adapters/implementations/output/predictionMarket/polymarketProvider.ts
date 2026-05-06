@@ -1,0 +1,213 @@
+import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
+import { createLogger } from "../../../../helpers/observability/logger";
+import type {
+  IPredictionMarketProvider,
+  ProviderFilters,
+} from "../../../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
+import type { RawMarket } from "../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
+
+const log = createLogger("polymarketProvider");
+
+const PAGE_SIZE = 500;
+const RETRY_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = 250;
+const SECS_PER_DAY = 86_400;
+
+interface GammaMarket {
+  id?: string;
+  conditionId?: string;
+  slug?: string;
+  question?: string;
+  description?: string;
+  category?: string | null;
+  endDate?: string;                  // ISO
+  endDateIso?: string;               // ISO (some endpoints)
+  outcomes?: string | string[];      // sometimes JSON-encoded
+  outcomePrices?: string | string[]; // ditto
+  liquidityNum?: number;
+  volumeNum?: number;
+  volume24hr?: number;
+  volume7d?: number;
+  volume1wk?: number;
+  openInterest?: number;
+  openInterestNum?: number;
+  closed?: boolean;
+  archived?: boolean;
+  active?: boolean;
+  acceptingOrders?: boolean;
+  umaResolutionStatus?: string | null;
+  events?: Array<{ description?: string; slug?: string }>;
+}
+
+function parseMaybeJsonArray<T = string>(v: string | T[] | undefined): T[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  try {
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function isBinaryYesNo(outcomes: string[]): boolean {
+  if (outcomes.length !== 2) return false;
+  const lc = outcomes.map((o) => o.toLowerCase());
+  return lc.includes("yes") && lc.includes("no");
+}
+
+function pickResolutionCriteria(m: GammaMarket): string {
+  if (m.description && m.description.trim().length > 0) return m.description.trim();
+  const fromEvents = m.events?.find((e) => e.description && e.description.trim().length > 0)?.description;
+  return (fromEvents ?? "").trim();
+}
+
+function pickOpenInterestUsd(m: GammaMarket): number {
+  return Number(m.openInterestNum ?? m.openInterest ?? 0) || 0;
+}
+
+function pickVolume7dUsd(m: GammaMarket): number {
+  return Number(m.volume7d ?? m.volume1wk ?? 0) || 0;
+}
+
+function pickResolutionEpochSec(m: GammaMarket): number | null {
+  const iso = m.endDate ?? m.endDateIso;
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return Math.floor(t / 1000);
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((res) => setTimeout(res, ms));
+}
+
+async function fetchPage(url: string): Promise<GammaMarket[]> {
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await fetch(url);
+      lastStatus = res.status;
+      if (!res.ok) {
+        log.warn({ status: res.status, url, attempt }, "polymarket fetch failed");
+        if (attempt < RETRY_ATTEMPTS) await sleep(RETRY_BACKOFF_MS * attempt);
+        continue;
+      }
+      const body = (await res.json()) as GammaMarket[] | { data?: GammaMarket[] };
+      const arr = Array.isArray(body) ? body : (body.data ?? []);
+      log.debug({ status: res.status, url, count: arr.length }, "polymarket fetch");
+      return arr;
+    } catch (err) {
+      log.warn({ err, url, attempt }, "polymarket fetch error");
+      if (attempt < RETRY_ATTEMPTS) await sleep(RETRY_BACKOFF_MS * attempt);
+    }
+  }
+  log.error({ status: lastStatus, url }, "polymarket fetch exhausted");
+  return [];
+}
+
+export class PolymarketProvider implements IPredictionMarketProvider {
+  async fetchFiltered(filters: ProviderFilters, reqId: string): Promise<RawMarket[]> {
+    const start = Date.now();
+    log.info({ step: "started", reqId }, "fetch-universe");
+
+    const base = PREDICTION_MARKETS_ENV.gammaApiBase.replace(/\/$/, "");
+    const maxPages = PREDICTION_MARKETS_ENV.maxFetchPages;
+
+    const collected: GammaMarket[] = [];
+    for (let page = 0; page < maxPages; page += 1) {
+      const offset = page * PAGE_SIZE;
+      // `&order=liquidity` is broken on Gamma (returns dust markets first);
+      // `&order=volume24hr` returns the real top markets.
+      const url =
+        `${base}/markets` +
+        `?active=true&closed=false&archived=false` +
+        `&limit=${PAGE_SIZE}&offset=${offset}` +
+        `&order=volume24hr&ascending=false`;
+      const rows = await fetchPage(url);
+      collected.push(...rows);
+      if (rows.length < PAGE_SIZE) break;
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const minResolveAt = nowSec + filters.minDaysToResolution * SECS_PER_DAY;
+    const maxResolveAt = nowSec + filters.maxDaysToResolution * SECS_PER_DAY;
+
+    const surviving: RawMarket[] = [];
+    for (const m of collected) {
+      const marketId = (m.conditionId ?? m.id ?? "").trim();
+      if (!marketId) continue;
+
+      if (m.closed === true || m.archived === true) continue;
+      // Treat halted markets (not accepting orders despite being open) as disputed.
+      if (m.acceptingOrders === false) continue;
+      if (m.umaResolutionStatus && m.umaResolutionStatus.toLowerCase() === "disputed") continue;
+
+      const outcomes = parseMaybeJsonArray<string>(m.outcomes);
+      if (!isBinaryYesNo(outcomes)) continue;
+
+      const resolutionEpochSec = pickResolutionEpochSec(m);
+      if (resolutionEpochSec === null) continue;
+      if (resolutionEpochSec < minResolveAt || resolutionEpochSec > maxResolveAt) continue;
+
+      const resolutionCriteria = pickResolutionCriteria(m);
+      if (resolutionCriteria.length === 0) continue;
+
+      // Gamma's `/markets` endpoint never populates `openInterest*`; treat the
+      // OI floor as advisory — only reject when the API actually returns a
+      // value AND it's below the threshold. If Polymarket starts exposing OI
+      // later, the gate engages automatically.
+      const openInterestUsd = pickOpenInterestUsd(m);
+      if (openInterestUsd > 0 && openInterestUsd < filters.minOpenInterestUsd) continue;
+
+      const volume7dUsd = pickVolume7dUsd(m);
+      if (volume7dUsd < filters.minVolume7dUsd) continue;
+
+      const prices = parseMaybeJsonArray<string | number>(m.outcomePrices);
+      const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+      const noIdx = outcomes.findIndex((o) => o.toLowerCase() === "no");
+      const yesPrice = Number(prices[yesIdx] ?? 0) || 0;
+      const noPrice = Number(prices[noIdx] ?? 0) || 0;
+
+      const liquidityUsd = Number(m.liquidityNum ?? 0) || 0;
+      const slug = m.slug ?? "";
+      const url = slug ? `https://polymarket.com/market/${slug}` : `https://polymarket.com/`;
+
+      surviving.push({
+        marketId,
+        slug,
+        question: m.question ?? "",
+        resolutionCriteria,
+        category: m.category ?? null,
+        resolutionEpochSec,
+        yesPrice,
+        noPrice,
+        openInterestUsd,
+        volume7dUsd,
+        liquidityUsd,
+        isActive: true,
+        isDisputed: false,
+        outcomesCount: 2,
+        url,
+      });
+    }
+
+    // Final ranking by 7d volume — proxy for "real activity" since Gamma
+    // doesn't expose OI and `liquidityNum` is order-book depth (often tiny
+    // even on multi-million-dollar markets).
+    surviving.sort((a, b) => b.volume7dUsd - a.volume7dUsd);
+    const top = surviving.slice(0, filters.topN);
+
+    log.info(
+      {
+        step: "succeeded",
+        reqId,
+        fetched: collected.length,
+        surviving: top.length,
+        durationMs: Date.now() - start,
+      },
+      "fetch-universe",
+    );
+    return top;
+  }
+}

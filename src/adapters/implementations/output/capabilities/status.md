@@ -1,5 +1,22 @@
 # Capabilities Status
 
+## predictionMarketBroadcaster: result-card push for daily cluster brief — 2026-05-06
+
+**What was done:**
+- New job-driven sender `predictionMarketBroadcaster.ts` (output adapter) that builds an `IntentResult{verb:"prediction_market_brief", status:"success", complexity:"complex"}` and renders it through the existing `renderResultCard` pipeline. Telegram fan-out goes via `bot.api.sendMessage` (DI hands the broadcaster `bot.api`, mirroring the yield-report job's sender). Per-user concurrency capped via `pLimit(PREDICTION_MARKETS_BROADCAST_CONCURRENCY)`.
+- Dedupe: `pm:broadcast:lastHash:{userId}` (TTL 7d) keyed on the run's `clusterSetHash` (`sha256` over `theme + sorted(market_ids)` per published cluster). Skips users whose last hash matches — re-runs that produce identical clusters are silent.
+- Audience: `telegramSessions.listActiveUserIds()` → `findByUserId(userId).telegramChatId`. Same population as the daily yield report.
+- MarkdownV2 fallback to plain text on `bot.api.sendMessage` rejection — mirrors `yieldReportJob`'s send pattern so a single edge character in a market question never blocks the whole tick.
+
+**Why over alternatives:**
+- Considered keeping the brief as a bespoke string built inside the use case. Rejected — would have duplicated the result-card framework's status-emoji + spoiler-details + nextActions plumbing, and added a second non-renderer Telegram write site for capability-flavoured output. Rule #13 says capabilities never write MarkdownV2 directly; we extend the same posture to job-driven pushes that look like capability outcomes.
+- Considered piggy-backing on `recipientNotificationUseCase` for delivery. Rejected — that use case is keyed on intent receipts (P2P sends), not broadcast pushes, and lacks the per-user dedupe key we need.
+
+**New conventions to preserve:**
+- Job-driven pushes that look like capability outcomes MUST go through `renderResultCard` and reuse an `IntentVerb`. New verbs land on the `IntentVerb` union in `use-cases/interface/input/resultCard.types.ts`. The error catalog is keyed on error patterns; pure-success no-op verbs need no catalog entry (verified `prediction_market_brief` is unmatched).
+- Per-user broadcast dedupe keys live under `pm:broadcast:lastHash:<userId>` for this feature. Future broadcast features should follow `<feature>:broadcast:lastHash:<userId>`.
+- Broadcaster never logs message bodies (market questions are public, but logs stay lean — chatId/userId/runId/clusters only).
+
 ## supersession: also drop prior dispatch's mini-app request entries — 2026-05-06
 
 **What was done:**

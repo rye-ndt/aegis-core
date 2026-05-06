@@ -218,6 +218,13 @@
       "when": 1778889600000,
       "tag": "0032_drop_stock_features",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1778889600001,
+      "tag": "0033_naive_bedlam",
+      "breakpoints": true
     }
   ]
 }
