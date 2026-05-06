@@ -43,6 +43,21 @@ export class RedisMiniAppRequestCache implements IMiniAppRequestCache {
     }
   }
 
+  async cancelPendingForUser(userId: string): Promise<string[]> {
+    const queueKey = this.userSignQueueKey(userId);
+    const ids = await this.redis.zrange(queueKey, 0, -1);
+    if (ids.length === 0) return [];
+    const multi = this.redis.multi();
+    for (const id of ids) multi.del(this.key(id));
+    multi.del(queueKey);
+    await multi.exec();
+    log.info(
+      { step: "pending-superseded", userId, count: ids.length },
+      "mini-app sign requests dropped by supersession",
+    );
+    return ids;
+  }
+
   async findNextPendingSignForUser(userId: string): Promise<MiniAppRequest | null> {
     const ids = await this.redis.zrange(this.userSignQueueKey(userId), 0, -1);
     log.debug({ choice: 'queue-scan', userId, queueDepth: ids.length }, 'scanning user sign queue');

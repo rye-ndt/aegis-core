@@ -7,7 +7,6 @@ import type { ITelegramSessionDB } from "../../../../use-cases/interface/output/
 import type { IMiniAppRequestCache } from "../../../../use-cases/interface/output/cache/miniAppRequest.cache";
 import type { AuthRequest } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { ICapabilityDispatcher } from "../../../../use-cases/interface/input/capabilityDispatcher.interface";
-import type { ISigningRequestUseCase } from "../../../../use-cases/interface/input/signingRequest.interface";
 import type { RecipientNotificationUseCase } from "../../../../use-cases/implementations/recipientNotification.useCase";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
@@ -28,7 +27,6 @@ export class TelegramAssistantHandler {
     private readonly capabilityDispatcher: ICapabilityDispatcher,
     private readonly miniAppRequestCache?: IMiniAppRequestCache,
     private readonly recipientNotificationUseCase?: RecipientNotificationUseCase,
-    private readonly signingRequestUseCase?: ISigningRequestUseCase,
   ) {}
 
   register(bot: Bot): void {
@@ -91,12 +89,8 @@ export class TelegramAssistantHandler {
       const dispatchInput = isCmdRelay
         ? ({ kind: "text", text: data.slice(4) } as const)
         : ({ kind: "callback", data } as const);
-      // Cancel any in-flight `waitFor` for this user so the dispatcher isn't
-      // queued behind a 10-minute poll for an unconfirmed signing request.
-      const cancelled = this.signingRequestUseCase?.cancelActiveForUser(session.userId) ?? 0;
-      if (cancelled > 0) {
-        log.info({ userId: session.userId, cancelled, source: "callback" }, "pre-empted in-flight signing waits");
-      }
+      // Per-user supersession (aborting prior dispatch + cancelling its
+      // signing waits) is handled centrally inside CapabilityDispatcher.handle.
       try {
         await this.capabilityDispatcher.handle({
           userId: session.userId,
@@ -138,15 +132,8 @@ export class TelegramAssistantHandler {
       const text = ctx.message.text.trim();
       const userId = session.userId;
 
-      // Cancel any in-flight `waitFor` for this user. grammy serialises
-      // updates per chat, so without this a fresh command would queue behind
-      // a still-polling capability that's awaiting an unconfirmed signing
-      // request (up to 10 minutes).
-      const cancelled = this.signingRequestUseCase?.cancelActiveForUser(userId) ?? 0;
-      if (cancelled > 0) {
-        log.info({ userId, cancelled, source: "text" }, "pre-empted in-flight signing waits");
-      }
-
+      // Per-user supersession (aborting prior dispatch + cancelling its
+      // signing waits) is handled centrally inside CapabilityDispatcher.handle.
       try {
         const result = await this.capabilityDispatcher.handle({
           userId,

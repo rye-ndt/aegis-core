@@ -1,5 +1,188 @@
 # Capabilities Status
 
+## supersession: also drop prior dispatch's mini-app request entries — 2026-05-06
+
+**What was done:**
+- `miniAppRequest.cache.ts` (interface) + `redis.miniAppRequest.ts` (impl): added `cancelPendingForUser(userId)`. Walks the user's existing `user_pending_signs:<userId>` ZSET, deletes every `mini_app_req:*` record, and drops the queue. Returns the ids removed.
+- `capabilityDispatcher.usecase.ts`: supersession path now clears BOTH caches (signing-request + mini-app request) in parallel via `Promise.all`. Each is independently try/caught so one failure does not block the other.
+- DI: dispatcher gains `miniAppRequestCache` as a 5th constructor arg, wired from `getMiniAppRequestCache()`.
+
+**Why over alternatives:**
+- Prior fix only flipped signing-request records to `expired`. Symptom that exposed the gap: TG showed the new $1 success card AND the mini-app showed "Not enough balance". Trace: the FE's mini-app reads request payloads from `miniAppRequestCache` (a separate Redis keyspace from `signingRequestCache`). When alice clicks the stale "$10" Telegram button — or the mini-app's `findNextPendingSignForUser` poll picks the older queue entry — the FE loads R1's calldata, runs its OWN preflight balance check, fails, and renders "Not enough balance" entirely client-side without ever round-tripping. That entire path is invisible to the BE's `resolveRequest` / `notifyResolved` guards.
+- Considered just having the FE filter requests against `signingRequestCache.status === 'pending'` via a status field on `MiniAppRequest`. Rejected — adds a new sync point between two caches, requires shipping a FE change, and any FE that hasn't redeployed silently keeps the bug. BE-side cancel of the mini-app cache is hermetic and ships immediately.
+- Considered piggy-backing on `signingRequestUseCase.cancelPendingForUser` (have it call `miniAppRequestCache.cancelPendingForUser` too). Rejected — couples the signing service to the FE-facing cache. Dispatcher is the right orchestration point: it already owns user-level supersession.
+
+**New conventions to preserve:**
+- Any cache whose entries are keyed by signing-request id and surfaced to the user MUST implement `cancelPendingForUser` and be wired into the dispatcher's supersession path. If you add a third such cache later (e.g. a separate stock-broker queue), it joins the `Promise.all` in the dispatcher.
+- The mini-app cache's per-user ZSET (`user_pending_signs:<userId>`) is the cancellation index. Maintain it on every `store` of `requestType === 'sign'` and clear it on every `delete` and `cancelPendingForUser`.
+
+## supersession: also expire prior dispatch's pending signing requests — 2026-05-06
+
+**What was done:**
+- `signingRequest.cache.ts` (interface) + `redis.signingRequest.ts` (impl): added a per-user index (`sign_req:user:<userId>` Redis SET) maintained on `save` (SADD on `pending` writes) and `resolve` (SREM on terminal flips). New `cancelPendingForUser(userId)` walks the set, flips every still-`pending` record to `expired`, and clears the set. Index TTL is bound to the 10-minute max signing-request lifetime; stale members safely no-op.
+- `signingRequest.usecase.ts`: new `cancelPendingForUser(userId)` async method that calls the cache flip then the existing in-process `cancelActiveForUser`. `resolveRequest` now also throws `SIGNING_REQUEST_EXPIRED` when `record.status !== "pending"`, so a late `/response` for a record we just flipped is rejected (HTTP layer maps to 410 Gone and drops the mini-app queue entry).
+- `capabilityDispatcher.usecase.ts`: supersession path now awaits `cancelPendingForUser` instead of the sync `cancelActiveForUser`. Failure is non-fatal and logged at `error` — the new dispatch still proceeds.
+
+**Why over alternatives:**
+- Bug: alice → "send bob $10" → ignores sign → "send bob $1" → signs → backend renders BOTH the $1 success card AND a phantom "Not enough balance" failure card for the abandoned $10. Trace: the LLM's `route_intent` tool dispatches `/send` recursively, which renders a `sign_calldata` artifact and writes a `pending` signing-request record (R1) to Redis. The new "$1" dispatch aborted the in-process controller and called `cancelActiveForUser` — but R1 has no `waitFor` polling it (SendCapability's response path is HTTP-driven via `notifyResolved`, not poll-driven), so the in-process cancel was a no-op. R1 stayed `pending` until the FE eventually `POST /response`'d it with `errorCode: "insufficient_token_balance"`, and `notifyResolved` rendered the failure card via `tgApi.sendMessage` directly — bypassing the dispatcher's signal-aborted check entirely.
+- Considered "filter at notifyResolved" (track latest requestId per user, drop notifications for older ones). Rejected — leaves stale `pending` records in the cache, the FE is still told the request is "approved/rejected" by `resolveRequest`, and the mini-app queue entry only gets dropped on the error branches. Cache-level cancellation kills the problem at the durable source: any path through `resolveRequest` (HTTP, future adapters, retries) is guarded automatically.
+
+**New conventions to preserve:**
+- The signing-request cache MUST maintain a per-user index of `pending` records. Any new cache implementation (e.g. Postgres-backed swap) must implement `cancelPendingForUser` with equivalent semantics.
+- `resolveRequest` MUST refuse non-`pending` records, regardless of `expiresAt`. Reusing `SIGNING_REQUEST_EXPIRED` for the flipped-via-supersession case is intentional — same FE outcome (drop the queue entry, return 410), no FE contract change required.
+- New step values logged: `pending-superseded` (cache, count of records flipped), `supersede-user` (use case, summarising both layers), `resolve-on-non-pending` (use case, surfaces the late-/response case).
+
+## dispatcher: one-active-dispatch-per-user supersession — 2026-05-06
+
+**What was done:**
+- `capabilityDispatcher.usecase.ts`: per-user `AbortController` map. `handle()`
+  aborts any prior in-flight dispatch for the same userId, calls
+  `signingRequestUseCase.cancelActiveForUser(userId)` to unblock its
+  long-running `waitFor` poll, then runs the new dispatch with its own signal.
+  After every `await` boundary (collect/run/pending writes) the dispatcher
+  checks `signal.aborted` and returns `{ handled: true }` silently — dropping
+  the superseded dispatch's renders and pending writes so the user only ever
+  sees output from their most recent input.
+- `ctx.emit` is wrapped to no-op when aborted, so capabilities that emit
+  intermediate artifacts mid-run also stop reaching the user once superseded.
+- `capability.interface.ts`: optional `signal?: AbortSignal` exposed on
+  `CapabilityCtx`. Capabilities that perform long awaits (RPC fan-out,
+  signing waits) MAY race against it for faster unwind, but it is not
+  required for correctness — the dispatcher already drops post-completion
+  output.
+- `resume()` deliberately does NOT register with the per-user map, because
+  it represents the result of a signing the user already performed and that
+  artifact must reach them even if they have moved on.
+- `telegram/handler.ts`: removed the per-handler `cancelActiveForUser` calls
+  (and the now-unused `signingRequestUseCase` constructor param). Cancellation
+  is centralised in the dispatcher so any future input adapter inherits it.
+- DI: `getCapabilityDispatcher()` now passes `signingRequestUseCase` into
+  `CapabilityDispatcher`. CLIs (`telegramCli.ts`, `workerCli.ts`) drop the
+  redundant arg from `TelegramAssistantHandler`.
+
+**Why over alternatives:**
+- Symptom: if a user fired an action and ignored the mini-app sign prompt,
+  the backend's `signingRequestUseCase.waitFor` poll kept running until TTL.
+  Their next message would either render two output cards (old `expired` +
+  new dispatch) or, on adapters that serialise per-chat, hang.
+- Considered Redis pub/sub for cross-instance cancellation. Rejected for now
+  — single-node deployment + non-sticky webhook routing makes it unnecessary,
+  and the in-process design is the foundation pub/sub would build on later.
+- Considered putting the abort logic inside each capability. Rejected — would
+  require touching every capability and is easy to forget. Owning supersession
+  in the dispatcher means new capabilities inherit it automatically.
+
+**New conventions to preserve:**
+- One active dispatch per user. Any new input from a userId aborts the prior
+  dispatch's output. Do not bypass the dispatcher's `handle()` for
+  user-initiated flows.
+- Capabilities MUST NOT side-effect via the dispatcher's `ctx.emit` after a
+  long await without first checking `ctx.signal?.aborted` if they want to
+  short-circuit early — but skipping the check is still safe (the wrapped
+  `emit` and the dispatcher's post-await check drop the output anyway).
+- New step values logged: `dispatch-superseded` (prior aborted) and
+  `dispatch-aborted` (this dispatch's output was dropped). Both at `info`
+  with `userId` and `channelId`.
+
+## dispatcher: stale pending no longer dead-ends — 2026-05-06
+
+**What was done:**
+- `capabilityDispatcher.usecase.ts` resume branch: when `prior.capabilityId`
+  is no longer registered, clear the pending slot and fall through to the
+  default capability (LLM) instead of returning `{ handled: false }`.
+
+**Why over alternatives:**
+- Pre-existing footgun exposed by the /topup unbinding: a pending slot saved
+  while a capability was registered survives in Redis with TTL 600s. If the
+  capability is later unregistered (or its id changes), every subsequent
+  free-text message resolves the resumed capability to `null` →
+  `handled: false` → Telegram surfaces "I didn't understand that…" until
+  the slot expires or a slash command displaces it.
+- Considered making the registry strict (refusing to start with stale
+  pending). Rejected — pending is per-channel state in Redis; the
+  registration change is global. The dispatcher is the right layer to
+  reconcile.
+
+## /topup unbound from SendCapability; routed to /buy onramp — 2026-05-06
+
+**What was done:**
+- `assistant.di.ts`: skip `INTENT_COMMAND.TOPUP` in the SendCapability
+  auto-binding loop. /topup no longer triggers the transfer pipeline.
+- `routeIntent.tool.ts`: removed `INTENT_COMMAND.TOPUP` from `COMMAND_VALUES`
+  (the LLM-facing allowlist) and updated the `command` schema description
+  so "fund / top up / add money / deposit money" all map to `/buy`.
+- `assistant.usecase.ts` system prompt: same — fund/top-up phrases map to
+  `/buy` (the USDC onramp), not to a separate `/topup`.
+
+**Why over alternatives:**
+- Bug observed: user typed "how do i top up?" → LLM picked `/topup` → dispatcher
+  matched SendCapability(/topup) → SendCapability's manifest-driven
+  `compileSchema` requires a recipient → eventually asked "Who should I send
+  the USDC to?" Top-up is an onramp, not a transfer; binding it to
+  SendCapability was a category error caused by the catch-all loop in
+  `assistant.di.ts:817-826`.
+- Considered making /topup an alias of /buy inside `route_intent` (transform
+  the command before dispatch). Rejected because it leaves the slash command
+  half-defined: a user typing `/topup` directly in Telegram would still hit
+  the catch-all binding. Removing the binding at the DI level + removing the
+  command from the LLM allowlist is the complete fix.
+- Did NOT touch the other catch-all-bound commands (/sell, /convert, /dca,
+  /money). They are likely also miswired (e.g. /sell to fiat, /convert
+  token→token, /dca scheduled buy) but were not part of this report. Audit
+  recommended; not in scope for this change.
+
+**New convention:**
+- `INTENT_COMMAND` values added to `route_intent`'s `COMMAND_VALUES` MUST be
+  bound to a real, semantically-correct capability — not silently swept into
+  SendCapability via the catch-all. When adding a new intent command:
+  1. Decide which capability owns it.
+  2. Either add an explicit `skip` in the SendCapability loop and register
+     the correct capability, OR confirm SendCapability's transfer pipeline
+     genuinely fits the command's UX.
+  3. Only after step 2 succeeds, add the command to `route_intent`'s
+     allowlist.
+
+## ask result: optional `persist: false` to opt out of pending-collection — 2026-05-06
+
+**What was done:**
+- `capability.interface.ts`: `CollectResult` `kind: "ask"` now has an optional
+  `persist?: boolean` (defaults to `true`, preserves all existing behavior).
+- `capabilityDispatcher.usecase.ts`: when `persist === false`, the dispatcher
+  renders the question but skips `pending.save` AND clears any prior pending
+  slot for the channel (so a stale resume can't fire on the next message).
+- `yieldCapability.ts` initial nudge (`/yield` → "How much of your idle USDC
+  would you like to optimize?") now sets `persist: false`. Plus prompt-side
+  fix: `assistant.usecase.ts` system prompt and `routeIntent.tool.ts` `command`
+  schema now explicitly map "fund / add money / deposit USDC" → `/buy` (fiat)
+  or `/topup` (crypto), and tighten `/yield` to require yield/earn/APY/optimize
+  language.
+
+**Why over alternatives:**
+- Bug observed: user types "i want to fund the account" → LLM mis-routes to
+  `/yield` → yield asks the nudge question and persists `{ stage: "idle" }`
+  for 600s. Every subsequent free-text message ("how do I top up?", etc.)
+  resumes yield's `collect()`, which only handles `await_custom_pct` and
+  otherwise falls through to re-ask the same question. The LLM never runs.
+- The yield nudge is a button-only prompt: continuation is via callbacks
+  (`yield:opt:N`, `yield:custom`, `yield:withdraw:*`), which route through
+  `registry.match`'s `callbackPrefix`, not via resume. Persisting a pending
+  slot served no purpose for that ask.
+- Considered (B) "let the capability detect stage:idle + text and abandon"
+  but the capability has no way to say "not mine" within the existing
+  contract (`ok | ask | terminal`). An optional `persist` flag is a smaller
+  contract change and reusable for any future keyboard-only prompt.
+- Considered fixing only the LLM prompt — wouldn't help, because once the
+  pending slot exists the LLM is bypassed entirely on subsequent messages.
+
+**New convention:**
+- Any capability ask whose meaningful continuation is a keyboard callback
+  (not a typed reply) MUST set `persist: false`. Audit checklist when adding
+  a new `kind: "ask"`: if the user is expected to type something specific
+  next (amount, address, %, choice word), keep default persistence; if the
+  ask's only continuations are inline-keyboard callbacks, set `persist: false`.
+- A non-persisting ask also clears any prior pending — treat it as a soft
+  reset of the channel's flow state.
+
 ## route_intent: suppress LLM acknowledgment + onramp/dedup hardening — 2026-05-05
 
 **What was done:**

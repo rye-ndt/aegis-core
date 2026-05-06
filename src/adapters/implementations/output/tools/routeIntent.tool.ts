@@ -25,7 +25,12 @@ const COMMAND_VALUES = [
   INTENT_COMMAND.BUY,
   INTENT_COMMAND.SELL,
   INTENT_COMMAND.CONVERT,
-  INTENT_COMMAND.TOPUP,
+  // /topup intentionally excluded: it was bound to SendCapability via the
+  // catch-all loop in assistant.di.ts, which asks transfer-style questions
+  // ("Who should I send the USDC to?") that make no sense for an onramp.
+  // "Fund / top up / add money / deposit USDC" should map to /buy (the
+  // USDC fiat onramp). When a true crypto-bridge top-up flow is built, add
+  // it back here AND register a real capability.
   INTENT_COMMAND.DCA,
   INTENT_COMMAND.YIELD,
   INTENT_COMMAND.STOCK,
@@ -37,14 +42,13 @@ const InputSchema = z.object({
     .enum(COMMAND_VALUES)
     .describe(
       "Slash command for the matching capability. Pick the most specific one. " +
-        "`/buy` is the USDC fiat onramp (deposit address or card payment) — use it " +
-        "when the user wants to fund/add money to/deposit into their account from " +
-        "fiat; never use it for stock symbols (use the `stock_open` tool for stocks). " +
-        "`/topup` is for crypto-to-USDC top-up of the account. " +
+        "`/buy` is the USDC onramp — use it for ANY request to fund/top up/add " +
+        "money to/deposit into the account (fiat or otherwise). Never use `/buy` " +
+        "for stock symbols (use the `stock_open` tool for stocks). " +
         "`/yield` is ONLY for earn/yield/APY flows — pick it only when the user " +
         "explicitly mentions yield, earn, APY, interest, or optimizing idle USDC. " +
-        "Generic phrases like \"fund the account\", \"add funds\", \"deposit money\" " +
-        "are NOT yield — they are `/buy` (fiat) or `/topup` (crypto).",
+        "Generic phrases like \"fund the account\", \"top up\", \"add funds\", " +
+        "\"deposit money\" are NOT yield — they are `/buy`.",
     ),
   rest: z
     .string()

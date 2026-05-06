@@ -50,6 +50,15 @@ export interface CapabilityCtx {
    * from run() as usual; `emit` is only for in-flight updates.
    */
   emit(artifact: Artifact): Promise<void>;
+  /**
+   * Aborts when a newer input from the same user supersedes this dispatch.
+   * One-active-per-user is enforced by the dispatcher: when aborted, post-
+   * completion renders and pending writes are dropped automatically. Reading
+   * this inside a capability is an optimisation — capabilities that perform
+   * long awaits (RPC fan-out, signing waits) may race against it to unwind
+   * faster, but correctness does not require it.
+   */
+  signal?: AbortSignal;
 }
 
 /** Input shapes the dispatcher accepts from any input adapter. */
@@ -70,6 +79,15 @@ export type CollectResult<P> =
       parseMode?: "Markdown";
       /** Carried on the PendingCollection; passed back as `resuming` on the next call. */
       state: Record<string, unknown>;
+      /**
+       * When false, the dispatcher renders the question but does NOT persist
+       * a pending-collection slot — the next free-text message will be
+       * resolved fresh (slash-match → default LLM) instead of resuming this
+       * capability. Use for prompts whose only meaningful continuation is a
+       * keyboard callback (callbacks route via registry.match, not resume).
+       * Defaults to true, preserving existing behavior for every other ask.
+       */
+      persist?: boolean;
     }
   /**
    * Collect is complete and the capability already knows the final output —

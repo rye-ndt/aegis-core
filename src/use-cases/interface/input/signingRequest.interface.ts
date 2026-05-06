@@ -68,4 +68,20 @@ export interface ISigningRequestUseCase {
    * Returns the number of cancelled awaits for observability.
    */
   cancelActiveForUser(userId: string): number;
+
+  /**
+   * Atomic supersession: cancel every in-flight `waitFor` for `userId` AND
+   * flip their pending cache records to `expired`, so any later FE
+   * `/response` is rejected by `resolveRequest` (which surfaces as 410 Gone
+   * on the HTTP side and prevents `notifyResolved` from firing a phantom
+   * card). Used by the dispatcher when a newer user input supersedes the
+   * prior dispatch — the prior signing prompt is abandoned cleanly across
+   * both the in-process polls and the durable cache.
+   *
+   * Returns the number of cache records flipped. The in-process cancel count
+   * is logged separately (it is informational only — almost always equal to
+   * or greater than the cache flips, since a `waitFor` exists per pending
+   * record at most).
+   */
+  cancelPendingForUser(userId: string): Promise<number>;
 }

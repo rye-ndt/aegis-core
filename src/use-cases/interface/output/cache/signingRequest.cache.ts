@@ -55,6 +55,18 @@ export interface ISigningRequestCache {
     errorCode?: string,
     errorMessage?: string,
   ): Promise<void>;
+  /**
+   * Flip every still-`pending` request belonging to `userId` to `expired` and
+   * drop them from the per-user index. Used when a newer user input
+   * supersedes prior dispatches that left signing requests parked in the FE:
+   * any subsequent `/response` for these ids is then rejected by
+   * `resolveRequest` so `notifyResolved` does not fire phantom failure cards
+   * (e.g. an "insufficient balance" rejection card for a request the user
+   * already abandoned).
+   *
+   * Returns the ids that were actually flipped (caller may want to log them).
+   */
+  cancelPendingForUser(userId: string): Promise<string[]>;
 }
 
 export type ResolvedSigningRequest =

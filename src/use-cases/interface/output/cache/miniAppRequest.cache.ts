@@ -10,4 +10,14 @@ export interface IMiniAppRequestCache {
    * FE polls this to fetch step N+1 without closing the WebApp window.
    */
   findNextPendingSignForUser(userId: string): Promise<MiniAppRequest | null>;
+  /**
+   * Drop every queued `sign` request for `userId` (records + ZSET queue).
+   * Called when a newer user input supersedes the prior dispatch — without
+   * this, the mini-app's `findNextPendingSignForUser` poll can still serve a
+   * stale request and the FE will pre-flight / sign the wrong calldata
+   * (e.g. show an "insufficient balance" pre-flight on the abandoned step).
+   *
+   * Returns the ids actually removed (caller may want to log them).
+   */
+  cancelPendingForUser(userId: string): Promise<string[]>;
 }

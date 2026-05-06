@@ -823,6 +823,12 @@ export class AssistantInject {
       if (command === INTENT_COMMAND.LEADERBOARD) continue;
       if (command === INTENT_COMMAND.STOCK) continue;
       if (command === INTENT_COMMAND.POSITIONS) continue;
+      // /topup is conceptually an onramp, not a transfer. Routing it through
+      // SendCapability's compile→resolve pipeline causes the LLM extractor to
+      // ask transfer-style questions ("Who should I send the USDC to?"). The
+      // user-facing onramp lives at /buy. Until a dedicated topup capability
+      // exists (or /topup becomes an alias for /buy), keep it unbound here.
+      if (command === INTENT_COMMAND.TOPUP) continue;
       registry.register(new SendCapability(command, sendDeps));
     }
 
@@ -924,6 +930,8 @@ export class AssistantInject {
       registry,
       renderer,
       pending,
+      this._signingRequestUseCase ?? undefined,
+      this.getMiniAppRequestCache(),
     );
     return this._capabilityDispatcher;
   }

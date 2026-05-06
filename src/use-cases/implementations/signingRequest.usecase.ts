@@ -13,6 +13,48 @@ import type { ITokenDelegationDB } from "../interface/output/repository/tokenDel
 
 const log = createLogger("signingRequest");
 const POLL_INTERVAL_MS = 1500;
+
+/**
+ * Parse the FE's transport + environment prefix on `errorRaw`:
+ *   [bundler] HTTP 503 api.pimlico.io/v2 body=... {durationMs=12345 online=true vis=visible tg=ios/7.0 sca=0x…}
+ * Returns structured fields when present, undefined otherwise. Read-only —
+ * the FE-side writer is `buildErrorRaw` in `fe/.../extractViemErrorContext.ts`.
+ */
+function parseTransportTag(raw: string): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  const head = raw.match(/^\[(bundler|paymaster|rpc|unknown)\](?:\s+HTTP\s+(\d+))?(?:\s+([^\s\n{]+))?/);
+  if (head) {
+    out.failKind = head[1];
+    if (head[2]) out.failStatus = Number(head[2]);
+    if (head[3]) out.failEndpoint = head[3];
+  }
+  const lastRpc = raw.match(/^lastRpc=(.+)$/m);
+  if (lastRpc && lastRpc[1]) {
+    out.failLastRpc = lastRpc[1].trim();
+  }
+  const env = raw.match(/\{([^}\n]+)\}/);
+  if (env && env[1]) {
+    for (const pair of env[1].split(/\s+/)) {
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      const k = pair.slice(0, eq);
+      const v = pair.slice(eq + 1);
+      if (k === "durationMs") {
+        const n = Number(v);
+        if (Number.isFinite(n)) out.failDurationMs = n;
+      } else if (k === "online") {
+        out.failOnline = v === "true";
+      } else if (k === "vis") {
+        out.failVisibility = v;
+      } else if (k === "tg") {
+        out.failTgPlatform = v;
+      } else if (k === "sca") {
+        out.failSca = v;
+      }
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 // How long a successfully-claimed txHash blocks a different requestId from
 // re-claiming it. The FE's localStorage dedupe TTL is 10 min; pairing this
 // guard at the same window catches the cross-requestId reuse scenario:
@@ -73,6 +115,22 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
 
     const now = newCurrentUTCEpoch();
     if (record.expiresAt <= now) throw new Error("SIGNING_REQUEST_EXPIRED");
+    // A record can be flipped to `expired` *before* its `expiresAt` by
+    // `cancelPendingForUser` when a newer user input supersedes the dispatch
+    // that created it. Without this guard a late /response would still flip
+    // it to approved/rejected and `notifyResolved` would render a phantom
+    // success/failure card for a request the user has already moved on from.
+    if (record.status !== "pending") {
+      log.info(
+        {
+          step: "resolve-on-non-pending",
+          requestId: params.requestId,
+          status: record.status,
+        },
+        "ignoring late /response on already-terminal signing request",
+      );
+      throw new Error("SIGNING_REQUEST_EXPIRED");
+    }
 
     const rejected = params.rejected === true;
 
@@ -120,12 +178,17 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     if (rejected && params.errorRaw) {
       // Surface the raw on-chain revert reason at warn so failures with
       // errorCode='unknown' are still investigable from logs alone.
+      // The FE prefixes errorRaw with `[<kind>] HTTP <status> <endpoint>` for
+      // transport-class failures (see fe extractViemErrorContext.ts) — parse
+      // it back into structured fields so log filters don't have to regex.
+      const transportTag = parseTransportTag(params.errorRaw);
       log.warn(
         {
           step: "signing-request-rejected-raw",
           requestId: params.requestId,
           userId: params.userId,
           errorCode: params.errorCode,
+          ...(transportTag ?? {}),
           errorRaw: params.errorRaw,
         },
         "client-reported sign error",
@@ -326,6 +389,27 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     }
     bucket.set(hashKey, { requestId, ts: now });
     return { ok: true };
+  }
+
+  async cancelPendingForUser(userId: string): Promise<number> {
+    // Cache flip first, in-process cancel second. Order matters: a still-
+    // running `waitFor` polls the cache, so flipping the record first means
+    // the very next poll tick observes `status === 'expired'` and unwinds —
+    // even if the in-process cancel signal somehow doesn't reach it.
+    const cancelledIds = await this.cache.cancelPendingForUser(userId);
+    const inProcessCount = this.cancelActiveForUser(userId);
+    if (cancelledIds.length > 0 || inProcessCount > 0) {
+      log.info(
+        {
+          step: "supersede-user",
+          userId,
+          cacheCount: cancelledIds.length,
+          inProcessCount,
+        },
+        "superseded user's pending signing requests",
+      );
+    }
+    return cancelledIds.length;
   }
 
   cancelActiveForUser(userId: string): number {

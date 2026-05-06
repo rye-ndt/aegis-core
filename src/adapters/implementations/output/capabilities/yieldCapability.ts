@@ -111,12 +111,17 @@ export class YieldCapability implements Capability<YieldRunParams> {
       return { kind: "ok", params: { withdraw: true } };
     }
 
-    // /yield command — show nudge keyboard
+    // /yield command — show nudge keyboard. Continuation is via the keyboard
+    // callbacks (yield:opt:N / yield:custom / etc.), which match through the
+    // registry — never via free-text resume. Persisting an idle pending slot
+    // here would trap any subsequent free-text message ("how do I top up?")
+    // into yieldCapability for the full TTL, re-asking this same question.
     return {
       kind: "ask",
       question: "How much of your idle USDC would you like to optimize?",
       keyboard: buildNudgeKeyboard(),
-      state: { stage: "idle" } as unknown as Record<string, unknown>,
+      state: {} as Record<string, unknown>,
+      persist: false,
     };
   }
 
