@@ -11,7 +11,8 @@ export type IntentVerb =
   | "balance_query"
   | "portfolio_summary"
   | "loyalty_query"
-  | "prediction_market_brief";
+  | "prediction_market_brief"
+  | "prediction_market_finding";
 
 export interface ResultField {
   label: string;

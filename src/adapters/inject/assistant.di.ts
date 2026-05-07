@@ -68,13 +68,19 @@ import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { PredictionMarketScanJob } from "../implementations/input/jobs/predictionMarketScanJob";
 import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
 import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
+import { OpenAIPredictionMarketDetector } from "../implementations/output/predictionMarket/openaiPredictionMarketDetector";
 import { PredictionMarketBroadcaster } from "../implementations/output/predictionMarket/predictionMarketBroadcaster";
+import { PredictionMarketFindingBroadcaster } from "../implementations/output/predictionMarket/predictionMarketFindingBroadcaster";
+import { PredictionMarketVerifier } from "../implementations/output/predictionMarket/predictionMarketVerifier";
 import { PredictionMarketScanUseCase } from "../../use-cases/implementations/predictionMarketScan.usecase";
 import { PREDICTION_MARKETS_ENV } from "../../helpers/env/predictionMarketEnv";
 import type { IPredictionMarketBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketBroadcaster";
 import type { IPredictionMarketClassifier } from "../../use-cases/interface/predictionMarket/IPredictionMarketClassifier";
+import type { IPredictionMarketDetector } from "../../use-cases/interface/predictionMarket/IPredictionMarketDetector";
+import type { IPredictionMarketFindingBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketFindingBroadcaster";
 import type { IPredictionMarketProvider } from "../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
 import type { IPredictionMarketRepository } from "../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
+import type { IPredictionMarketVerifier } from "../../use-cases/interface/predictionMarket/IPredictionMarketVerifier";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
 import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
@@ -195,6 +201,9 @@ export class AssistantInject {
   private _predictionMarketProvider: IPredictionMarketProvider | null = null;
   private _predictionMarketClassifier: IPredictionMarketClassifier | null = null;
   private _predictionMarketBroadcaster: IPredictionMarketBroadcaster | null = null;
+  private _predictionMarketDetector: IPredictionMarketDetector | null = null;
+  private _predictionMarketVerifier: IPredictionMarketVerifier | null = null;
+  private _predictionMarketFindingBroadcaster: IPredictionMarketFindingBroadcaster | null = null;
   private _predictionMarketScanUseCase: PredictionMarketScanUseCase | null = null;
   private _predictionMarketScanJob: PredictionMarketScanJob | null = null;
   private _predictionMarketNoStartWarned = false;
@@ -1281,16 +1290,79 @@ export class AssistantInject {
     return this._predictionMarketBroadcaster;
   }
 
+  getPredictionMarketDetector(): IPredictionMarketDetector | undefined {
+    if (this._predictionMarketDetector) return this._predictionMarketDetector;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return undefined;
+    const redis = this.getRedis();
+    const cache = redis ? makeRedisResponseCache(redis, "pm-detect") : undefined;
+    this._predictionMarketDetector = new OpenAIPredictionMarketDetector({
+      apiKey,
+      model: PREDICTION_MARKETS_ENV.detectorModel,
+      cache,
+      promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
+      cacheTtlSec: PREDICTION_MARKETS_ENV.detectorCacheTtlSec,
+      priceBucketBps: PREDICTION_MARKETS_ENV.detectorPriceBucketBps,
+    });
+    return this._predictionMarketDetector;
+  }
+
+  getPredictionMarketVerifier(): IPredictionMarketVerifier {
+    if (this._predictionMarketVerifier) return this._predictionMarketVerifier;
+    this._predictionMarketVerifier = new PredictionMarketVerifier({
+      provider: this.getPredictionMarketProvider(),
+      verifyFreshnessMs: PREDICTION_MARKETS_ENV.verifyFreshnessMs,
+      oddsDriftToleranceBps: PREDICTION_MARKETS_ENV.oddsDriftToleranceBps,
+      minGapBps: PREDICTION_MARKETS_ENV.minGapBps,
+      findingMinLiquidityUsd: PREDICTION_MARKETS_ENV.findingMinLiquidityUsd,
+    });
+    return this._predictionMarketVerifier;
+  }
+
+  getPredictionMarketFindingBroadcaster():
+    | IPredictionMarketFindingBroadcaster
+    | undefined {
+    if (this._predictionMarketFindingBroadcaster) return this._predictionMarketFindingBroadcaster;
+    const redis = this.getRedis();
+    const bot = this.getBot();
+    if (!redis || !bot) return undefined;
+    const sqlDB = this.getSqlDB();
+    this._predictionMarketFindingBroadcaster = new PredictionMarketFindingBroadcaster({
+      tgApi: bot.api,
+      redis,
+      listActiveUserIds: () => sqlDB.telegramSessions.listActiveUserIds(),
+      getChatId: async (userId) => {
+        const session = await sqlDB.telegramSessions.findByUserId(userId);
+        return session?.telegramChatId ?? null;
+      },
+      concurrency: PREDICTION_MARKETS_ENV.broadcastConcurrency,
+      affiliateParam: PREDICTION_MARKETS_ENV.polymarketAffiliateParam,
+    });
+    return this._predictionMarketFindingBroadcaster;
+  }
+
   getPredictionMarketScanUseCase(): PredictionMarketScanUseCase | undefined {
     if (this._predictionMarketScanUseCase) return this._predictionMarketScanUseCase;
     const classifier = this.getPredictionMarketClassifier();
     if (!classifier) return undefined;
     const broadcaster = this.getPredictionMarketBroadcaster() ?? null;
+    const detector = PREDICTION_MARKETS_ENV.findingsEnabled
+      ? this.getPredictionMarketDetector() ?? null
+      : null;
+    const verifier = PREDICTION_MARKETS_ENV.findingsEnabled
+      ? this.getPredictionMarketVerifier()
+      : null;
+    const findingBroadcaster = PREDICTION_MARKETS_ENV.findingsEnabled
+      ? this.getPredictionMarketFindingBroadcaster() ?? null
+      : null;
     this._predictionMarketScanUseCase = new PredictionMarketScanUseCase(
       this.getPredictionMarketProvider(),
       classifier,
       this.getPredictionMarketRepo(),
       broadcaster,
+      detector,
+      verifier,
+      findingBroadcaster,
     );
     return this._predictionMarketScanUseCase;
   }

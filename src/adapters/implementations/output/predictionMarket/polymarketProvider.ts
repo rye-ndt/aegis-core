@@ -37,6 +37,8 @@ interface GammaMarket {
   acceptingOrders?: boolean;
   umaResolutionStatus?: string | null;
   events?: Array<{ description?: string; slug?: string }>;
+  oneDayPriceChange?: number;        // decimal fraction, e.g. 0.0234 = +234 bps
+  oneWeekPriceChange?: number;
 }
 
 function parseMaybeJsonArray<T = string>(v: string | T[] | undefined): T[] {
@@ -68,6 +70,13 @@ function pickOpenInterestUsd(m: GammaMarket): number {
 
 function pickVolume7dUsd(m: GammaMarket): number {
   return Number(m.volume7d ?? m.volume1wk ?? 0) || 0;
+}
+
+function pickPriceChangeBps(decimal: number | undefined): number | undefined {
+  if (decimal === undefined || decimal === null) return undefined;
+  const n = Number(decimal);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.round(n * 10_000);
 }
 
 function pickResolutionEpochSec(m: GammaMarket): number | null {
@@ -104,6 +113,45 @@ async function fetchPage(url: string): Promise<GammaMarket[]> {
   }
   log.error({ status: lastStatus, url }, "polymarket fetch exhausted");
   return [];
+}
+
+const FETCH_BY_IDS_BATCH = 50;
+
+function normalizeRaw(m: GammaMarket): RawMarket | null {
+  const marketId = (m.conditionId ?? m.id ?? "").trim();
+  if (!marketId) return null;
+  const outcomes = parseMaybeJsonArray<string>(m.outcomes);
+  if (outcomes.length !== 2) return null;
+  const resolutionEpochSec = pickResolutionEpochSec(m) ?? 0;
+  const resolutionCriteria = pickResolutionCriteria(m);
+  const prices = parseMaybeJsonArray<string | number>(m.outcomePrices);
+  const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+  const noIdx = outcomes.findIndex((o) => o.toLowerCase() === "no");
+  const yesPrice = Number(prices[yesIdx] ?? 0) || 0;
+  const noPrice = Number(prices[noIdx] ?? 0) || 0;
+  const slug = m.slug ?? "";
+  const url = slug ? `https://polymarket.com/market/${slug}` : `https://polymarket.com/`;
+  return {
+    marketId,
+    slug,
+    question: m.question ?? "",
+    resolutionCriteria,
+    category: m.category ?? null,
+    resolutionEpochSec,
+    yesPrice,
+    noPrice,
+    openInterestUsd: pickOpenInterestUsd(m),
+    volume7dUsd: pickVolume7dUsd(m),
+    liquidityUsd: Number(m.liquidityNum ?? 0) || 0,
+    isActive: m.closed !== true && m.archived !== true,
+    isDisputed:
+      m.acceptingOrders === false ||
+      (m.umaResolutionStatus?.toLowerCase() === "disputed"),
+    outcomesCount: outcomes.length,
+    url,
+    priceChange24hBps: pickPriceChangeBps(m.oneDayPriceChange),
+    priceChange7dBps: pickPriceChangeBps(m.oneWeekPriceChange),
+  };
 }
 
 export class PolymarketProvider implements IPredictionMarketProvider {
@@ -189,6 +237,8 @@ export class PolymarketProvider implements IPredictionMarketProvider {
         isDisputed: false,
         outcomesCount: 2,
         url,
+        priceChange24hBps: pickPriceChangeBps(m.oneDayPriceChange),
+        priceChange7dBps: pickPriceChangeBps(m.oneWeekPriceChange),
       });
     }
 
@@ -209,5 +259,42 @@ export class PolymarketProvider implements IPredictionMarketProvider {
       "fetch-universe",
     );
     return top;
+  }
+
+  async fetchByIds(ids: string[], reqId: string): Promise<RawMarket[]> {
+    const start = Date.now();
+    const unique = Array.from(new Set(ids.filter((id) => id && id.trim().length > 0)));
+    if (unique.length === 0) return [];
+    log.info({ step: "started", reqId, count: unique.length }, "fetch-by-ids");
+
+    const base = PREDICTION_MARKETS_ENV.gammaApiBase.replace(/\/$/, "");
+    const out: RawMarket[] = [];
+
+    for (let i = 0; i < unique.length; i += FETCH_BY_IDS_BATCH) {
+      const chunk = unique.slice(i, i + FETCH_BY_IDS_BATCH);
+      // Gamma's `/markets` only honors `condition_ids` as repeated query
+      // params — comma-joined values silently return [].
+      const params = chunk
+        .map((id) => `condition_ids=${encodeURIComponent(id)}`)
+        .join("&");
+      const url = `${base}/markets?${params}&limit=${chunk.length}`;
+      const rows = await fetchPage(url);
+      for (const r of rows) {
+        const norm = normalizeRaw(r);
+        if (norm && chunk.includes(norm.marketId)) out.push(norm);
+      }
+    }
+
+    if (out.length < unique.length) {
+      log.warn(
+        { reqId, requested: unique.length, returned: out.length },
+        "fetch-by-ids partial — Gamma may be ignoring `condition_ids=` filter",
+      );
+    }
+    log.info(
+      { step: "succeeded", reqId, requested: unique.length, returned: out.length, durationMs: Date.now() - start },
+      "fetch-by-ids",
+    );
+    return out;
   }
 }

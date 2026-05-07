@@ -32,4 +32,17 @@ export const PREDICTION_MARKETS_ENV = {
   clusterCacheTtlSec: num("PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC", 24 * 60 * 60),
   broadcastConcurrency: num("PREDICTION_MARKETS_BROADCAST_CONCURRENCY", 5),
   promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v1"),
+  detectorModel: str(
+    "PREDICTION_MARKETS_DETECTOR_MODEL",
+    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "gpt-4o"),
+  ),
+  detectorConcurrency: num("PREDICTION_MARKETS_DETECTOR_CONCURRENCY", 3),
+  detectorCacheTtlSec: num("PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC", 1800),
+  detectorPriceBucketBps: num("PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS", 50),
+  verifyFreshnessMs: num("PREDICTION_MARKETS_VERIFY_FRESHNESS_MS", 60_000),
+  oddsDriftToleranceBps: num("PREDICTION_MARKETS_ODDS_DRIFT_TOLERANCE_BPS", 50),
+  minGapBps: num("PREDICTION_MARKETS_MIN_GAP_BPS", 100),
+  findingMinLiquidityUsd: num("PREDICTION_MARKETS_FINDING_MIN_LIQUIDITY_USD", 25_000),
+  polymarketAffiliateParam: str("PREDICTION_MARKETS_POLYMARKET_AFFILIATE", ""),
+  findingsEnabled: bool("PREDICTION_MARKETS_FINDINGS_ENABLED", false),
 } as const;

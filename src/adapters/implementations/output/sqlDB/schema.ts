@@ -308,6 +308,31 @@ export const predictionMarketClusters = pgTable("prediction_market_clusters", {
   byRun: index("pm_clusters_by_run").on(t.runId),
 }));
 
+export const predictionMarketFindings = pgTable("prediction_market_findings", {
+  findingId: uuid("finding_id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  // Stable across runs (carry-forward preserves clusterId). Allows analytical
+  // queries like "how often did cluster X surface a finding?".
+  clusterId: uuid("cluster_id").notNull(),
+  patternType: text("pattern_type").notNull(),                         // FindingPatternType
+  marketsInvolved: jsonb("markets_involved").notNull(),                // string[]
+  currentState: jsonb("current_state").notNull(),                      // FindingCurrentState
+  liveOdds: jsonb("live_odds").notNull(),                              // Record<marketId, 0..1>
+  whyAnomalous: text("why_anomalous").notNull(),
+  sideA: jsonb("side_a").notNull(),                                    // SideThesis
+  sideB: jsonb("side_b").notNull(),                                    // SideThesis
+  confidence: text("confidence").notNull(),                            // 'low' | 'medium' | 'high'
+  magnitudeBps: integer("magnitude_bps").notNull(),
+  rankScore: integer("rank_score").notNull(),                          // ×1000 to keep int
+  rationale: text("rationale").notNull(),
+  createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
+  broadcastedAtEpoch: bigint("broadcasted_at_epoch", { mode: "number" }),
+}, (t) => ({
+  byRun: index("pm_findings_by_run").on(t.runId),
+  byCluster: index("pm_findings_by_cluster").on(t.clusterId),
+  byCreated: index("pm_findings_by_created").on(t.createdAtEpoch),
+}));
+
 export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
   id:                  text("id").primaryKey(),
   userId:              uuid("user_id").notNull().references(() => users.id),

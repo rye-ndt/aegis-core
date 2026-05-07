@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newUuid } from "../../../../../helpers/uuid";
 import type {
@@ -8,13 +8,20 @@ import type {
 import type {
   DraftCluster,
   ExpectedRelationship,
+  FindingConfidence,
+  FindingCurrentState,
+  FindingPatternType,
   RawMarket,
   RunRow,
   RunStatus,
+  SideThesis,
   StoredCluster,
+  StoredFinding,
+  VerifiedFinding,
 } from "../../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
 import {
   predictionMarketClusters,
+  predictionMarketFindings,
   predictionMarketRuns,
   predictionMarketSnapshots,
 } from "../schema";
@@ -109,10 +116,13 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
     await this.db.insert(predictionMarketSnapshots).values(rows);
   }
 
-  async insertClusters(runId: string, clusters: DraftCluster[]): Promise<void> {
-    if (clusters.length === 0) return;
+  async insertClusters(
+    runId: string,
+    clusters: Array<DraftCluster & { clusterId?: string }>,
+  ): Promise<StoredCluster[]> {
+    if (clusters.length === 0) return [];
     const rows = clusters.map((c) => ({
-      clusterId: newUuid(),
+      clusterId: c.clusterId ?? newUuid(),
       runId,
       theme: c.theme,
       causalDriver: c.causalDriver,
@@ -122,6 +132,16 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       confidence: c.confidence,
     }));
     await this.db.insert(predictionMarketClusters).values(rows);
+    return rows.map((r) => ({
+      clusterId: r.clusterId,
+      runId: r.runId,
+      theme: r.theme,
+      causalDriver: r.causalDriver,
+      marketIds: r.marketIds,
+      expectedRelationships: r.expectedRelationships,
+      rationale: r.rationale,
+      confidence: r.confidence,
+    }));
   }
 
   async updateRunStatus(
@@ -175,6 +195,64 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       expectedRelationships: r.expectedRelationships as ExpectedRelationship[],
       rationale: r.rationale,
       confidence: r.confidence as StoredCluster["confidence"],
+    }));
+  }
+
+  async insertFindings(findings: VerifiedFinding[]): Promise<void> {
+    if (findings.length === 0) return;
+    const rows = findings.map((f) => ({
+      findingId: f.findingId,
+      runId: f.runId,
+      clusterId: f.clusterId,
+      patternType: f.patternType,
+      marketsInvolved: f.marketsInvolved,
+      currentState: f.currentState,
+      liveOdds: f.liveOdds,
+      whyAnomalous: f.whyAnomalous,
+      sideA: f.sideA,
+      sideB: f.sideB,
+      confidence: f.confidence,
+      magnitudeBps: f.magnitudeBps,
+      rankScore: f.rankScore,
+      rationale: f.rationale,
+      createdAtEpoch: f.verifiedAtEpoch,
+      broadcastedAtEpoch: null as number | null,
+    }));
+    await this.db.insert(predictionMarketFindings).values(rows);
+  }
+
+  async markFindingsBroadcasted(findingIds: string[], epoch: number): Promise<void> {
+    if (findingIds.length === 0) return;
+    await this.db
+      .update(predictionMarketFindings)
+      .set({ broadcastedAtEpoch: epoch })
+      .where(inArray(predictionMarketFindings.findingId, findingIds));
+  }
+
+  async getFindingsByRun(runId: string): Promise<StoredFinding[]> {
+    const rows = await this.db
+      .select()
+      .from(predictionMarketFindings)
+      .where(eq(predictionMarketFindings.runId, runId))
+      .orderBy(desc(predictionMarketFindings.rankScore));
+    return rows.map((r) => ({
+      findingId: r.findingId,
+      runId: r.runId,
+      clusterId: r.clusterId,
+      patternType: r.patternType as FindingPatternType,
+      marketsInvolved: r.marketsInvolved as string[],
+      currentState: r.currentState as FindingCurrentState,
+      liveOdds: r.liveOdds as Record<string, number>,
+      whyAnomalous: r.whyAnomalous,
+      sideA: r.sideA as SideThesis,
+      sideB: r.sideB as SideThesis,
+      confidence: r.confidence as FindingConfidence,
+      magnitudeBps: r.magnitudeBps,
+      rankScore: r.rankScore,
+      rationale: r.rationale,
+      verifiedAtEpoch: r.createdAtEpoch,
+      createdAtEpoch: r.createdAtEpoch,
+      broadcastedAtEpoch: r.broadcastedAtEpoch,
     }));
   }
 }

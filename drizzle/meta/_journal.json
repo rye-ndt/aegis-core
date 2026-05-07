@@ -225,6 +225,13 @@
       "when": 1778889600001,
       "tag": "0033_naive_bedlam",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1778889600002,
+      "tag": "0034_bumpy_lucky_pierre",
+      "breakpoints": true
     }
   ]
 }

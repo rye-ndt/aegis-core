@@ -4,6 +4,8 @@ import type {
   RunRow,
   RunStatus,
   StoredCluster,
+  StoredFinding,
+  VerifiedFinding,
 } from "./PredictionMarketTypes";
 
 export interface InsertRunInput {
@@ -20,7 +22,16 @@ export interface IPredictionMarketRepository {
   setLatestRun(runId: string): Promise<void>;
   getLatestRun(): Promise<RunRow | null>;
   insertMarkets(runId: string, markets: RawMarket[]): Promise<void>;
-  insertClusters(runId: string, clusters: DraftCluster[]): Promise<void>;
+  /**
+   * Persists clusters for a run. Each input may carry a pre-assigned
+   * `clusterId` — the carry-forward path uses this to keep ids stable across
+   * runs so stage-3 detector cache and `prediction_market_findings.cluster_id`
+   * correlate. When `clusterId` is absent a fresh UUID is minted.
+   */
+  insertClusters(
+    runId: string,
+    clusters: Array<DraftCluster & { clusterId?: string }>,
+  ): Promise<StoredCluster[]>;
   updateRunStatus(
     runId: string,
     status: RunStatus,
@@ -28,4 +39,7 @@ export interface IPredictionMarketRepository {
   ): Promise<void>;
   getMarketsByRun(runId: string): Promise<RawMarket[]>;
   getClustersByRun(runId: string): Promise<StoredCluster[]>;
+  insertFindings(findings: VerifiedFinding[]): Promise<void>;
+  markFindingsBroadcasted(findingIds: string[], epoch: number): Promise<void>;
+  getFindingsByRun(runId: string): Promise<StoredFinding[]>;
 }

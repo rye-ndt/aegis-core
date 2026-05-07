@@ -1,5 +1,23 @@
 # Capabilities Status
 
+## predictionMarketFindingBroadcaster: per-finding push with Polymarket URL buttons — 2026-05-07
+
+**What was done:**
+- New job-driven sender `predictionMarketFindingBroadcaster.ts` (output adapter) emits one Telegram message per stage-3 verified finding via `IntentResult{verb:"prediction_market_finding", status:"success", complexity:"complex"}` rendered through `renderResultCard`. Findings arrive pre-sorted by `rankScore DESC`; each carries two `nextActions` of `kind:"url"` (`Bet ${sideA.label}` / `Bet ${sideB.label}`) that link out to `https://polymarket.com/market/<slug>` with an optional `?affiliate=…` query string driven by `PREDICTION_MARKETS_POLYMARKET_AFFILIATE`.
+- Per-user concurrency via `pLimit(PREDICTION_MARKETS_BROADCAST_CONCURRENCY)`. Per-user dedupe key `pm:finding:lastSeen:{userId}:{findingId}` (TTL 7d) prevents the same `findingId` re-pushing if the worker retries mid-fan-out — but each new `findingId` (every verified run) is allowed through once. Cross-run dedupe is intentionally absent.
+- MarkdownV2 → plain-text fallback on send rejection (mirrors `yieldReportJob`); URL buttons survive the fallback because `kind:"url"` is rendered identically in both branches.
+- Pattern → headline mapping is a small lookup table inside the broadcaster (`PATTERN_HEADLINES`) — keeps prose out of the use case.
+
+**Why over alternatives:**
+- Considered batching all findings for a tick into a single message. Rejected — would lose the per-finding URL-button pair and the MarkdownV2 spoiler details block becomes too long.
+- Considered routing through `predictionMarketBroadcaster` (the stage-2 cluster brief sender). Rejected — different message shape, different verb, different dedupe model. Two adapters share the renderer + the `listActiveUserIds` audience contract but nothing else.
+
+**New conventions to preserve:**
+- Stage-3 finding broadcast uses `pm:finding:lastSeen:<userId>:<findingId>` keying; do NOT collapse it into stage-2's `pm:broadcast:lastHash:<userId>` (different semantics: per-finding once vs per-clusterSetHash once).
+- `IntentVerb: prediction_market_finding` is a job-driven push verb with no error patterns — verified the result-card error catalog ignores it.
+- `ResultAction.kind:"url"` is now the canonical way to surface external links from any capability or job push (renderer maps it to `InlineKeyboard.url(...)`). Existing capabilities continue to work because their `kind` values (`"command" | "callback"`) hit the other branches of the renderer's switch.
+- `IPredictionMarketProvider.fetchByIds(ids, reqId)` is the canonical re-fetch path for stage-3 verification — caps batch at 50/req internally. Callers do not need to chunk.
+
 ## predictionMarketBroadcaster: result-card push for daily cluster brief — 2026-05-06
 
 **What was done:**

@@ -26,6 +26,13 @@ export interface RawMarket {
   /** Always 2 after the binary filter. */
   outcomesCount: number;
   url: string;
+  /**
+   * Transient — populated when available from the provider for stage 3
+   * movement-divergence detection. Not persisted to `prediction_market_snapshots`.
+   * Sign convention: positive = YES price went up.
+   */
+  priceChange24hBps?: number;
+  priceChange7dBps?: number;
 }
 
 export type ClusterConfidence = "low" | "medium" | "high";
@@ -74,4 +81,64 @@ export interface RunOutcome {
   clusters: number;
   published: number;
   broadcast: boolean;
+  findingsDetected: number;
+  findingsVerified: number;
+  findingsBroadcast: number;
+}
+
+// ---- Stage 3: findings ----
+
+export type FindingPatternType =
+  | "logical_inconsistency"
+  | "term_structure_anomaly"
+  | "implied_contradiction"
+  | "movement_divergence"
+  | "other";
+
+export type FindingConfidence = "low" | "medium" | "high";
+
+export interface SideThesis {
+  /** ≤60 chars, plain English. */
+  label: string;
+  /** Cluster member this side trades. */
+  marketId: string;
+  outcome: "YES" | "NO";
+  /** ≤200 chars. */
+  rationale: string;
+}
+
+export interface FindingCurrentState {
+  /** marketId -> YES price 0..1 as cited by the LLM. */
+  citedOdds: Record<string, number>;
+}
+
+export interface DraftFinding {
+  patternType: FindingPatternType;
+  /** Subset of cluster.marketIds, ≥2. */
+  marketsInvolved: string[];
+  currentState: FindingCurrentState;
+  whyAnomalous: string;
+  sideA: SideThesis;
+  sideB: SideThesis;
+  confidence: FindingConfidence;
+  /** Written before the sides per prompt order. */
+  rationale: string;
+}
+
+export interface VerifiedFinding extends DraftFinding {
+  findingId: string;
+  runId: string;
+  clusterId: string;
+  verifiedAtEpoch: number;
+  /** Authoritative re-pulled YES prices, marketId -> 0..1. */
+  liveOdds: Record<string, number>;
+  /** Pattern-specific gap size in bps. */
+  magnitudeBps: number;
+  /** Ranking score multiplied by 1000 to fit `integer`. */
+  rankScore: number;
+}
+
+export interface StoredFinding extends VerifiedFinding {
+  createdAtEpoch: number;
+  broadcastedAtEpoch: number | null;
 }
