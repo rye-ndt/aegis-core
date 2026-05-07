@@ -1314,6 +1314,7 @@ export class AssistantInject {
       verifyFreshnessMs: PREDICTION_MARKETS_ENV.verifyFreshnessMs,
       oddsDriftToleranceBps: PREDICTION_MARKETS_ENV.oddsDriftToleranceBps,
       minGapBps: PREDICTION_MARKETS_ENV.minGapBps,
+      minSumDeviationBps: PREDICTION_MARKETS_ENV.minSumDeviationBps,
       findingMinLiquidityUsd: PREDICTION_MARKETS_ENV.findingMinLiquidityUsd,
     });
     return this._predictionMarketVerifier;
@@ -1345,7 +1346,9 @@ export class AssistantInject {
     if (this._predictionMarketScanUseCase) return this._predictionMarketScanUseCase;
     const classifier = this.getPredictionMarketClassifier();
     if (!classifier) return undefined;
-    const broadcaster = this.getPredictionMarketBroadcaster() ?? null;
+    // Cluster broadcast intentionally disabled — users only receive the
+    // asymmetric-pattern (finding) message, not the cluster-found brief.
+    const broadcaster = null;
     const detector = PREDICTION_MARKETS_ENV.findingsEnabled
       ? this.getPredictionMarketDetector() ?? null
       : null;

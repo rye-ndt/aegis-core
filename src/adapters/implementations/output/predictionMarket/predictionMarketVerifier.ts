@@ -8,9 +8,11 @@ import type {
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketVerifier";
 import type {
   DraftFinding,
+  ExpectedRelationshipKind,
   FindingConfidence,
   FindingPatternType,
   RawMarket,
+  StoredCluster,
   VerifiedFinding,
 } from "../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
 
@@ -30,13 +32,19 @@ const CONFIDENCE_WEIGHT: Record<FindingConfidence, number> = {
   low: 0.3,
 };
 
-// Patterns whose `magnitudeBps` is a real numeric gap and must clear `minGapBps`.
-// `implied_contradiction` is subjective (verifier only re-checks odds drift);
-// `other` is a catch-all where a hard gap floor isn't meaningful.
+// Patterns whose `magnitudeBps` is a real numeric gap and must clear
+// `minGapBps`. `other` is a catch-all where a hard gap floor isn't meaningful.
+// `implied_contradiction` used to live here as a subjective pass-through, but
+// that allowed coherent mutually-exclusive clusters (sum ≈ 100%) to surface
+// as "contradictions" with huge `magnitudeBps` values — see false-positive
+// post-mortem in the prediction-markets construction notes. The verifier now
+// computes magnitude from the cluster's `expectedRelationships.kind` and
+// drops sub-threshold findings.
 const MIN_GAP_PATTERNS: ReadonlySet<FindingPatternType> = new Set([
   "logical_inconsistency",
   "term_structure_anomaly",
   "movement_divergence",
+  "implied_contradiction",
 ]);
 
 export interface PredictionMarketVerifierConfig {
@@ -44,6 +52,8 @@ export interface PredictionMarketVerifierConfig {
   verifyFreshnessMs: number;
   oddsDriftToleranceBps: number;
   minGapBps: number;
+  /** Required deviation from 100% for `mutually_exclusive` clusters. */
+  minSumDeviationBps: number;
   findingMinLiquidityUsd: number;
 }
 
@@ -148,15 +158,24 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
       const liveOdds: Record<string, number> = {};
       for (const m of involved) liveOdds[m.marketId] = m.yesPrice;
 
-      // Pattern-specific gap check + magnitude.
-      const gapResult = computeMagnitude(draft, involved, liveOdds);
+      // Pattern + cluster-kind-aware magnitude. `null` means the alleged
+      // pattern no longer holds (e.g. mutually-exclusive cluster sums to
+      // 100%, monotonic term structure restored).
+      const gapResult = computeMagnitude(draft, involved, cluster);
       if (gapResult === null) {
-        drop("gap-closed");
+        drop("pattern-not-violated");
         continue;
       }
 
-      if (MIN_GAP_PATTERNS.has(draft.patternType) && gapResult < this.cfg.minGapBps) {
-        drop("gap-closed");
+      // Pattern-specific minimum gap. Mutually-exclusive clusters use the
+      // sum-deviation threshold; everything else uses the generic gap floor.
+      const kind = primaryKind(cluster);
+      const minGap =
+        draft.patternType === "implied_contradiction" && kind === "mutually_exclusive"
+          ? this.cfg.minSumDeviationBps
+          : this.cfg.minGapBps;
+      if (MIN_GAP_PATTERNS.has(draft.patternType) && gapResult < minGap) {
+        drop("gap-below-threshold");
         continue;
       }
 
@@ -225,19 +244,50 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
 function computeMagnitude(
   draft: DraftFinding,
   involved: RawMarket[],
-  liveOdds: Record<string, number>,
+  cluster: StoredCluster,
 ): number | null {
+  const kind = primaryKind(cluster);
   switch (draft.patternType) {
     case "logical_inconsistency": {
-      // Without a fully formal inequality from the LLM we treat the maximum
-      // pairwise gap among involved markets as the inequality "violation". If
-      // every market is now near-equal the inequality is no longer broken in
-      // a meaningful way — return null so the caller drops the finding.
-      const gap = maxPairwiseGapBps(involved);
-      return gap;
+      // For mutually-exclusive or nested clusters, an inconsistency means
+      // the implied probabilities violate the structural constraint — sum
+      // far from 100% (mutually-exclusive) or narrower priced above wider
+      // (nested). Without explicit pair-of-markets metadata from the LLM we
+      // approximate via sum-deviation for mutually-exclusive and pairwise
+      // gap otherwise.
+      if (kind === "mutually_exclusive") {
+        return sumDeviationBps(involved);
+      }
+      return maxPairwiseGapBps(involved);
     }
     case "term_structure_anomaly": {
-      return maxPairwiseGapBps(involved);
+      // A real term-structure anomaly only exists when an earlier-resolving
+      // event is priced strictly above a later-resolving event covering the
+      // same underlying outcome. The wider window contains the narrower, so
+      // P(narrower) ≤ P(wider) is the structural constraint; pure presence
+      // of a price gap is not enough — it can be in the *correct* direction
+      // (e.g. "deal by May 15" 17% < "deal by May 31" 28% is healthy, not
+      // an anomaly).
+      //
+      // We sort by resolutionEpochSec and look for any pair where the
+      // earlier market's yesPrice strictly exceeds a later market's. The
+      // worst such violation in bps is the magnitude. If every earlier
+      // market is priced ≤ every later market, return null → drop with
+      // `pattern-not-violated`.
+      const sorted = [...involved].sort(
+        (a, b) => a.resolutionEpochSec - b.resolutionEpochSec,
+      );
+      let worstViolationBps = 0;
+      for (let i = 0; i < sorted.length - 1; i += 1) {
+        for (let j = i + 1; j < sorted.length; j += 1) {
+          const violation = sorted[i]!.yesPrice - sorted[j]!.yesPrice;
+          if (violation > 0) {
+            const bps = Math.round(violation * 10_000);
+            if (bps > worstViolationBps) worstViolationBps = bps;
+          }
+        }
+      }
+      return worstViolationBps > 0 ? worstViolationBps : null;
     }
     case "movement_divergence": {
       const deltas = involved
@@ -247,14 +297,37 @@ function computeMagnitude(
       return Math.abs(Math.max(...deltas) - Math.min(...deltas));
     }
     case "implied_contradiction": {
-      // No further math check (subjective). Use max pairwise gap as proxy and
-      // require non-zero so a fully-flat cluster doesn't synthesize signal.
+      // Mutually-exclusive clusters: a "contradiction" only exists if the
+      // probabilities don't sum to ~100%. Wide pairwise spreads (96/3/0) are
+      // CONSENSUS, not contradiction — drop with sum-near-100 returning a
+      // small magnitude that fails the minSumDeviationBps gate.
+      if (kind === "mutually_exclusive") {
+        return sumDeviationBps(involved);
+      }
+      // Nested: contradiction means the narrower event is priced higher than
+      // the wider one. Without pairwise metadata, fall back to pairwise gap;
+      // the LLM's rationale + odds-drift check are the primary safeguards.
       const gap = maxPairwiseGapBps(involved);
       return gap > 0 ? gap : null;
     }
     case "other":
       return maxPairwiseGapBps(involved);
   }
+}
+
+function primaryKind(cluster: StoredCluster): ExpectedRelationshipKind | null {
+  return cluster.expectedRelationships[0]?.kind ?? null;
+}
+
+/**
+ * For a mutually-exclusive set of YES-priced binaries, the YES probabilities
+ * should sum to ≈ 1.0. Returns |sum − 1.0| in bps. A small value (≤300 bps)
+ * signals proper pricing — the cluster is in consensus, not contradiction.
+ */
+function sumDeviationBps(markets: RawMarket[]): number {
+  if (markets.length === 0) return 0;
+  const sum = markets.reduce((acc, m) => acc + m.yesPrice, 0);
+  return Math.round(Math.abs(sum - 1) * 10_000);
 }
 
 function maxPairwiseGapBps(markets: RawMarket[]): number {

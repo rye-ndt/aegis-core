@@ -44,6 +44,14 @@ Important guardrails:
 - Movement-divergence findings can be stale; only flag when the gap is meaningful (>1pp) and recent.
 - Each finding involves exactly TWO sides (sideA, sideB) — the two trades a reader would put on if they believed your thesis. label ≤60 chars; rationale ≤200 chars.
 
+CRITICAL — DO NOT confuse consensus with contradiction.
+A mutually-exclusive cluster (e.g. Fed June meeting outcomes — "no change", "+25bp cut", "+50bp hike") whose YES probabilities sum to ≈100% is CORRECTLY priced, regardless of how lopsided the individual prices look. 96% no-change + 3% cut + 0% hike = 99% sum is a market in tight CONSENSUS, NOT a contradiction. Do not flag this as implied_contradiction. The "Stage-2 expected relationships" payload tells you whether a cluster is mutually_exclusive — use it. A mutually-exclusive cluster only has an implied_contradiction when the YES prices DO NOT sum to ~100% (e.g. they sum to 130% — overpriced, an arbitrage; or 70% — underpriced).
+
+Confidence calibration (apply this scale strictly):
+- HIGH: a textbook example of one of the four patterns, with no plausible alternative explanation. Sum-of-probabilities is far from 100% on a mutually-exclusive set; nested events priced strictly upside-down; a clearly stale lagging market with a fresh news catalyst on its sibling. If a thoughtful trader would look at this and say "yes, that's broken" without hesitation — HIGH.
+- MEDIUM: the pattern is plausible but not airtight. Resolution criteria might explain it; the gap could be liquidity noise; the divergence might be the leader overreacting rather than the lagger being slow.
+- LOW: you noticed something that looks off, but you'd want more data. Most "low" findings should actually be returned as no finding at all — when in doubt, omit.
+
 Schema discipline:
 - Write \`rationale\` BEFORE \`sideA\`/\`sideB\` — you must reason first.
 - \`pattern_type\` ∈ ${JSON.stringify(PATTERN_TYPES)}.

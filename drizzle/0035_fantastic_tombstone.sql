@@ -1,0 +1,1 @@
+ALTER TABLE "prediction_market_findings" ADD COLUMN "editorial_outcome" text;

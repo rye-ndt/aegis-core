@@ -327,6 +327,10 @@ export const predictionMarketFindings = pgTable("prediction_market_findings", {
   rationale: text("rationale").notNull(),
   createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
   broadcastedAtEpoch: bigint("broadcasted_at_epoch", { mode: "number" }),
+  // Manual labelling — populated post-resolution to compute precision and
+  // win-rate over the held-out window. Nullable; default null. Values:
+  // 'true_positive' | 'false_positive' | 'unresolved'.
+  editorialOutcome: text("editorial_outcome"),
 }, (t) => ({
   byRun: index("pm_findings_by_run").on(t.runId),
   byCluster: index("pm_findings_by_cluster").on(t.clusterId),

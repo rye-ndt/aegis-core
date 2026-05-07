@@ -31,7 +31,11 @@ export const PREDICTION_MARKETS_ENV = {
   maxReclusterAgeMs: num("PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS", 24 * 60 * 60 * 1000),
   clusterCacheTtlSec: num("PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC", 24 * 60 * 60),
   broadcastConcurrency: num("PREDICTION_MARKETS_BROADCAST_CONCURRENCY", 5),
-  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v1"),
+  // Bumped from v1 → v2 alongside the verifier's pattern-aware magnitude fix
+  // and the detector prompt's mutually-exclusive anti-example / calibration
+  // additions. The version is part of the detector Redis cache key, so the
+  // bump invalidates pre-fix cached drafts on first deploy.
+  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v2"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
     str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "gpt-4o"),
@@ -42,6 +46,10 @@ export const PREDICTION_MARKETS_ENV = {
   verifyFreshnessMs: num("PREDICTION_MARKETS_VERIFY_FRESHNESS_MS", 60_000),
   oddsDriftToleranceBps: num("PREDICTION_MARKETS_ODDS_DRIFT_TOLERANCE_BPS", 50),
   minGapBps: num("PREDICTION_MARKETS_MIN_GAP_BPS", 100),
+  // For mutually-exclusive clusters, magnitude is `|sum(YES) − 1.0|`. Below
+  // this threshold the cluster is properly priced, even if individual prices
+  // span a wide range (e.g. 96/3/0 = 99% sum is consensus, not contradiction).
+  minSumDeviationBps: num("PREDICTION_MARKETS_MIN_SUM_DEVIATION_BPS", 300),
   findingMinLiquidityUsd: num("PREDICTION_MARKETS_FINDING_MIN_LIQUIDITY_USD", 25_000),
   polymarketAffiliateParam: str("PREDICTION_MARKETS_POLYMARKET_AFFILIATE", ""),
   findingsEnabled: bool("PREDICTION_MARKETS_FINDINGS_ENABLED", false),
