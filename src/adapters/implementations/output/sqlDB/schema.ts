@@ -337,6 +337,92 @@ export const predictionMarketFindings = pgTable("prediction_market_findings", {
   byCreated: index("pm_findings_by_created").on(t.createdAtEpoch),
 }));
 
+export const predictionMarketUserSetup = pgTable("prediction_market_user_setup", {
+  userId: uuid("user_id").primaryKey().references(() => users.id),
+  polygonScaAddress: text("polygon_sca_address").notNull(),
+  polygonEoaAddress: text("polygon_eoa_address").notNull(),
+  bootstrapBridgeIntentId: text("bootstrap_bridge_intent_id"),
+  approvalsTxHashes: jsonb("approvals_tx_hashes"),                       // string[]
+  polymarketCredsEnc: text("polymarket_creds_enc"),                      // AES-GCM envelope
+  setupStep: text("setup_step").notNull(),                               // pending|sca_deployed|gas_funded|approved|authed|complete
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+});
+
+export const predictionMarketBetIntents = pgTable("prediction_market_bet_intents", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  findingId: uuid("finding_id"),
+  marketId: text("market_id").notNull(),
+  side: text("side").notNull(),                                          // 'A'|'B'
+  outcomeTokenId: text("outcome_token_id"),
+  stakeUsdcCents: bigint("stake_usdc_cents", { mode: "number" }),        // null until amount step
+  refPriceBps: integer("ref_price_bps"),
+  status: text("status").notNull(),                                      // awaiting_amount|awaiting_confirm|executing|completed|cancelled|failed
+  betId: uuid("bet_id"),                                                 // FK once execution starts
+  expiresAtEpoch: bigint("expires_at_epoch", { mode: "number" }).notNull(),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+}, (t) => ({
+  byUserStatus: index("pm_bet_intents_by_user_status").on(t.userId, t.status),
+}));
+
+export const predictionMarketBets = pgTable("prediction_market_bets", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  intentId: uuid("intent_id"),
+  findingId: uuid("finding_id"),
+  marketId: text("market_id").notNull(),
+  // Nullable on the chat-side bet row — FE resolves the actual conditional
+  // token id from Polymarket gamma + orderbook before submitting the order
+  // and writes it back via /bet/:id/transition.
+  outcomeTokenId: text("outcome_token_id"),
+  side: text("side").notNull(),
+  stakeUsdcCents: bigint("stake_usdc_cents", { mode: "number" }).notNull(),
+  refPriceBps: integer("ref_price_bps"),
+  clientOrderId: text("client_order_id").notNull().unique(),             // idempotency key for Polymarket POST
+  bridgeIntentId: text("bridge_intent_id"),
+  scaToEoaTxHash: text("sca_to_eoa_tx_hash"),
+  polymarketOrderId: text("polymarket_order_id"),
+  status: text("status").notNull(),                                      // INITIATED|BRIDGING|BRIDGED|SCA_TO_EOA|ORDER_SIGNED|ORDER_SUBMITTED|FILLED|PARTIAL|UNFILLED|FAILED
+  filledShares: text("filled_shares"),                                   // decimal string (shares ×1e6)
+  filledAvgPriceBps: integer("filled_avg_price_bps"),
+  failureReason: text("failure_reason"),
+  betKind: text("bet_kind").notNull().default("open"),                   // 'open'|'close'
+  parentBetId: uuid("parent_bet_id"),
+  // Set on terminal non-FILLED outcomes when scaToEoaTxHash is non-null —
+  // signals the mini-app to submit a refund UserOp from the EOA back to the
+  // user's Polygon SCA on next open. Cleared once `refundTxHash` is recorded.
+  refundRequired: boolean("refund_required").notNull().default(false),
+  refundTxHash: text("refund_tx_hash"),
+  createdAtEpoch: integer("created_at_epoch").notNull(),
+  updatedAtEpoch: integer("updated_at_epoch").notNull(),
+}, (t) => ({
+  byUserStatus: index("pm_bets_by_user_status").on(t.userId, t.status),
+  byClientOrderId: index("pm_bets_by_client_order_id").on(t.clientOrderId),
+}));
+
+export const predictionMarketPositions = pgTable("prediction_market_positions", {
+  id: uuid("id").primaryKey(),
+  userId: uuid("user_id").notNull(),
+  marketId: text("market_id").notNull(),
+  outcomeTokenId: text("outcome_token_id").notNull(),
+  side: text("side").notNull(),
+  sizeShares: text("size_shares").notNull(),                             // decimal string
+  entryPriceAvgBps: integer("entry_price_avg_bps").notNull(),
+  entryStakeUsdcCents: bigint("entry_stake_usdc_cents", { mode: "number" }).notNull(),
+  openingBetId: uuid("opening_bet_id"),
+  closingBetId: uuid("closing_bet_id"),
+  currentValueUsdcCents: bigint("current_value_usdc_cents", { mode: "number" }),
+  status: text("status").notNull(),                                      // open|closing|closed|resolved
+  resolvedOutcome: text("resolved_outcome"),
+  realizedPnlUsdcCents: bigint("realized_pnl_usdc_cents", { mode: "number" }),
+  openedAtEpoch: integer("opened_at_epoch").notNull(),
+  closedAtEpoch: integer("closed_at_epoch"),
+}, (t) => ({
+  byUserStatus: index("pm_positions_by_user_status").on(t.userId, t.status),
+}));
+
 export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
   id:                  text("id").primaryKey(),
   userId:              uuid("user_id").notNull().references(() => users.id),

@@ -12,7 +12,14 @@ export type IntentVerb =
   | "portfolio_summary"
   | "loyalty_query"
   | "prediction_market_brief"
-  | "prediction_market_finding";
+  | "prediction_market_finding"
+  // ─── Stage 4: bet execution ─────────────────────────────────────────────
+  | "prediction_market_bet_confirm"
+  | "prediction_market_bet_placed"
+  | "prediction_market_bet_failed"
+  | "prediction_market_position_open"
+  | "prediction_market_position_closed"
+  | "prediction_market_position_resolved";
 
 export interface ResultField {
   label: string;

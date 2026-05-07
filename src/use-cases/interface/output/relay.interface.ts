@@ -50,6 +50,36 @@ export interface RelayQuote {
   fees?: Record<string, unknown>;
 }
 
+/**
+ * Stage-4 (prediction-market bets): cross-chain bridge needs to know when
+ * USDC has actually landed on Polygon before kicking off the SCA→EOA transfer.
+ * Relay's `requestId` (returned alongside the quote and surfaced again from
+ * the FE-side execute step) is the correlation key — `awaitIntent` polls
+ * Relay's status endpoint until the intent reaches a terminal state.
+ */
+export type RelayIntentStatus = "pending" | "success" | "failure" | "refund";
+
+export interface RelayIntentStatusResult {
+  status: RelayIntentStatus;
+  /** Free-form provider message, surfaced on failure/refund for debugging. */
+  reason?: string;
+  /** Echo of the input id so callers can correlate without bookkeeping. */
+  requestId: string;
+}
+
 export interface IRelayClient {
   getQuote(request: RelayQuoteRequest): Promise<RelayQuote>;
+  /**
+   * One-shot status fetch. Implementations normalize provider-specific shape
+   * into `RelayIntentStatus`. Returns `pending` when the intent is still in
+   * flight; callers loop with backoff via `awaitIntent`.
+   */
+  getIntentStatus(requestId: string): Promise<RelayIntentStatusResult>;
+  /**
+   * Poll `getIntentStatus` until the result is terminal or `timeoutMs`
+   * elapses. Resolves with the last observed result. Throws only on
+   * unexpected adapter errors — a `pending` timeout is reported via
+   * `status: "pending"`, not thrown.
+   */
+  awaitIntent(requestId: string, timeoutMs: number): Promise<RelayIntentStatusResult>;
 }

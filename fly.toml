@@ -1,0 +1,140 @@
+app = "aegis-core"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Single combined process — entrypoint dispatches based on PROCESS_ROLE.
+# `combined` (or anything not in {worker, http}) → telegramCli (HTTP + worker + telegram).
+[processes]
+  app = "node dist/server.js"
+
+# Non-secret config. Secrets (DATABASE_URL, REDIS_URL, API keys, Telegram tokens,
+# Privy secret, etc.) are set via `fly secrets set` — see deploy notes below.
+[env]
+  NODE_ENV = "production"
+  LOG_LEVEL = "info"
+  LOG_PRETTY = "false"
+  PROCESS_ROLE = "combined"
+
+  # HTTP
+  HTTP_API_PORT = "4000"
+
+  # OpenAI
+  OPENAI_MODEL = "gpt-4o-mini"
+  OPENAI_CONCURRENCY = "6"
+  MAX_TOOL_ROUNDS = "10"
+  MESSAGE_HISTORY_LIMIT = "30"
+
+  # Pinecone
+  PINECONE_INDEX_NAME = "memora-v2"
+  PINECONE_HOST = "https://memora-v2-wj7o5m6.svc.aped-4627-b74a.pinecone.io"
+
+  # Privy verify cache
+  PRIVY_VERIFY_CACHE_TTL_MS = "300000"
+  PRIVY_VERIFY_CACHE_MAX = "5000"
+
+  # Search / external APIs
+  TAVILY_CACHE_TTL_SECONDS = "300"
+  RELAY_API_URL = "https://api.relay.link"
+  RELAY_QUOTE_CACHE_TTL_SECONDS = "15"
+
+  # Mini-app launcher URL (override after FE is deployed)
+  MINI_APP_URL = "https://aegis-mini-app.vercel.app/"
+
+  # DB pool — total PG conns = replicas × DB_POOL_MAX + 1.
+  DB_POOL_MAX = "25"
+  DB_POOL_IDLE_TIMEOUT_MS = "30000"
+  DB_POOL_CONNECTION_TIMEOUT_MS = "5000"
+
+  # Chain
+  CHAIN_ID = "43114"
+  RPC_URL_FALLBACKS = ""
+  REWARD_CONTROLLER_ADDRESS = "0x519092C2185E4209B43d3ea40cC34D39978073A7"
+  AVAX_USDC = "0xB97EF9Ef8734C71904D8002F8b6Bc66Dd9c48a6E"
+  FUJI_USDC = "0x5425890298aed601595a70AB815c96711a31Bc65"
+  BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+  ETH_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+  POLYGON_USDC = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+  ARB_USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
+  OP_USDC = "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85"
+  BSC_USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
+  BSC_RPC_URL = "https://bsc-rpc.publicnode.com"
+  VITE_CHAIN_RPC_URL = "https://api.avax.network/ext/bc/C/rpc"
+
+  DELEGATION_TTL_SECONDS = "604800"
+  TOKEN_CRAWLER_INTERVAL_MS = "9000000"
+
+  # Yield optimizer
+  YIELD_ENABLED_CHAIN_IDS = "43114"
+  YIELD_IDLE_USDC_THRESHOLD_USD = "10"
+  YIELD_POOL_SCAN_INTERVAL_MS = "120000"
+  YIELD_USER_SCAN_INTERVAL_MS = "21600000"
+  YIELD_REPORT_UTC_HOUR = "9"
+  YIELD_REPORT_INTERVAL_MS = "0"
+  YIELD_NUDGE_COOLDOWN_SEC = "1200"
+
+  # Portfolio + result-card
+  PORTFOLIO_PROVIDER = "ankr"
+  RESULT_CARD_INTERPRETER_ENABLED = "true"
+  RESULT_CARD_INTERPRETER_MODEL = "gpt-4o-mini"
+
+  # Prediction markets
+  PREDICTION_MARKETS_ENABLED = "true"
+  PREDICTION_MARKETS_FETCH_INTERVAL_MS = "1800000"
+  PREDICTION_MARKETS_GAMMA_API = "https://gamma-api.polymarket.com"
+  PREDICTION_MARKETS_MAX_FETCH_PAGES = "4"
+  PREDICTION_MARKETS_TOP_N = "100"
+  PREDICTION_MARKETS_MIN_OI_USD = "50000"
+  PREDICTION_MARKETS_MIN_7D_VOLUME_USD = "20000"
+  PREDICTION_MARKETS_MIN_DAYS = "3"
+  PREDICTION_MARKETS_MAX_DAYS = "60"
+  PREDICTION_MARKETS_CLASSIFIER_MODEL = "gpt-4o-mini"
+  PREDICTION_MARKETS_MAX_CRITERIA_CHARS = "4000"
+  PREDICTION_MARKETS_PROMPT_VERSION = "v1"
+  PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC = "86400"
+  PREDICTION_MARKETS_RECLUSTER_DELTA = "10"
+  PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS = "86400000"
+  PREDICTION_MARKETS_BROADCAST_CONCURRENCY = "5"
+  PREDICTION_MARKETS_FINDINGS_ENABLED = "true"
+  PREDICTION_MARKETS_DETECTOR_MODEL = "gpt-4o-mini"
+  PREDICTION_MARKETS_DETECTOR_CONCURRENCY = "3"
+  PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC = "1800"
+  PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS = "50"
+  PREDICTION_MARKETS_VERIFY_FRESHNESS_MS = "60000"
+  PREDICTION_MARKETS_ODDS_DRIFT_TOLERANCE_BPS = "300"
+  PREDICTION_MARKETS_MIN_GAP_BPS = "100"
+  PREDICTION_MARKETS_FINDING_MIN_LIQUIDITY_USD = "25000"
+  PREDICTION_MARKETS_POLYMARKET_AFFILIATE = ""
+  PREDICTION_MARKETS_BETS_ENABLED = "false"
+
+# Public HTTP service.
+[http_service]
+  internal_port = 4000
+  force_https = true
+  auto_stop_machines = "off"      # background jobs (telegram, scanners) must stay hot
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+# Lightweight TCP healthcheck on the HTTP port — no app-level /health route required.
+[[services]]
+  protocol = "tcp"
+  internal_port = 4000
+  processes = ["app"]
+
+  [[services.tcp_checks]]
+    interval = "15s"
+    timeout = "2s"
+    grace_period = "30s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 2

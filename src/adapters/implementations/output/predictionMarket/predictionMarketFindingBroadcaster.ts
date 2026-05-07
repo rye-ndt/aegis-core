@@ -20,6 +20,8 @@ import type {
 } from "../../../../use-cases/interface/input/resultCard.types";
 import { renderResultCard } from "../artifactRenderer/resultCard.render";
 
+import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
+
 const log = createLogger("predictionMarketFindingBroadcaster");
 
 const BROADCAST_DEDUPE_TTL_SEC = 7 * 24 * 60 * 60;
@@ -90,18 +92,35 @@ function buildResult(args: {
     { label: `Side B — ${finding.sideB.label}`, value: finding.sideB.rationale },
   ];
 
-  const nextActions: ResultAction[] = [
-    {
-      label: `Bet ${finding.sideA.label}`.slice(0, 60),
-      kind: "url",
-      payload: polymarketUrl(marketById.get(finding.sideA.marketId), affiliateParam),
-    },
-    {
-      label: `Bet ${finding.sideB.label}`.slice(0, 60),
-      kind: "url",
-      payload: polymarketUrl(marketById.get(finding.sideB.marketId), affiliateParam),
-    },
-  ];
+  // When bet execution is enabled (stage 4), the side buttons become callbacks
+  // that drop the user into the place-bet chat flow (`PlaceBetCapability`).
+  // When disabled, we keep the legacy URL-out behaviour so the finding card
+  // remains useful even before the bet pipeline is turned on for a deployment.
+  const nextActions: ResultAction[] = PREDICTION_MARKETS_ENV.betsEnabled
+    ? [
+        {
+          label: `Bet ${finding.sideA.label}`.slice(0, 60),
+          kind: "callback",
+          payload: `place_bet:${finding.findingId}:${finding.sideA.marketId}:A`,
+        },
+        {
+          label: `Bet ${finding.sideB.label}`.slice(0, 60),
+          kind: "callback",
+          payload: `place_bet:${finding.findingId}:${finding.sideB.marketId}:B`,
+        },
+      ]
+    : [
+        {
+          label: `Bet ${finding.sideA.label}`.slice(0, 60),
+          kind: "url",
+          payload: polymarketUrl(marketById.get(finding.sideA.marketId), affiliateParam),
+        },
+        {
+          label: `Bet ${finding.sideB.label}`.slice(0, 60),
+          kind: "url",
+          payload: polymarketUrl(marketById.get(finding.sideB.marketId), affiliateParam),
+        },
+      ];
 
   return {
     status: "success",

@@ -239,6 +239,20 @@
       "when": 1778889600003,
       "tag": "0035_fantastic_tombstone",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1778889600004,
+      "tag": "0036_prediction_market_bets",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1778889600005,
+      "tag": "0037_pm_bets_refund_flags",
+      "breakpoints": true
     }
   ]
 }

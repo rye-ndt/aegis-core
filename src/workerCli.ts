@@ -49,6 +49,9 @@ const log = createLogger("workerCli");
   const predictionMarketScanJob = inject.getPredictionMarketScanJob();
   predictionMarketScanJob?.start();
 
+  const polymarketPositionPollerJob = inject.getPolymarketPositionPollerJob();
+  polymarketPositionPollerJob?.start();
+
   log.info(
     {
       jobs: {
@@ -56,6 +59,7 @@ const log = createLogger("workerCli");
         idleScan: !!userIdleScanJob,
         report: !!yieldReportJob,
         predictionMarketScan: !!predictionMarketScanJob,
+        polymarketPositionPoller: !!polymarketPositionPollerJob,
       },
     },
     "background jobs status",
@@ -86,6 +90,7 @@ const log = createLogger("workerCli");
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
     predictionMarketScanJob?.stop();
+    polymarketPositionPollerJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();
@@ -99,6 +104,7 @@ const log = createLogger("workerCli");
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
     predictionMarketScanJob?.stop();
+    polymarketPositionPollerJob?.stop();
     httpServer.stop();
     await bot.stop();
     await inject.getRedis()?.quit();

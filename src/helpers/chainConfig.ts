@@ -25,6 +25,23 @@ interface YieldChainConfig {
   aave?: { poolAddress: Address; dataProviderAddress: Address };
 }
 
+/**
+ * Per-chain Polymarket integration addresses (stage-4 prediction-market bets).
+ * Lives on the chain entry to keep all chain-specific addresses in one place
+ * (chain-agnostic rule, CLAUDE.md). Polymarket is currently Polygon-only;
+ * other chains leave this `null`.
+ */
+interface PolymarketChainConfig {
+  /** Binary-outcome CTF Exchange. Maker EOAs must `USDC.approve(...)` this. */
+  ctfExchange: Address;
+  /** Negative-risk CTF Exchange (multi-outcome). Approval also required. */
+  negRiskCtfExchange: Address;
+  /** Negative-risk adapter contract. */
+  negRiskAdapter: Address;
+  /** ConditionalTokens (ERC-1155). EOAs must setApprovalForAll(exchange, true). */
+  conditionalTokens: Address;
+}
+
 interface ChainEntry {
   chain: Chain;
   nativeSymbol: string;
@@ -36,6 +53,8 @@ interface ChainEntry {
   aliases: string[];
   /** Relay.link supports this chain for quotes/executions. */
   relayEnabled: boolean;
+  /** Polymarket integration addresses. Only populated on Polygon. */
+  polymarket?: PolymarketChainConfig;
   /**
    * Env var name that holds the chain's canonical USDC contract address.
    * Looked up at runtime via process.env so deployments can rotate addresses
@@ -139,6 +158,12 @@ const CHAIN_REGISTRY: Record<number, ChainEntry> = {
     relayEnabled: true,
     usdcEnvKey: "POLYGON_USDC",
     ankrBlockchain: "polygon",
+    polymarket: {
+      ctfExchange: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as Address,
+      negRiskCtfExchange: "0xC5d563A36AE78145C45a50134d48A1215220f80a" as Address,
+      negRiskAdapter: "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296" as Address,
+      conditionalTokens: "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045" as Address,
+    },
   },
   42161: {
     chain: arbitrum,
@@ -205,6 +230,15 @@ export function getAaveMarketId(chainId: number, tokenAddress: Address): string 
 /** Returns the Ankr `blockchain` slug for `ankr_getAccountBalance`, or null if unsupported. */
 export function getAnkrBlockchain(chainId: number): string | null {
   return CHAIN_REGISTRY[chainId]?.ankrBlockchain ?? null;
+}
+
+/**
+ * Returns the chain's Polymarket integration addresses, or null when the chain
+ * is not a Polymarket host (i.e. anything that isn't Polygon today). Stage-4
+ * adapter calls go through this to stay chain-agnostic at the call site.
+ */
+export function getPolymarketConfig(chainId: number): PolymarketChainConfig | null {
+  return CHAIN_REGISTRY[chainId]?.polymarket ?? null;
 }
 
 export function getYieldConfig(chainId: number): YieldChainConfig | null {

@@ -15,3 +15,4 @@ __tests__
 eslint.config.*
 .prettierrc*
 .prettierignore
+fly-secrets.sh

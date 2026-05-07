@@ -16,6 +16,7 @@ import { DrizzleYieldRepository } from "../yield/yieldRepository";
 import { DrizzleLoyaltyRepo } from "./repositories/loyalty.repo";
 import { DrizzleRecipientNotificationRepo } from "./repositories/recipientNotification.repo";
 import { DrizzlePredictionMarketRepo } from "./repositories/predictionMarket.repo";
+import { DrizzlePredictionMarketBetRepo } from "./repositories/predictionMarketBet.repo";
 
 export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly users: DrizzleUserRepo;
@@ -33,6 +34,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
   readonly loyaltyRepo: DrizzleLoyaltyRepo;
   readonly recipientNotifications: DrizzleRecipientNotificationRepo;
   readonly predictionMarkets: DrizzlePredictionMarketRepo;
+  readonly predictionMarketBets: DrizzlePredictionMarketBetRepo;
 
   constructor(config: PostgresConfig) {
     super(config);
@@ -51,6 +53,7 @@ export class DrizzleSqlDB extends PostgresDB implements ISqlDB {
     this.loyaltyRepo = new DrizzleLoyaltyRepo(this.db);
     this.recipientNotifications = new DrizzleRecipientNotificationRepo(this.db);
     this.predictionMarkets = new DrizzlePredictionMarketRepo(this.db);
+    this.predictionMarketBets = new DrizzlePredictionMarketBetRepo(this.db);
   }
 
 }

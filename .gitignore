@@ -24,3 +24,5 @@ npm-debug.log*
 
 # TypeScript cache
 *.tsbuildinfo
+
+fly-secrets.sh

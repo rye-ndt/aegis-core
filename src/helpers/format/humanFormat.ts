@@ -53,6 +53,25 @@ export function formatUsd(usd: number): string {
   return `${sign}$${abs.toFixed(2)}`;
 }
 
+/** USDC cents → `$X.YZ`. `null`/`undefined` renders as em-dash. */
+export function formatUsdcCents(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  return formatUsd(cents / 100);
+}
+
+/** Basis-points price (0..10_000) → `$0.42`. `null`/`undefined` renders as em-dash. */
+export function formatPriceBps(bps: number | null | undefined): string {
+  if (bps == null) return "—";
+  return formatUsd(bps / 10_000);
+}
+
+/** Signed PnL in cents → `+$1.20` / `-$0.50`. `null`/`undefined` renders as em-dash. */
+export function formatPnlCents(cents: number | null | undefined): string {
+  if (cents == null) return "—";
+  const sign = cents >= 0 ? "+" : "";
+  return `${sign}${formatUsd(cents / 100)}`;
+}
+
 /**
  * Relative-time formatter ("just now", "3 min ago", "2 hours ago", "5 days ago").
  * Capabilities pass an absolute epoch in seconds; we compute the delta against

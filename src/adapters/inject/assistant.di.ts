@@ -66,13 +66,20 @@ import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
 import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
 import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { PredictionMarketScanJob } from "../implementations/input/jobs/predictionMarketScanJob";
+import { PolymarketPositionPollerJob } from "../implementations/input/jobs/polymarketPositionPollerJob";
 import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
 import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
 import { OpenAIPredictionMarketDetector } from "../implementations/output/predictionMarket/openaiPredictionMarketDetector";
 import { PredictionMarketBroadcaster } from "../implementations/output/predictionMarket/predictionMarketBroadcaster";
 import { PredictionMarketFindingBroadcaster } from "../implementations/output/predictionMarket/predictionMarketFindingBroadcaster";
+import { PredictionMarketReceiptBroadcaster } from "../implementations/output/predictionMarket/predictionMarketReceiptBroadcaster";
+import { PolymarketAdapter } from "../implementations/output/predictionMarket/polymarketAdapter";
 import { PredictionMarketVerifier } from "../implementations/output/predictionMarket/predictionMarketVerifier";
 import { PredictionMarketScanUseCase } from "../../use-cases/implementations/predictionMarketScan.usecase";
+import { PredictionMarketBetUseCase } from "../../use-cases/implementations/predictionMarketBet.usecase";
+import { DrizzlePredictionMarketBetRepo } from "../implementations/output/sqlDB/repositories/predictionMarketBet.repo";
+import { PlaceBetCapability } from "../implementations/output/capabilities/placeBetCapability";
+import { ClosePositionCapability } from "../implementations/output/capabilities/closePositionCapability";
 import { PREDICTION_MARKETS_ENV } from "../../helpers/env/predictionMarketEnv";
 import type { IPredictionMarketBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketBroadcaster";
 import type { IPredictionMarketClassifier } from "../../use-cases/interface/predictionMarket/IPredictionMarketClassifier";
@@ -81,6 +88,10 @@ import type { IPredictionMarketFindingBroadcaster } from "../../use-cases/interf
 import type { IPredictionMarketProvider } from "../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
 import type { IPredictionMarketRepository } from "../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
 import type { IPredictionMarketVerifier } from "../../use-cases/interface/predictionMarket/IPredictionMarketVerifier";
+import type { IPredictionMarketBetRepository } from "../../use-cases/interface/predictionMarket/IPredictionMarketBetRepository";
+import type { IPredictionMarketBetUseCase } from "../../use-cases/interface/predictionMarket/IPredictionMarketBetUseCase";
+import type { IPredictionMarketReceiptBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
+import type { IPolymarketAdapter } from "../../use-cases/interface/predictionMarket/IPolymarketAdapter";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
 import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
@@ -207,6 +218,10 @@ export class AssistantInject {
   private _predictionMarketScanUseCase: PredictionMarketScanUseCase | null = null;
   private _predictionMarketScanJob: PredictionMarketScanJob | null = null;
   private _predictionMarketNoStartWarned = false;
+  private _polymarketAdapter: IPolymarketAdapter | null = null;
+  private _predictionMarketBetUseCase: IPredictionMarketBetUseCase | null = null;
+  private _predictionMarketReceiptBroadcaster: IPredictionMarketReceiptBroadcaster | null = null;
+  private _polymarketPositionPollerJob: PolymarketPositionPollerJob | null = null;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -846,6 +861,17 @@ export class AssistantInject {
       }),
     );
 
+    const betUseCase = this.getPredictionMarketBetUseCase();
+    if (betUseCase) {
+      registry.register(new PlaceBetCapability(betUseCase));
+      registry.register(new ClosePositionCapability(betUseCase));
+    } else {
+      log.info(
+        { reason: "bet-use-case-unavailable" },
+        "place_bet/close_position capabilities skipped",
+      );
+    }
+
     // Free-text fallback: the LLM loop. Handles anything that isn't a slash
     // command and isn't continuing a pending capability flow.
     registry.registerDefault(new AssistantChatCapability(this.getUseCase()));
@@ -1403,6 +1429,74 @@ export class AssistantInject {
     return this._predictionMarketScanJob;
   }
 
+  getPredictionMarketBetRepo(): IPredictionMarketBetRepository {
+    return this.getSqlDB().predictionMarketBets;
+  }
+
+  getPolymarketAdapter(): IPolymarketAdapter {
+    if (!this._polymarketAdapter) {
+      this._polymarketAdapter = new PolymarketAdapter(PREDICTION_MARKETS_ENV.clobApiBase);
+    }
+    return this._polymarketAdapter;
+  }
+
+  getPredictionMarketBetUseCase(): IPredictionMarketBetUseCase | undefined {
+    if (this._predictionMarketBetUseCase) return this._predictionMarketBetUseCase;
+    if (!PREDICTION_MARKETS_ENV.betsEnabled) {
+      log.info(
+        { feature: "predictionMarketBets", reason: "disabled" },
+        "betUseCase not built — set PREDICTION_MARKETS_BETS_ENABLED=true to enable",
+      );
+      return undefined;
+    }
+    this._predictionMarketBetUseCase = new PredictionMarketBetUseCase(
+      this.getPredictionMarketBetRepo(),
+      this.getSqlDB().userProfiles,
+      this.getPolymarketAdapter(),
+    );
+    return this._predictionMarketBetUseCase;
+  }
+
+  getPredictionMarketReceiptBroadcaster(): IPredictionMarketReceiptBroadcaster | undefined {
+    if (this._predictionMarketReceiptBroadcaster) return this._predictionMarketReceiptBroadcaster;
+    const bot = this.getBot();
+    if (!bot) return undefined;
+    const sqlDB = this.getSqlDB();
+    this._predictionMarketReceiptBroadcaster = new PredictionMarketReceiptBroadcaster({
+      tgApi: bot.api,
+      getChatId: async (userId) => {
+        const session = await sqlDB.telegramSessions.findByUserId(userId);
+        return session?.telegramChatId ?? null;
+      },
+      affiliateParam: PREDICTION_MARKETS_ENV.polymarketAffiliateParam,
+    });
+    return this._predictionMarketReceiptBroadcaster;
+  }
+
+  getPolymarketPositionPollerJob(): PolymarketPositionPollerJob | undefined {
+    if (this._polymarketPositionPollerJob) return this._polymarketPositionPollerJob;
+    if (!PREDICTION_MARKETS_ENV.betsEnabled) return undefined;
+    const useCase = this.getPredictionMarketBetUseCase();
+    const broadcaster = this.getPredictionMarketReceiptBroadcaster();
+    const redis = this.getRedis();
+    if (!useCase || !broadcaster || !redis) {
+      log.warn(
+        { feature: "predictionMarketBets", reason: "deps-missing" },
+        "polymarketPositionPollerJob not started",
+      );
+      return undefined;
+    }
+    this._polymarketPositionPollerJob = new PolymarketPositionPollerJob({
+      betUseCase: useCase,
+      betRepo: this.getPredictionMarketBetRepo(),
+      receiptBroadcaster: broadcaster,
+      redis,
+      intervalMs: PREDICTION_MARKETS_ENV.positionPollIntervalMs,
+      concurrency: PREDICTION_MARKETS_ENV.broadcastConcurrency,
+    });
+    return this._polymarketPositionPollerJob;
+  }
+
   getHttpApiServer(
     signingRequestUseCase?: ISigningRequestUseCase,
   ): HttpApiServer {
@@ -1429,6 +1523,10 @@ export class AssistantInject {
       this.getSubgraphPrincipalProvider(),
       this.getPendingIntentStore(),
       () => this.getCapabilityDispatcher(),
+      this.getPredictionMarketBetUseCase(),
+      this.getPolymarketAdapter(),
+      this.getPredictionMarketReceiptBroadcaster(),
+      this.getRelayClient(),
     );
   }
 

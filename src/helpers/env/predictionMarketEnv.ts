@@ -53,4 +53,20 @@ export const PREDICTION_MARKETS_ENV = {
   findingMinLiquidityUsd: num("PREDICTION_MARKETS_FINDING_MIN_LIQUIDITY_USD", 25_000),
   polymarketAffiliateParam: str("PREDICTION_MARKETS_POLYMARKET_AFFILIATE", ""),
   findingsEnabled: bool("PREDICTION_MARKETS_FINDINGS_ENABLED", false),
+  betsEnabled: bool("PREDICTION_MARKETS_BETS_ENABLED", false),
+  betChainId: num("PREDICTION_MARKETS_BET_CHAIN_ID", 137),
+  minStakeUsdc: num("PREDICTION_MARKETS_MIN_STAKE_USDC", 1),
+  maxStakeUsdc: num("PREDICTION_MARKETS_MAX_STAKE_USDC", 100),
+  maxOrderDriftBps: num("PREDICTION_MARKETS_MAX_ORDER_DRIFT_BPS", 200),
+  orderSlippageBps: num("PREDICTION_MARKETS_ORDER_SLIPPAGE_BPS", 50),
+  unfilledTimeoutMs: num("PREDICTION_MARKETS_UNFILLED_TIMEOUT_MS", 30_000),
+  bridgeTimeoutMs: num("PREDICTION_MARKETS_BRIDGE_TIMEOUT_MS", 90_000),
+  positionPollIntervalMs: num("PREDICTION_MARKETS_POSITION_POLL_INTERVAL_MS", 5 * 60 * 1000),
+  betIntentTtlMs: num("PREDICTION_MARKETS_INTENT_TTL_MS", 60 * 60 * 1000),
+  clobApiBase: str("PREDICTION_MARKETS_CLOB_API", "https://clob.polymarket.com"),
+  // 0.05 MATIC funds the EOA for one-time Polymarket approvals during setup.
+  maticBootstrapWei: str("PREDICTION_MARKETS_MATIC_BOOTSTRAP_WEI", "50000000000000000"),
+  // AES-256-GCM master key, 32 bytes hex (64 chars). REQUIRED before
+  // `betsEnabled=true`; storePolymarketCreds throws if empty.
+  credsKeyHex: str("PREDICTION_MARKETS_CREDS_KEY_HEX", ""),
 } as const;
