@@ -65,6 +65,22 @@ primary_region = "iad"
   DELEGATION_TTL_SECONDS = "604800"
   TOKEN_CRAWLER_INTERVAL_MS = "9000000"
 
+  # Aegis Guard — initial session-key delegation caps (human units) and
+  # non-stable re-approval multiplier. See helpers/env/delegationEnv.ts.
+  INITIAL_USDC = "100"
+  INITIAL_USDT = "100"
+  INITIAL_NATIVE = "10"
+  NON_STABLE_REAPPROVAL_MULTIPLIER = "10"
+
+  # Session-key on-chain rate-limit policy. Reported to FE via
+  # GET /delegation/session-policy and installed at the kernel validator on
+  # session-key install. Bump SESSION_KEY_POLICY_VERSION in lockstep with
+  # fe/privy-auth crypto.ts whenever the validator policy shape changes —
+  # FE forces re-install on mismatch.
+  RATE_LIMIT_TX_COUNT = "10"
+  RATE_LIMIT_INTERVAL_SEC = "60"
+  SESSION_KEY_POLICY_VERSION = "4"
+
   # Yield optimizer
   YIELD_ENABLED_CHAIN_IDS = "43114"
   YIELD_IDLE_USDC_THRESHOLD_USD = "10"
