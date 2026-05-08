@@ -23,7 +23,7 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 | Portfolio | Ankr (`ankr_getAccountBalance`) + RPC fallback |
 | Transfers | Ankr (`ankr_getTransactionsByAddress` + `ankr_getTokenTransfers`) merged + cached |
 | Stocks | Aster perpetuals on BSC (Diamond `0x1b6F…feb0`), 1× leverage, USDC.bsc (18-dec) collateral, Relay-bridged from home chain |
-| Deployment | Cloud Run + Neon Postgres + Upstash Redis + GitHub Actions (WIF) |
+| Deployment | Fly.io (`aegis-core`, region `iad`) + Neon Postgres + Upstash Redis |
 
 ## Non-negotiable rules
 1. **Hexagonal architecture.** Use-case layer imports only `use-cases/interface/`. No adapter-to-adapter cross-imports. Assembly only in `assistant.di.ts`.
@@ -239,7 +239,7 @@ message
 | `REDIS_URL` | — | Redis (optional; adapters fall back to in-memory) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_CONCURRENCY` | — / `gpt-4o` / `6` | LLM + embeddings; per-replica p-limit cap |
 | `TELEGRAM_BOT_TOKEN`, `TG_API_ID`, `TG_API_HASH`, `TG_SESSION` | — | Telegram + MTProto |
-| `HTTP_API_PORT`, `MINI_APP_URL` | `4000` / — | (Cloud Run `PORT` remapped in `entrypoint.ts`) |
+| `HTTP_API_PORT`, `MINI_APP_URL` | `4000` / — | (Fly maps `internal_port = 4000` in `fly.toml`) |
 | `CHAIN_ID`, `RPC_URL`, `RPC_URL_FALLBACKS` | `43114` / from CHAIN_CONFIG | Resolved against `CHAIN_REGISTRY`; comma-separated fallbacks |
 | `PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `PRIVY_VERIFY_CACHE_TTL_MS`, `PRIVY_VERIFY_CACHE_MAX` | — / `300000` / `5000` | Privy + LRU verifyTokenLite |
 | `ANKR_API_KEY`, `PORTFOLIO_PROVIDER` | — / `ankr` (\|`rpc`) | Optional Ankr; absent → public endpoint (warns at startup). Shared by portfolio + transfer history. |
@@ -325,16 +325,19 @@ The `drizzle/` folder is merge-hostile. The `_journal.json`, per-migration `meta
 
 ---
 
-## Production topology (Cloud Run, `us-east1`)
+## Production topology (Fly.io, app `aegis-core`, region `iad`)
 
-| Service | Role | Public | Scaling |
+| Process | Role | Public | Scaling |
 |---|---|---|---|
-| `aegis-http` | `http` | yes | 0–3, concurrency=80 |
-| `aegis-worker` | `worker` | no (IAM) | pinned 1, no CPU throttle |
+| `app` (single combined machine) | `combined` — http + worker + telegram in one node (`PROCESS_ROLE=combined`, dispatched by `entrypoint.ts`) | yes | `min_machines_running = 1`, `auto_stop_machines = "off"`, `auto_start_machines = true` |
 
-Single image `us-east1-docker.pkg.dev/aegis-494004/aegis/aegis-backend:<sha>`. Both run migrations on boot. Worker pinned at 1 (owns gramJS MTProto socket + cron timers — CPU throttle freezes timers; >1 replica duplicates polling). External: Neon Postgres + Upstash Redis (both `us-east-1`). Secrets via Google Secret Manager. CI/CD: GitHub Actions + WIF, no JSON SA keys. Auto-deploy on `main`. WIF pool `github-pool`, SA `aegis-deployer`. Matrix deploy of `aegis-http` + `aegis-worker` in parallel.
+VM: `shared-cpu-2x`, `cpus = 2`, `memory = "2gb"`. HTTP service: `internal_port = 4000`, `force_https = true`, concurrency `soft_limit = 200` / `hard_limit = 250`. Lightweight TCP healthcheck on `:4000` (no app-level `/health` required by Fly). Boot runs migrations. The combined process owns the gramJS MTProto socket + cron timers, so the machine must stay hot — `auto_stop_machines = "off"` is mandatory; do not raise replica count without first sharding telegram polling and cron locks (>1 replica would duplicate both). External: Neon Postgres + Upstash Redis (both `us-east-1`, co-located with `iad`).
 
-**Image build (`be/Dockerfile`).** Two-stage, both `node:20.19-slim` (debian/glibc — `prebuild-install` finds glibc prebuilts for `bufferutil`/`utf-8-validate`, usually skipping the gyp compile entirely). Builder `apt-get install python3 make g++` (fallback for any native dep without a prebuilt) under BuildKit cache mounts (`/var/cache/apt`, `/var/lib/apt/lists`). `npm ci --prefer-offline` with `--mount=type=cache,target=/root/.npm`, then a single esbuild bundle from `src/entrypoint.ts` → `dist/server.js` (minified, **no sourcemap** — re-add `--sourcemap=external` and copy the `.map` to a Sentry-upload step OUTSIDE the runtime COPY if you ever wire one up). **Layer ordering matters for cache reuse**: `package*.json` copy and `npm ci` come BEFORE `tsconfig.json` and `src/`, so the typical edit-src rebuild only re-runs the esbuild layer (a few seconds). Build-arg `MINIFY` (default `true`) — pass `--build-arg MINIFY=false` for dev iteration, ~3× faster esbuild for a 3× larger bundle. **Required runtime native modules**: gramjs/`websocket` hard-require `bufferutil` (no JS fallback), so we copy `bufferutil`, `utf-8-validate`, `node-gyp-build` from builder into the runtime stage. Runtime image copies the pino transport tree + those three native packages into `node_modules/`. Drizzle SQL ships under `/app/drizzle` for boot-time migrate. `USER node` is set. **Cross-arch builds (Apple Silicon → linux/amd64) run under QEMU and are slow** — build natively for the deploy target where possible (`--platform linux/arm64` on Mac for arm64 servers, or build directly on the amd64 server).
+**Secrets.** Managed via `fly secrets set` against app `aegis-core`. Source of truth is the local, gitignored `be/fly-secrets.sh` (idempotent — re-running overwrites). Workflow: edit the script, `./fly-secrets.sh` (uses `--stage`, no auto-restart), then `fly deploy --app aegis-core` to apply. For one-off rotations, `fly secrets set KEY=value --app aegis-core` triggers a rolling restart. List with `fly secrets list --app aegis-core`. Non-secret env lives inline in `fly.toml [env]`.
+
+**Deploy.** Manual: `fly deploy --app aegis-core` from `be/`. Fly builds the Dockerfile remotely (or locally with `--local-only`) and rolls the machine.
+
+**Image build (`be/Dockerfile`).** Two-stage, both `node:20.19-slim` (debian/glibc — `prebuild-install` finds glibc prebuilts for `bufferutil`/`utf-8-validate`, usually skipping the gyp compile entirely). Builder `apt-get install python3 make g++` (fallback for any native dep without a prebuilt) under BuildKit cache mounts (`/var/cache/apt`, `/var/lib/apt/lists`). `npm ci --prefer-offline` with `--mount=type=cache,target=/root/.npm`, then a single esbuild bundle from `src/entrypoint.ts` → `dist/server.js` (minified, **no sourcemap** — re-add `--sourcemap=external` and copy the `.map` to a Sentry-upload step OUTSIDE the runtime COPY if you ever wire one up). **Layer ordering matters for cache reuse**: `package*.json` copy and `npm ci` come BEFORE `tsconfig.json` and `src/`, so the typical edit-src rebuild only re-runs the esbuild layer (a few seconds). Build-arg `MINIFY` (default `true`) — pass `--build-arg MINIFY=false` for dev iteration, ~3× faster esbuild for a 3× larger bundle. **Required runtime native modules**: gramjs/`websocket` hard-require `bufferutil` (no JS fallback), so we copy `bufferutil`, `utf-8-validate`, `node-gyp-build` from builder into the runtime stage. Runtime image copies the pino transport tree + those three native packages into `node_modules/`. Drizzle SQL ships under `/app/drizzle` for boot-time migrate. `USER node` is set. **Cross-arch builds (Apple Silicon → linux/amd64) run under QEMU and are slow** — Fly's remote builder is amd64 native, so `fly deploy` (without `--local-only`) avoids the QEMU penalty.
 
 ---
 

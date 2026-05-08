@@ -238,6 +238,7 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       amountFormatted: record.amountFormatted,
       tokenSymbol: record.tokenSymbol,
       planKind: record.planKind,
+      silentResolution: record.silentResolution,
     });
   }
 

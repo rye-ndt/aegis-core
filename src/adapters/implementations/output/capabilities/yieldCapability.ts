@@ -378,6 +378,11 @@ export class YieldCapability implements Capability<YieldRunParams> {
         tokenAddress: attributesSpend ? tokenAddress!.toLowerCase() : undefined,
         amountRaw: attributesSpend ? spendAmountRaw : undefined,
         preview: i === 0 ? preview : undefined,
+        // Suppress notifyResolved's generic card on intermediate steps — the
+        // capability emits the rich final card after the last step. Without
+        // this the user gets "✅ Transaction confirmed" between approve and
+        // supply and assumes the deposit is already complete.
+        silentResolution: !isLastStep,
       };
       await signingUseCase.create(record);
 

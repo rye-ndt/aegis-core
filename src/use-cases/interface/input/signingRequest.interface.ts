@@ -29,6 +29,11 @@ export type SigningResolutionEvent = {
   /** Forwarded from `SigningRequestRecord.planKind` so the resolved-side
    * UX (notifyResolved) can branch on stock-recovery completions. */
   planKind?: 'recovery';
+  /** Forwarded from `SigningRequestRecord.silentResolution`. When true,
+   * `notifyResolved` skips the generic success/rejection card — used for
+   * intermediate steps of multi-step capability flows. Failure-with-errorCode
+   * branches still fire (those are recoverable user-facing prompts). */
+  silentResolution?: boolean;
 };
 
 export interface ISigningRequestUseCase {

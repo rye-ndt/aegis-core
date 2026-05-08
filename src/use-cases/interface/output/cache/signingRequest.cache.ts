@@ -43,6 +43,18 @@ export type SigningRequestRecord = {
    * when undefined the mini-app falls back to today's raw view.
    */
   preview?: IntentResult;
+  /**
+   * When true, `notifyResolved` skips the generic "Transaction confirmed" /
+   * "Transaction rejected" card on resolution. Used for intermediate steps of
+   * multi-step flows (e.g. yield approve → supply, swap approve → swap) where
+   * the orchestrating capability emits its own rich result card after the
+   * FINAL step. Without this flag the user gets a misleading mid-flow success
+   * card after step 1 and assumes the operation is done.
+   *
+   * Failure cards (insufficient balance / errorCode branches) still fire even
+   * when set — those are recoverable user-facing prompts, not generic noise.
+   */
+  silentResolution?: boolean;
 };
 
 export interface ISigningRequestCache {

@@ -292,6 +292,11 @@ export class SwapCapability implements Capability<SwapParams> {
           : undefined,
         amountRaw: attributesSpend ? params.amountRaw : undefined,
         preview: previewForStep,
+        // Suppress notifyResolved's generic card on intermediate steps — the
+        // swap capability renders its own final card. Otherwise the user sees
+        // "✅ Transaction confirmed" between approve and swap and assumes the
+        // swap is already done.
+        silentResolution: !isLastStep,
       };
       await this.deps.signingRequestUseCase.create(record);
 

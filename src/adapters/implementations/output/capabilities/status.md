@@ -1,5 +1,29 @@
 # Capabilities Status
 
+## telegram: switch to @grammyjs/runner + suppress mid-flow notify cards — 2026-05-08
+
+**What was done:**
+- `adapters/implementations/input/telegram/bot.ts`: replaced `bot.start()` with `run(bot)` from `@grammyjs/runner` so updates dispatch concurrently. Plain `bot.start()` long-polls sequentially; the next update isn't delivered to middleware until the prior `message:text` handler's promise resolves. Capabilities that `await signingRequest.waitFor(...)` (yield, swap) hold that promise for up to 10 minutes per step, freezing the entire bot from Telegram's perspective. With the runner, ordering is the dispatcher's job, not grammy's.
+- `capabilityDispatcher.usecase.ts`: race-window fix — publish the new `AbortController` to `activeByUserId` SYNCHRONOUSLY (before any await) so an even-newer dispatch can find and abort it. With sequential `bot.start()` only one dispatch ran at a time so the prior code (set after `await Promise.all(cancellations)`) was safe; under the runner it's not.
+- New `silentResolution?: boolean` on `SigningRequestRecord` + `SigningResolutionEvent`. When set, `notifyResolved` skips the generic "Transaction confirmed" / bare-"Transaction rejected" cards. `errorCode` branches (insufficient_balance / generic) still fire — they are recoverable user-facing prompts, not noise.
+- `yieldCapability.executeSignSteps` and `swapCapability` mark every non-final step with `silentResolution: true`. The capability still emits its rich result card after the last step.
+
+**Why over alternatives:**
+- Considered keeping `bot.start()` and refactoring capabilities to be event-driven (no `waitFor`). Rejected for now — that's a 1-2 week refactor across yield/swap/buy/placeBet. The runner switch is one line and the existing per-user supersession (`activeByUserId` + `cancelPendingForUser`) already gives correct ordering when updates arrive concurrently. See "Future direction" below.
+- Considered tracking step index (e.g. `multiStep: { index, total }`) and rendering "Step 1/2 done — sign step 2" instead of suppressing. Rejected — the FE already auto-presents step 2 via `fetchNextRequest`, so a Telegram nudge would race and confuse. Silence is the correct intermediate UX; the rich final card carries the recap.
+- Considered piping the resolution back through the dispatcher (`dispatcher.resume`) so the capability never blocks. Same reason as alternative #1: bigger surface, same outcome under the runner.
+
+**New conventions to preserve:**
+- Any new multi-step signing flow MUST set `silentResolution: true` on every record except the final step. Forgetting it produces the misleading "✅ Transaction confirmed" mid-flow that prompted this fix.
+- The dispatcher's `activeByUserId` map MUST be written before the first `await` inside `handle()`. Any new pre-await async work goes after the synchronous publish.
+- New `notifyResolved` log modes: `suppressed-silent` (intermediate success), `suppressed-silent-rejected` (intermediate bare rejection).
+
+**User-ignores-signing-button case:**
+- Covered by existing supersession infra now that the message loop is unblocked. User taps `/yield` → first sign request created + `waitFor` parked. User ignores the mini-app and types something else → grammy delivers the new update concurrently → `dispatcher.handle` aborts the prior controller, calls `cancelPendingForUser` which flips the cache record to `expired` and unblocks `waitFor` (it returns `{status:"expired"}`) → yieldCapability returns a "timed out" card, but the dispatcher's signal-aborted check drops that render. The new dispatch processes the user's question normally. No phantom card, no freeze.
+
+**Future direction (not implemented):**
+- Move capabilities to a state-machine model where each event (text, callback, signing_resolved) produces `{ask|ok|terminal|await_signing}` and yields. The dispatcher delivers signing-resolved events directly; `waitFor`/poll is removed. Benefits: no in-process blocking, no per-CLI fanout problem (today the worker process's `waitFor` can't see a `/response` that hits the http process), simpler supersession (just abort the state machine). Tracked separately — too big to bundle here.
+
 ## predictionMarketFindingBroadcaster: per-finding push with Polymarket URL buttons — 2026-05-07
 
 **What was done:**

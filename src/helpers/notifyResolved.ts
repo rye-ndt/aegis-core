@@ -42,12 +42,25 @@ export function buildNotifyResolved(
   userRepo?: IUserDB,
 ): (event: SigningResolutionEvent) => Promise<void> {
   return async (event: SigningResolutionEvent): Promise<void> => {
-    const { requestId, chatId, txHash, rejected, errorCode, errorMessage, data, planKind } = event;
+    const { requestId, chatId, txHash, rejected, errorCode, errorMessage, data, planKind, silentResolution } = event;
     const start = Date.now();
     log.info(
-      { step: "started", chatId, userId: event.userId, rejected, errorCode, hasTxHash: !!txHash, planKind },
+      { step: "started", chatId, userId: event.userId, rejected, errorCode, hasTxHash: !!txHash, planKind, silentResolution: !!silentResolution },
       "notify-resolved",
     );
+
+    // Multi-step flows mark intermediate signing requests `silentResolution`
+    // so the orchestrating capability can render the final rich result card
+    // without this generic mid-flow card racing it. We still fire the
+    // failure-with-errorCode branches below (insufficient balance / generic
+    // error) because those are recoverable nudges the user must see.
+    if (!rejected && silentResolution) {
+      log.info(
+        { step: "succeeded", mode: "suppressed-silent", chatId, requestId, durationMs: Date.now() - start },
+        "notify-resolved",
+      );
+      return;
+    }
 
     if (!rejected) {
       const result = buildSuccessResult(chainId, txHash, data);
@@ -211,6 +224,17 @@ export function buildNotifyResolved(
       await sendCard(tgApi, chatId, result);
       log.info(
         { step: "succeeded", mode: "generic-error", chatId, errorCode, durationMs: Date.now() - start },
+        "notify-resolved",
+      );
+      return;
+    }
+
+    if (silentResolution) {
+      // Bare rejection on a silent intermediate step — the orchestrating
+      // capability already renders a step-failed card via its waitFor loop.
+      // Skip the generic card to avoid the duplicate.
+      log.info(
+        { step: "succeeded", mode: "suppressed-silent-rejected", chatId, requestId, durationMs: Date.now() - start },
         "notify-resolved",
       );
       return;

@@ -40,7 +40,14 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
     //   3. Unblock any in-process `waitFor` polls so the prior promise
     //      unwinds quickly instead of pinning memory until cache TTL.
     // (2) and (3) happen inside `cancelPendingForUser`.
+    //
+    // Publish the new controller synchronously (before any await): under
+    // @grammyjs/runner, two updates from the same user can enter `handle()`
+    // concurrently, so a third dispatch must observe the second's controller
+    // — not the first's — when deciding what to abort.
     const priorController = this.activeByUserId.get(userId);
+    const controller = new AbortController();
+    this.activeByUserId.set(userId, controller);
     if (priorController) {
       priorController.abort();
       log.info(
@@ -79,8 +86,6 @@ export class CapabilityDispatcher implements ICapabilityDispatcher {
       await Promise.all(cancellations);
     }
 
-    const controller = new AbortController();
-    this.activeByUserId.set(userId, controller);
     const signal = controller.signal;
     const dropped = (): IDispatchResult => {
       log.info(
