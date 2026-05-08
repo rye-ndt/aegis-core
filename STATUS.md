@@ -3,7 +3,327 @@
 ## What it is
 Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagonal Architecture (Ports & Adapters) — use-cases depend only on interfaces; assembly lives in `src/adapters/inject/assistant.di.ts`. Users auth via Privy (Google or Telegram); Mini App passes `telegramChatId` to `POST /auth/privy`. Agent parses NL (incl. `$5` fiat shortcuts), classifies intent, compiles tool input schema, resolves fields, and executes via ERC-4337 UserOps through ZeroDev session keys. **Backend never signs transactions** — all signing via user delegated session keys in the mini-app.
 
-> Capability-level details and recent feature notes live in `src/adapters/implementations/output/capabilities/status.md`. Read that file alongside this one before changing capability code. Aster (tokenized stocks) adapter notes live in `src/adapters/implementations/output/aster/status.md` — read before touching the Aster Diamond ABI, pair registry, or broker provider. Result-card / error-catalog notes live in `src/helpers/errors/errorCatalog.md` and `src/helpers/errors/status.md`.
+> Capability-level details and recent feature notes live in `src/adapters/implementations/output/capabilities/status.md`. Read that file alongside this one before changing capability code. Result-card / error-catalog notes live in `src/helpers/errors/errorCatalog.md` and `src/helpers/errors/status.md`.
+
+---
+
+## 🚨 PRE-PRODUCTION SECURITY BLOCKERS — MUST FIX BEFORE MAINNET LAUNCH
+
+> The items in this section were surfaced during a 2026-05-08 security review of
+> the FE↔BE↔on-chain trust boundary. They are **listed in fix-priority order**.
+> Each item is a real, exploitable hole that would put user funds at risk on
+> mainnet at scale. Do not ship to production with any 🔴 unresolved.
+> Cross-link: the FE-side log of the review lives at
+> `fe/privy-auth/status.md` (entry "Web2-friendly UX wording revamp" has the
+> security context that produced this list).
+
+### 🔴 BLOCKER-1: Session keys are installed with `toSudoPolicy({})`, not a scoped policy
+
+**Location**: `fe/privy-auth/src/utils/crypto.ts:162-167` (FE installs the
+plugin; BE-side `delegation/grant` records are the only enforcement layer).
+The comment in that file already acknowledges this: *"toSudoPolicy grants
+full access — replace with toCallPolicy in production"*.
+
+**What it means**: every session key currently installed on every user's
+Kernel SCA can sign **any** UserOp targeting **any** contract for **any**
+amount. The "spending limits" displayed in the UI ("Bot can use up to N
+USDC") are enforced **only** by the BE refusing to push sign-requests over
+the limit. There is **no on-chain backstop**.
+
+**Why this is the dominant risk**:
+- A BE compromise → attacker writes `sign_request` rows with `autoSign=true`
+  and `(to, value, data)` of `usdc.transfer(attacker, bal)` for every user
+  with an active delegation. On the next mini-app open, every user's FE
+  signs and broadcasts. Whole user base drained, no key extraction needed.
+- A supply-chain compromise (npm dep, CDN hijack) of the FE bundle exfils
+  the encrypted blob + privyDid → offline decrypt → unrestricted SCA control
+  per user.
+- A single per-user TG account hijack gets the attacker into the mini-app
+  as that user; the local key signs anything they want.
+
+**Fix (BE side of the work)**:
+1. Define the *exact* set of capabilities the bot needs:
+   - ERC-20 `transfer` / `approve` to specific protocol addresses, with
+     per-token `maxAmount` caps and time-windowed allowance budgets.
+   - Specific swap router contracts + selector whitelist.
+   - Specific yield protocol entry-points (Aave v3 `supply`/`withdraw`).
+   - Polymarket EOA-side: see BLOCKER-3 — separate scope.
+2. Express that set as a `toCallPolicy` (or `toMerkleCallPolicy`) policy
+   when the FE calls `installSessionKey`. The FE patch is small; the BE
+   work is enumerating + maintaining the policy spec (chain × protocol ×
+   selector × amount cap), versioning it, and propagating new entries
+   when capabilities are added.
+3. Have the BE return the canonical policy spec to the FE on session-key
+   install (not let the FE invent its own) so a malicious FE can't
+   weaken the policy at install time.
+4. Add an on-chain spending-cap validator alongside the call policy so
+   "Bot can use up to N USDC" becomes a *real* on-chain bound, not a
+   server-side policy. Without this the displayed cap is misleading.
+
+**Acceptance**: install a session key with the new policy on Fuji; verify
+that a UserOp signed by the session key targeting a non-whitelisted
+contract reverts at the validator, not at the BE. Verify a `transfer`
+above cap reverts on-chain. Document the policy schema in
+`be/src/.../delegation/status.md`.
+
+**2026-05-08 — scoped partial fix (BE side, amount cap only).**
+Per product decision, BLOCKER-1 is being narrowed to **on-chain amount cap
+only** — no contract whitelist, no selector whitelist, no native-value
+restriction. Single change: at session-key install the FE replaces
+`toSudoPolicy({})` with `toSpendingLimitPolicy(limits)` seeded from the
+user's `tokenDelegation` rows. New BE endpoint added:
+
+- `GET /delegation/spending-limits?chainId=…` →
+  `{ chainId, limits: [{ token, cap, validUntil }] }` — sourced from
+  `tokenDelegationRepo.findActiveByUserId`. Same rows that drive
+  `aegisGuardInterceptor`, so on-chain cap and BE preflight share one
+  source of truth. No new schema, no signing, no policy versioning.
+
+Residual risk explicitly accepted (do not file as regressions):
+- Session key can still call any contract; only token *amount* movement
+  is bounded.
+- On-chain `cap` is fixed at install time. Top-ups via the existing
+  `aegis_guard` `ApproveRequest` flow update `tokenDelegation.limitRaw`
+  in the BE only — the on-chain validator continues to enforce the
+  original cap. Once on-chain `spent == cap`, that token is frozen for
+  the session key until the key is re-installed (Privy owner sig).
+- Native value transfers and unlisted-token transfers are not bounded
+  on-chain.
+
+FE patch (`fe/privy-auth/src/utils/crypto.ts:166`) tracked separately.
+
+---
+
+### 🔴 BLOCKER-2: Encryption password for the session-key blob is `privyDid` (an identifier, not a secret)
+
+**Location**: `fe/privy-auth/src/hooks/useDelegatedKey.ts` and
+`fe/privy-auth/src/utils/sessionEoa.ts:24` —
+`decryptBlob(encrypted, privyDid)`. Crypto primitives are sound (AES-GCM-256
++ PBKDF2 100k iterations + random salt+IV); the **password choice** is the
+hole.
+
+**What it means**: `privyDid` is a stable user identifier emitted by Privy
+on every authenticated session. It's the kind of value that routinely
+appears in:
+- BE access logs
+- Sentry / Datadog / observability traces
+- Analytics events keyed on `userId`
+- Error reports from FE → BE
+- Anywhere the user is referenced in code
+
+It is **not** a high-entropy secret. Anyone who obtains both (a) the
+encrypted blob (sitting in the user's TG CloudStorage) and (b) the
+privyDid (from any of the above logs) can decrypt the privkey offline.
+Combined with BLOCKER-1, that's a full SCA drain per leaked user.
+
+**Fix (BE side of the work)**:
+1. Audit every BE log/observability sink for `privyDid` references and
+   either redact or hash them with a non-reversible HMAC keyed on a
+   secret. Treat `privyDid` as PII-tier: never log raw, never index on
+   it externally.
+2. Replace the encryption-password derivation with something that's
+   actually a secret. Two viable approaches:
+   - **Server-released secret**: BE holds a per-user random key (HSM /
+     KMS), released to the FE only after Privy re-auth. FE uses
+     `serverSecret || optionally a user-set passcode` as the PBKDF2
+     input. Loses the "open and go" UX (one extra Privy popup per
+     session), but the password becomes a real secret.
+   - **WebAuthn / passkey-bound key**: derive the encryption key from a
+     passkey signature. No server side, but requires the user to have a
+     passkey provider.
+3. Whichever approach: rotate every existing user's blob on next open
+   (decrypt with old privyDid, re-encrypt with new password) and wipe
+   the old blob. Document the migration plan.
+
+**Acceptance**: search the codebase + observability config for any path
+that emits raw `privyDid`; CI gate that adds `eslint`/grep rule to fail on
+new occurrences. Verify a fresh blob can't be decrypted with just a
+known privyDid.
+
+---
+
+### 🔴 BLOCKER-3: `maxUint256` ERC-20 / `setApprovalForAll(true)` to Polymarket contracts
+
+**Location**: `fe/privy-auth/src/components/handlers/PlaceBetHandler.tsx:184-200`.
+During Polymarket setup the session-key EOA approves:
+- `usdc.approve(ctfExchange, maxUint256)`
+- `usdc.approve(negRiskExchange, maxUint256)`
+- `ctf.setApprovalForAll(ctfExchange, true)`
+
+**What it means**: Polymarket uses `signatureType=EOA`, so these standing
+approvals live on the **session-key EOA's** Polygon address (not the SCA).
+If the privkey leaks (via BLOCKER-1 or BLOCKER-2 paths), an attacker doesn't
+need to bridge anything — they can sign Polymarket orders that drain whatever
+USDC has been bridged to that EOA, and they can transfer outcome tokens
+freely. A separate SCA-side hardening doesn't help here because Polymarket
+signs against the EOA.
+
+**Fix (FE-led, BE coordinates)**:
+1. Switch to **per-bet exact-amount approvals**: approve `stakeUsdc` (not
+   `maxUint256`) right before each `placeOrder` call, and reset to 0 after
+   the bet finalizes. Eats one extra UserOp per bet (paymaster cost) but
+   removes the standing-approval risk.
+2. OR: introduce a Polymarket middleware contract owned by the SCA that
+   forwards orders into CTFExchange, with an internal spending budget the
+   user can rate-limit.
+3. Add a job that periodically reads on-chain allowances for every active
+   user and emits a metric/alert if any non-zero standing approval exists
+   outside an active bet window.
+
+**Acceptance**: after a Polymarket bet completes (or fails), the on-chain
+USDC allowance from the session-key EOA to both exchange contracts is `0`.
+`setApprovalForAll` either is removed via `setApprovalForAll(false)` after
+the position closes, or is replaced with a scoped per-position approval
+mechanism.
+
+---
+
+### 🟠 BLOCKER-4: Auto-sign trusts BE-supplied tx data without on-chain or client-side validation
+
+**Location**: `fe/privy-auth/src/components/handlers/SignHandler.tsx`
+auto-sign branch — when a sign-request arrives with `autoSign: true` the
+FE immediately builds and signs the UserOp using `(request.to,
+request.value, request.data)` with no decode, no comparison against an
+expected protocol whitelist, no human confirmation.
+
+**What it means**: this is the *vector* through which BLOCKER-1 is
+exploitable at scale. Even after BLOCKER-1 is closed (scoped on-chain
+policy), this remains the attack surface for "drain whatever the policy
+allows" (e.g., spend the USDC cap, even if to the wrong recipient). It's
+also the surface for prompt-injection attacks if the LLM ever has direct
+authority to enqueue sign-requests.
+
+**Fix (BE side)**:
+1. Sign every outbound `sign_request` row with a BE-side key whose
+   pubkey is pinned in the FE bundle, and have the FE verify the sig
+   before signing. Closes the gap where a DB-only compromise (write
+   access to `sign_requests`) yields drains.
+2. For every sign-request, the BE also writes the **decoded intent**
+   (function name, args, target, target's role in the protocol, expected
+   amount, expected counterparty) into a separate field. The FE decodes
+   `request.data` independently and refuses to sign if it doesn't match
+   the BE's stated intent byte-for-byte. Asymmetric trust: both halves
+   must agree.
+3. For high-value or unusual requests, force a manual confirm modal
+   regardless of `autoSign`. Define "high-value" as: (a) amount above
+   N% of remaining cap, (b) target not on the protocol whitelist, (c)
+   selector not previously seen for this user, or (d) chain not
+   recently used.
+4. Rate-limit how many auto-sign requests a single user can be issued
+   per N minutes; alert if exceeded.
+
+**Acceptance**: fuzz the BE→FE sign-request channel with a forged row
+(no BE signature, mismatched decoded intent) and confirm the FE rejects
+both. Confirm a normal flow (chat → tool → sign-request) still works.
+
+---
+
+### 🟠 BLOCKER-5: Disconnect doesn't revoke on-chain or BE-side authority
+
+**Location**: `fe/privy-auth/src/hooks/useDelegatedKey.ts:329` —
+`removeKey()` only wipes the local Telegram CloudStorage blob and clears
+in-memory state. There is no:
+- BE call to delete the `delegation/grant` row
+- On-chain UserOp to uninstall the Kernel permission plugin / session-key
+  validator
+- Reset of standing ERC-20 / CTF approvals (BLOCKER-3)
+
+**What it means**: in practice Disconnect *is* effective today because the
+privkey is gone and only the user holds it (so no actor can exercise the
+permission). But that depends on the privkey having been in only one
+place. Once BLOCKER-2 is fixed it'll still depend on the password not
+having leaked. We shouldn't ship a "Disconnect" affordance whose label
+implies revocation while delivering only key deletion.
+
+**Fix (BE side)**:
+1. Implement `DELETE /delegation/grant` (or equivalent) that removes the
+   BE-side grant rows.
+2. Implement an FE flow that, on Disconnect, asks the user to sign a
+   single sudo UserOp (Privy popup) that uninstalls the session-key
+   plugin and zeros out residual approvals, before wiping CloudStorage.
+3. UX clarification: keep the "Disconnect" button but rename to "Revoke
+   bot access" with copy that explains both halves are happening, and
+   show a progress indicator while the on-chain revoke confirms.
+4. Job that proactively expires + revokes session keys past their
+   `validUntil` even if the user never logs back in.
+
+**Acceptance**: after Revoke, querying the SCA on-chain shows the
+session-key plugin is no longer installed; `delegation/grant` returns
+empty for that user; standing approvals on every chain are 0.
+
+---
+
+### 🟡 BLOCKER-6: FE supply-chain hardening is absent
+
+**Location**: `fe/privy-auth/package.json`, `vite.config.ts`,
+`index.html`. No subresource integrity on bundled assets, no strict CSP
+header on the served HTML, no lockfile-hash gate in CI, no `npm audit`
+gate, no dependency pinning by integrity hash.
+
+**What it means**: the FE bundle is one compromised npm dep away from
+exfilling every user's encrypted blob + privyDid (= every user's privkey,
+once BLOCKER-2 is mitigated only partially). At the scale this app would
+hit on mainnet, this is a when-not-if.
+
+**Fix (BE side: serve hardening)**:
+1. Add a strict Content-Security-Policy header from whatever serves the
+   FE bundle (Fly proxy / nginx). Allow only the specific origins the
+   mini-app talks to: backend API host, Privy auth host, Telegram WebApp
+   host, RPC/bundler/paymaster hosts, the CLOB API host. Disallow inline
+   scripts, eval, blob: workers, etc. Test with the mini-app actually
+   running.
+2. Add SRI hashes on any externally-loaded asset. Ideally bundle
+   everything internally so there are no external loads.
+3. CI gate: lockfile must verify, `npm audit --audit-level=moderate`
+   must pass, deps must be pinned (no `^` ranges) — or at least the
+   ones that touch crypto / wallet / RPC code.
+4. Sentry / observability: alert on FE→unknown-origin network calls in
+   production builds (any POST to a domain not on the allowlist).
+
+**Acceptance**: CSP report-only mode in staging confirms no in-app feature
+trips the policy; flip to enforcing in prod. CI fails if a dep with a
+known critical CVE is added.
+
+---
+
+### 🟡 BLOCKER-7: BE has no rate-limit / anomaly detection on `sign_request` writes
+
+**What it means**: even with all the above, an attacker who gets DB write
+or BE-RCE could write 100k sign-requests in seconds. There is no
+"this is unusual, hold for review" gate.
+
+**Fix (BE side)**:
+1. Per-user rate limit on outbound sign-requests (e.g., max 5 per minute,
+   max 50 per hour). Configurable per capability.
+2. Anomaly detector that flags batched writes affecting many users
+   within a short window (the BLOCKER-1 attack signature). Pause auto-
+   delivery and require ops sign-off when tripped.
+3. Audit log table that records every sign-request write with the
+   originating use-case, requestId, and a hash of the intent — so post-
+   incident forensics is possible.
+
+**Acceptance**: load-test confirms the rate limit doesn't break normal
+UX; simulated mass-attack writes trip the anomaly detector and block
+delivery.
+
+---
+
+### Severity legend
+- 🔴 Hard blocker — exploitable at mass scale today; do not ship to mainnet.
+- 🟠 Strong blocker — exploitable with one extra step or per-user.
+  Ship-blocking unless explicitly accepted with mitigations.
+- 🟡 Should-fix before launch — meaningfully reduces blast radius even if
+  the others remain. Cheap to do; do them.
+
+### Why these are listed in this file (not split by component)
+The vulnerabilities cross the FE/BE/on-chain boundary; ownership is
+shared. Listing them in one prominent place under the BE STATUS — which
+is the file engineers consult before any pre-prod change — guarantees
+they're seen as gating before launch. As each is addressed, move it from
+this section to a "Resolved security blockers" appendix at the bottom of
+this file with a brief note on what shipped and the commit/PR.
+
+---
 
 ## Tech stack
 | Layer | Choice |
@@ -22,7 +342,7 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 | Yield | Aave v3 (Avalanche mainnet) |
 | Portfolio | Ankr (`ankr_getAccountBalance`) + RPC fallback |
 | Transfers | Ankr (`ankr_getTransactionsByAddress` + `ankr_getTokenTransfers`) merged + cached |
-| Stocks | Aster perpetuals on BSC (Diamond `0x1b6F…feb0`), 1× leverage, USDC.bsc (18-dec) collateral, Relay-bridged from home chain |
+| Prediction markets | Polymarket Gamma (universe scan) + Polymarket CLOB (orderbook + signed-order forwarding). User Polygon SCA (Kernel v3.1, derived). Cross-chain stake bridged Avax→Polygon via Relay. |
 | Deployment | Fly.io (`aegis-core`, region `iad`) + Neon Postgres + Upstash Redis |
 
 ## Non-negotiable rules
@@ -39,7 +359,7 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 11. **`eoa_address` is canonicalized to lowercase on write.** Lookups by EOA must lowercase the search term.
 12. **Native pseudo-address is `0xEeee…EEeE`.** Always compare via `isNativeAddress(addr)` (case-insensitive). Never insert native rows into `tokenRegistry` — they are synthesized from chain config.
 13. **Terminal capability outcomes are `result_card`, never `chat`.** `kind: "chat"` is reserved for intermediate ask/disambiguation prompts. Capabilities never write MarkdownV2 — they hand the renderer plain strings via `IntentResult` and `escapeMd` runs in `resultCard.render.ts`. Caught exceptions go through `interpretError(err, { verb, requestId })` from `helpers/errors/errorCatalog.ts` — never inline raw error strings into user-visible fields.
-14. **Sign-request previews go through `buildPreview`.** Capabilities emitting `sign_calldata` for an ERC-20 / native spend MUST set `preview: buildPreview({...})` so the mini-app modal shows a clean human summary instead of raw calldata. For multi-step flows, the preview attaches to the FIRST step's record only (subsequent records leave `preview` undefined; FE chains silently). Use the `executeSignSteps({ previews })` array variant only when distinct per-step modal labels are required (currently stock open/close).
+14. **Sign-request previews go through `buildPreview`.** Capabilities emitting `sign_calldata` for an ERC-20 / native spend MUST set `preview: buildPreview({...})` so the mini-app modal shows a clean human summary instead of raw calldata. For multi-step flows, the preview attaches to the FIRST step's record only (subsequent records leave `preview` undefined; FE chains silently). Use the `executeSignSteps({ previews })` array variant only when distinct per-step modal labels are required.
 
 ## Project structure
 ```
@@ -61,29 +381,35 @@ src/
 │                                          # delegation, repository (17 repos), yield (6 sub-ports),
 │                                          # solver, embedding, intentParser, intentInterpreter,
 │                                          # artifactRenderer, orchestrator, resolver, schemaCompiler,
-│                                          # toolIndex, vectorDB, stocks (5 sub-ports), etc.
+│                                          # toolIndex, vectorDB, predictionMarket (provider/
+│                                          # classifier/detector/verifier/repo/broadcaster/
+│                                          # findingBroadcaster/receiptBroadcaster/polymarketAdapter/
+│                                          # betUseCase/betRepository), etc.
 ├── adapters/
 │   ├── inject/assistant.di.ts             # Lazy-singleton wiring
 │   └── implementations/
 │       ├── input/
 │       │   ├── http/httpServer.ts         # exactRoutes + paramRoutes
-│       │   ├── jobs/                      # tokenCrawler, yieldPoolScan, userIdleScan, yieldReport
+│       │   ├── jobs/                      # tokenCrawler, yieldPoolScan, userIdleScan, yieldReport,
+│       │   │                              # predictionMarketScan, polymarketPositionPoller
 │       │   └── telegram/                  # bot.ts, handler.ts (~200 LOC; cmd:<text> callback relay)
 │       └── output/                        # balance (ankr/rpc/cached 30s), transferHistory
 │                                          # (ankr/cached rate-guarded), capabilities (buy/send/swap/
-│                                          # yield/loyalty/assistantChat/stock/positions +
+│                                          # yield/loyalty/assistantChat/placeBet/closePosition +
 │                                          # buildPreview + assistantResultRouter),
 │                                          # artifactRenderer (telegram + resultCard.render +
 │                                          # resultCard.escape — single MarkdownV2 entry point),
 │                                          # intentInterpreter (openai adapter, env-gated, ≤25w),
 │                                          # yield (aaveV3Adapter, subgraphPrincipalProvider,
-│                                          # onChainPositionDiscovery), aster (Diamond client +
-│                                          # ABI + pair registry + price oracle + positions +
-│                                          # broker provider), stocks (relayCrossChainSwapPlanner),
-│                                          # tools (system + read-only agent tools incl. getStockQuote
-│                                          # / getStockPositions / getTransferHistory; each returns
-│                                          # `{success,data,structured?}`), solver, openai, viemClient,
-│                                          # resolverEngine, pinecone, redis caches, relay, etc.
+│                                          # onChainPositionDiscovery), predictionMarket
+│                                          # (polymarketAdapter, polymarketProvider,
+│                                          # predictionMarketClassifier/Detector/Verifier,
+│                                          # broadcaster + findingBroadcaster + receiptBroadcaster),
+│                                          # tools (system + read-only agent tools incl.
+│                                          # getPortfolio / getTransferHistory / routeIntent;
+│                                          # each returns `{success,data,structured?}`),
+│                                          # openai, viemClient, resolverEngine, pinecone,
+│                                          # redis caches, relay, etc.
 └── helpers/
     ├── chainConfig.ts                     # CHAIN_REGISTRY/CONFIG; getViemChain, getRpcUrlForChain,
     │                                      # getNativeTokenInfo, NATIVE_PSEUDO_ADDRESS, isNativeAddress
@@ -93,9 +419,10 @@ src/
     ├── decodeErc20Transfer.ts             # transfer(address,uint256) calldata decoder
     ├── observability/                     # logger.ts (pino), metricsRegistry.ts
     ├── enums/                             # All enums (executionStatus, intentAction, intentCommand, …)
-    ├── crypto/aes.ts                      # AES-256-GCM (iv:authTag:ciphertext)
-    ├── env/                               # Per-feature env readers (asterEnv, loyaltyEnv,
-    │                                      # resultCardEnv, transferHistoryEnv, yieldEnv, role)
+    ├── crypto/aesGcm.ts                   # AES-256-GCM (versioned envelope `v1:iv:tag:ct`)
+    ├── env/                               # Per-feature env readers (assistantEnv, loyaltyEnv,
+    │                                      # openaiEnv, predictionMarketEnv, resultCardEnv,
+    │                                      # telegramEnv, transferHistoryEnv, yieldEnv, role)
     ├── errors/                            # errorCatalog (PATTERNS + interpretError + ErrorCode),
     │                                      # RateLimitedError, UnsupportedChainError, toErrorMessage
     ├── format/humanFormat.ts              # formatTokenAmount/Usd/RelativeTime/Duration, truncateHash
@@ -109,8 +436,7 @@ Default chain: Avalanche C-Chain mainnet (43114). `CHAIN_ID=43113` → Fuji.
 - Reward-controller address per-deploy via `REWARD_CONTROLLER_ADDRESS` env.
 - Avalanche USDC aToken: `0x625E7708f30cA75bfd92586e17077590C60eb4cD`.
 - Aave V3 subgraph (Messari): deployment `72Cez54APnySAn6h8MswzYkwaL9KjvuuKnKArnPJ8yxb`.
-- Aster Diamond (BSC, perpetuals entrypoint): `0x1b6F2d3844C6ae7D56ceb3C3643b9060ba28FEb0`. Per-facet implementations resolved through the Diamond — refresh `asterAbi.ts` from BscScan if struct decode breaks.
-- USDC.bsc (Aster venue collateral, **18 decimals**): `0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d`. Decimals always sourced from `token_registry`, never hardcoded.
+- Polymarket CTF Exchange (Polygon 137): `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`; NegRisk variant: `0xC5d563A36AE78145C45a50134d48A1215220f80a`. Conditional Tokens Framework + NegRisk Adapter live at the addresses recorded in `chainConfig.ts:CHAIN_REGISTRY[137].polymarket` — read via `getPolymarketConfig(chainId)`. Never inline.
 
 ## HTTP API
 Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid().slice(0,8)`.
@@ -141,22 +467,20 @@ Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid()
 | `GET` | `/delegation/approval-params` | Privy | Default tokens + suggested limits (synthesizes native via `getNativeTokenInfo`) |
 | `GET/POST` | `/delegation/grant` | Privy | List/upsert `token_delegations` |
 | `GET` | `/metrics` | Bearer (`METRICS_TOKEN`) | pgPool/openai/redis/LLM metrics |
-| `GET` | `/stocks/pairs` | None | Verified Aster stock pairs (`{ symbol, pairBase }[]`). 503 `stocks_unavailable` if boot verification failed. `Cache-Control: public, max-age=3600`. |
-| `GET` | `/stocks/quote?symbols=AAPL,TSLA` | None | Mark prices for tradable Aster pairs via cached oracle. 400 on unknown symbols. 503 `stocks_unavailable` when soft-disabled. `Cache-Control: private, max-age=10`. |
-| `GET` | `/stocks/positions` | Privy | Authenticated SCA's open Aster positions via `IStockUseCase.listPositions`. 503 `stocks_unavailable` when soft-disabled. |
-| `GET` | `/delegation/approval-params?chainId=56` | Privy | Optional `chainId` query param routes the suggested-tokens response to a specific chain. Omitted → home chain. USDC.bsc decimals (18) are sourced from `token_registry`. |
+| `GET` | `/delegation/approval-params?chainId=137` | Privy | Optional `chainId` query param routes the suggested-tokens response to a specific chain. Omitted → home chain. |
+| `*` | `/predictionMarket/*` | Privy | 12 routes covering setup state machine (`setup/init`, `setup/step`, `setup/creds`), bet intent lifecycle (`intent/:id`, `intent/:id/cancel`), bet execution (`bet/:id`, `bet/:id/transition`, `bet/:id/finalize`, `bet/:id/bridge-status`, `bet/:id/drift-detected`, `bet/:id/refund`), Polymarket orderbook + order place/cancel/sell, position list, and `/state` snapshot for mini-app rehydration. 409 on illegal bet-status transitions; 503 when `PREDICTION_MARKETS_BETS_ENABLED=false`. |
 
 ## Telegram commands
 | Command | Behavior |
 |---|---|
 | `/start`, `/auth`, `/logout`, `/new`, `/history`, `/confirm`, `/cancel`, `/portfolio`, `/wallet`, `/sign` | Auth + meta |
-| `/buy <amount>` | BuyCapability — onramp keyboard (copy SCA address or MoonPay mini-app). When the argument resolves to a stock symbol via `IStockPairRegistry` (e.g. `/buy 100 AAPL`), the capability emits a chat redirect with a `stock:reroute:<SYMBOL>` button instead of dropping into the USDC onramp prompt. The reroute is silent if the stock catalogue isn't loaded — the onramp continues to work for amount-only and "buy with card" inputs. |
+| `/buy <amount>` | BuyCapability — onramp keyboard (copy SCA address or MoonPay mini-app). |
 | `/send`, `/money`, `/convert`, `/topup`, `/dca`, `/sell` | SendCapability — compile→resolve→Aegis Guard→sign (native + ERC-20 both auto-sign) |
 | `/swap` | SwapCapability — Relay cross/same-chain |
 | `/yield`, `/withdraw` | YieldCapability — Aave v3 deposit/withdraw. Also handles `rebalance:y/n` callbacks emitted by the per-user rebalance scan (sticky-winner protocol switch via `withdrawAll(old) → supply(new)` in one mini-app session). |
 | `/points`, `/leaderboard` | LoyaltyCapability |
-| `/stock buy $X SYM`, `/stock short $X SYM`, `/stock close SYM`, `/stock sl SYM PRICE`, `/stock tp SYM PRICE` | StockCapability — Aster perpetuals on BSC. Bridges USDC.avax→USDC.bsc, opens, awards loyalty. Recovery flow on venue revert is its own mini-app session. `close` disambiguates multi-position symbols via inline keyboard (`stock:close-pick:<tradeHashShort>`); `sl`/`tp` use the same picker (`stock:exits-pick:<short>:<sl\|tp>:<price>`) and preserve the unchanged side. After successful `close`, the venue→home return-swap is appended in the same mini-app session via `executeSignSteps({ continueSession: true, planKind: "recovery" })` — `notifyResolved` then surfaces "Funds returned." UX. |
-| `/positions` | PositionsCapability — chat-seeded LLM summary of open Aster positions via the `get_stock_positions` tool. |
+| _(callback `place_bet:findingId:marketId:A\|B`)_ | PlaceBetCapability — confirm-amount card → write bet row → deep-link to mini-app. Cross-chain stake bridged Avax→Polygon, then EOA-signed Polymarket order. Receipt cards (`bet_placed`/`bet_failed`) pushed by `PredictionMarketReceiptBroadcaster`. Gated on `PREDICTION_MARKETS_BETS_ENABLED=true`. |
+| _(callback `close_position:positionId`)_ | ClosePositionCapability — re-quote on confirm-tap (drift-aware), open close bet, sell-side Polymarket order. `position_closed` / `position_resolved` cards pushed by the receipt broadcaster + `PolymarketPositionPollerJob`. |
 | _(text)_ | AssistantChatCapability — chat + tool-call loop |
 | _(photo)_ | Vision chat with caption |
 
@@ -195,7 +519,7 @@ message
 | `user_preferences` | `aegisGuardEnabled` |
 | `token_delegations` | `limitRaw`, `spentRaw`, `validUntil` per token. Native is valid (`tokenAddress = NATIVE_PSEUDO_ADDRESS`). `upsertMany` preserves `spent_raw` when `limit_raw` is unchanged. |
 | `yield_position_snapshots` | Yield positions (snapshots only — deposits/withdrawals dropped 2026-04-28) |
-| `loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger` | Loyalty program. `action_types` seed includes `stock_open_long`, `stock_open_short`, `stock_close` (added 2026-05-04 with Aster Phase 2). |
+| `loyalty_seasons`, `loyalty_action_types`, `loyalty_points_ledger` | Loyalty program. Canonical action types: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `send_native`, `yield_deposit`, `yield_hold_day` (deferred), `referral`, `manual_adjust`. |
 | `recipient_notifications` | P2P send recipient notifications (pending/delivered/failed) |
 | `prediction_market_runs` | One row per scan tick. `universeHash`, `clusterSetHash`, `status` (`fetched`/`clustered`/`published`/`failed`), `is_latest` flag (atomically flipped per run via `setLatestRun` transaction). |
 | `prediction_market_snapshots` | Top-100 markets surviving filters per run. Money fields stored as **cents** (`bigint`); prices as **basis points** (`integer 0..10000`). PK `(run_id, market_id)`. |
@@ -259,12 +583,6 @@ message
 | `YIELD_REBALANCE_CHECK_INTERVAL_MS`, `YIELD_REBALANCE_MIN_DELTA_BPS`, `YIELD_REBALANCE_STICKY_SCANS`, `YIELD_REBALANCE_NUDGE_COOLDOWN_SEC` | `86400000` / `50` / `3` / `86400` | Auto-rebalance: per-user scan cadence, min APY uplift in bps, consecutive winning scans before nudging, per-user nudge cooldown |
 | `YIELD_REPORT_UTC_HOUR`, `YIELD_REPORT_INTERVAL_MS` | `9` / unset | Daily report UTC hour. When `INTERVAL_MS>0`, run at that interval and skip the daily gate (debug/QA). |
 | `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS`, `LOYALTY_LEADERBOARD_CACHE_TTL_MS` | `60000` / `30000` | |
-| `BSC_USDC` | `0x8AC76a…580d` (Binance-Peg USDC) | Venue collateral for Aster stocks. **18 decimals**, sourced from `token_registry`. Required for stocks. |
-| `ASTER_DIAMOND_ADDRESS_BSC` | `0x1b6F2d…feb0` | Aster Diamond proxy on BSC. Address validated at boot via `verifyStockCapability()`. |
-| `BSC_RPC_URL` | unset → chainConfig fallbacks (`bsc.publicnode.com` etc.) | Optional BSC RPC override. |
-| `ASTER_BROKER_ID` | `0` | Aster broker referral id (uint). |
-| `ASTER_PRICE_TTL_SEC`, `ASTER_POSITIONS_TTL_SEC` | `15` / `60` | In-memory cache TTLs for marks + positions. |
-| `STOCK_RECOVERY_ENABLED` | `true` | When false, disables auto-bridge-back on venue-leg revert AND the post-close return swap. Leave `true` outside debugging. |
 | `PREDICTION_MARKETS_ENABLED`, `PREDICTION_MARKETS_FETCH_INTERVAL_MS`, `PREDICTION_MARKETS_GAMMA_API`, `PREDICTION_MARKETS_MAX_FETCH_PAGES`, `PREDICTION_MARKETS_TOP_N` | `false` / `1800000` (30 min) / `https://gamma-api.polymarket.com` / `4` / `100` | Daily prediction-market scan job toggle + Polymarket fetch cadence/page bounds. `enabled=false` keeps the job idle (no Polymarket calls). |
 | `PREDICTION_MARKETS_MIN_OI_USD`, `PREDICTION_MARKETS_MIN_7D_VOLUME_USD`, `PREDICTION_MARKETS_MIN_DAYS`, `PREDICTION_MARKETS_MAX_DAYS` | `50000` / `20000` / `3` / `60` | Stage-1 filter set. Markets surviving all four (plus binary YES/NO + non-empty resolution criteria + `acceptingOrders=true`) are ranked by liquidity and capped to `TOP_N`. |
 | `PREDICTION_MARKETS_CLASSIFIER_MODEL`, `PREDICTION_MARKETS_MAX_CRITERIA_CHARS`, `PREDICTION_MARKETS_PROMPT_VERSION`, `PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC` | `gpt-4o` / `4000` / `v1` / `86400` | Stage-2 LLM classifier (structured outputs, JSON-schema strict). Cache key includes `promptVersion + model + sha256(sortedMarketIds@resolutionEpochs)`. |
@@ -284,17 +602,17 @@ message
 - **DB facade**: single `DrizzleSqlDB`; repos hang off as `db.users`, `db.toolManifests`, etc. Use-cases receive the repo interface, never the facade.
 - **Lazy singletons** in `AssistantInject`: `if (!this._x) this._x = new X(...)`. Optional-env services return `undefined` when unconfigured.
 - **HTTP routing**: `exactRoutes` or `paramRoutes` only. Never if/else chains.
-- **Encrypted secrets**: `helpers/crypto/aes.ts` (iv:authTag:ciphertext hex).
+- **Encrypted secrets**: `helpers/crypto/aesGcm.ts` (versioned envelope `v1:iv:tag:ciphertext`). Used for at-rest Polymarket L2 creds in `prediction_market_user_setup.polymarket_creds_enc`. Future rotations append `v2:` rather than mutating in place.
 - **Logging**: pino via `createLogger('ScopeName')`. Metadata is first arg. Never `console.*` in `src/`. Never log tokens, privyDid, signatures, raw PII. Common metadata fields: `step`, `reqId`/`userId`, `err`, `durationMs`, `status`, `attempt`, `choice` (cache hit/miss), `count`, `source: "db"|"derived"`, `stale: boolean`.
 - **Free-tier external providers**: wrap adapter in a `CachedXxxProvider(inner, cache, userId, cfg)` decorator using `acquireUserSlot(userId, rpm)` + `acquireGlobalSlot(rps)`. Never inline rate-limit logic into adapters. Use the generic `RateLimitedError` / `UnsupportedChainError` (HTTP layer maps to 429/400; tools surface graceful retry messages).
 - **Spend bookkeeping**: capabilities emitting autosign signing-requests for ERC20 spends MUST set `tokenAddress` (lowercased) + `amountRaw` (decimal raw string) on the `SigningRequestRecord` / `sign_calldata` artifact of the **single tx that actually moves the user's funds** — typically the last step. Native paths leave both undefined. `signingRequest.usecase.resolveRequest` calls `tokenDelegationDB.addSpent(userId, tokenAddress, amountRaw)` best-effort.
 - **Multi-step capabilities**: emit `mini_app` for step 1 only; store steps 2..N via `miniAppRequestCache.store(...)`; FE chains via `GET /request/:id?after=<prev>`. One mini-app session per intent.
 - **Fiat normalization**: `OpenAISchemaCompiler.compile()` runs `normalizeFiatAmount(text)` before LLM — `$N`/`N dollars/bucks/usd` → `N USDC`. New capabilities inherit this; don't re-implement `detectStablecoinIntent`.
 - **Recipient resolution**: `eoa → DB profile.smartAccountAddress` if onboarded, else `deriveScaAddress(eoa, chainId)`. DB row always wins over derivation.
-- **Soft-fail capability boot**: capabilities that depend on external invariants (e.g. on-chain ABI struct verification) expose an `async verifyXCapability()` on `AssistantInject` that swallows errors and flips a `_xCapabilityDisabled` flag. CLIs `await` it after instantiation; the rest of the backend keeps booting. HTTP routes guard via `isXCapabilityDisabled()` and return `503 { error: "x_unavailable" }`. Pattern lives in `verifyStockCapability` — mirror it for any new chain-bound capability.
-- **Per-step `chainId` on cross-chain plans**: `StockExecutionStep.chainId` is set per step so a single mini-app session can sequence home-chain bridge legs and venue-chain action legs together. The FE's chained `?after=<prevId>` poll picks each up with its own chainId. Mirror this on any future cross-chain capability.
+- **Soft-fail capability boot**: capabilities that depend on external invariants (e.g. on-chain ABI struct verification, optional `PREDICTION_MARKETS_BETS_ENABLED` flag) expose an `async verifyXCapability()` (or DI getter that returns `undefined`) on `AssistantInject` that swallows errors and flips a `_xCapabilityDisabled` flag. CLIs `await` it after instantiation; the rest of the backend keeps booting. HTTP routes guard via `isXCapabilityDisabled()` and return `503 { error: "x_unavailable" }`. Mirror this for any new chain-bound capability.
+- **Per-step `chainId` on cross-chain plans**: each step in a multi-step plan carries its own `chainId` so a single mini-app session can sequence home-chain bridge legs (e.g. Avax SCA → Polygon SCA via Relay) and venue-chain action legs together. The FE's chained `?after=<prevId>` poll picks each up with its own chainId. Pattern lives in the prediction-market bet pipeline (`predictionMarketBetUseCase`).
 - **`spendTokenAddress` only on the LAST home-chain leg** of multi-step cross-chain plans (mirrors `swapCapability`). Tagging a venue-chain leg attributes spend against a delegation row that doesn't exist for the venue-chain token.
-- **Venue-chain id exception**: chain ids may NOT be inlined outside `chainConfig.ts` — except in a single venue adapter module that pins one venue (e.g. `asterBrokerProvider.ts:VENUE_CHAIN_ID = 56`). Document the constant and never reach for it elsewhere.
+- **Bet-state transitions are repo-enforced.** `IPredictionMarketBetRepository.updateBetStatus` does a `SELECT … FOR UPDATE` inside a txn and validates the move against the `BET_STATE_TRANSITIONS` map; illegal transitions throw `IllegalBetTransitionError` → HTTP 409. Never silently absorb it. Setup-step transitions are linear-monotonic (forward-by-≤1 or same).
 
 ## Extension patterns
 - **New system tool**: `ITool` → add to `SystemToolProviderConcrete.getTools()`.
@@ -305,8 +623,8 @@ message
 - **New sign-error code**: add to FE `interpretSignError.ts` AND BE `notifyResolved.ts` recovery branch. String is the contract.
 - **New chain**: one `CHAIN_REGISTRY` entry in `chainConfig.ts`; set `ankrBlockchain` if Ankr supports it. Native token is auto-synthesized from viem's `Chain.nativeCurrency`.
 - **New external provider port**: define `IXxxProvider` under `interface/output/blockchain` (or appropriate subdir). Implement `CachedXxxProvider` decorator with the rate-guard template.
-- **New read-only agent tool**: implement `ITool` under `output/tools/`, add to `TOOL_TYPE` enum, register in `SystemToolProviderConcrete.getTools()` (gated on optional dep bundle). For stock-style soft-disabled tools, take an `isDisabled: () => boolean` and return `{ success: false, error: "<feature>_unavailable" }` when set. Read-only tools must never trigger autosign or mutations.
-- **New venue-chain capability (e.g. another perp DEX)**: (a) add the chain to `CHAIN_REGISTRY` with `relayEnabled` initially false; (b) define `IXxxBrokerProvider` + companion ports under `interface/output/<feature>/`; (c) put the venue chain id constant only in the broker adapter; (d) add `verifyXCapability()` boot hook + soft-disable flag; (e) flip `relayEnabled: true` once the bridge round-trip is smoke-tested.
+- **New read-only agent tool**: implement `ITool` under `output/tools/`, add to `TOOL_TYPE` enum, register in `SystemToolProviderConcrete.getTools()`. For soft-disabled tools, take an `isDisabled: () => boolean` and return `{ success: false, error: "<feature>_unavailable" }` when set. Read-only tools must never trigger autosign or mutations.
+- **New cross-chain capability**: (a) add the chain to `CHAIN_REGISTRY`; (b) define adapter port(s) under `interface/output/<feature>/`; (c) per-step `chainId` on the execution plan so the mini-app session can sequence home-chain bridge legs with venue-chain action legs; (d) add a soft-disable getter + 503 path on the HTTP routes; (e) flip `relayEnabled: true` on the venue chain once the bridge round-trip is smoke-tested.
 
 ---
 
@@ -341,79 +659,58 @@ VM: `shared-cpu-2x`, `cpus = 2`, `memory = "2gb"`. HTTP service: `internal_port 
 
 ---
 
-## Feature log (condensed — see `output/capabilities/status.md` for full notes)
+## Feature log (condensed — see `output/capabilities/status.md` and `constructions/` for full notes)
 
-- **2026-05-07 — Prediction-market stage 4 — open work for next agent (READ FIRST before flipping `PREDICTION_MARKETS_BETS_ENABLED=true`).** Consolidated list of gaps after the foundation, finish, and hardening passes. Ordered by severity. Each item is implementable as a standalone diff.
+### Active surface
 
-  **(1) [SHIP-BLOCKER] Bridge-initiation endpoint missing.** The bet state machine goes `INITIATED → BRIDGING`, but no BE code actually starts the Avax SCA → Polygon SCA Relay bridge. `IRelayClient` has `getQuote`, `getIntentStatus`, and `awaitIntent` — but nothing calls `getQuote` for the bet flow. The FE transitions to `BRIDGING` and immediately starts polling `/bet/:id/bridge-status`, which returns `{status: 'no-intent'}` because `bridgeIntentId` was never recorded. The FE then throws `'Bridge intent missing — bet was transitioned to BRIDGING without an id.'` and bets dead-end. **What to add:** either (a) a new endpoint `POST /predictionMarket/bet/:id/bridge` that builds a `RelayQuoteRequest` (`originChainId=43114`, `destinationChainId=137`, `originCurrency=USDC.e on Avax`, `destinationCurrency=USDC on Polygon`, `recipient=user's Polygon SCA from setup`, `tradeType='EXACT_OUTPUT'`, `amount=stakeUsdcCents × 10000` in 6dp wei), returns the `steps[]` calldata for the FE to sign UserOps from the Avax SCA, captures `requestId`, and writes it via `transitionBet({status:'BRIDGING', artifact:{bridgeIntentId: requestId}})`; or (b) fold the bridge initiation into `confirmBetIntent` so the bet row already has `bridgeIntentId` set when the FE opens the mini-app. (a) is cleaner because it keeps the FE in the signing path. The FE's `INITIATED` arm already polls for `bridgeIntentId` via `pollUntil` — it'll resume cleanly once the endpoint is added. **Suggested signature in `IPredictionMarketBetUseCase`:** `initiateBridge({userId, betId}): Promise<{steps: RelayQuoteStep[]; bridgeIntentId: string}>`.
+- **2026-05-08 — Tokenized stocks (Aster) feature removed.** Capabilities (`StockCapability`, `PositionsCapability`), `IStockUseCase` + sub-ports, `aster/` + `stocks/` adapter folders, `get_stock_*` / `stock_open` LLM tools + `TOOL_TYPE` entries, `verifyStockCapability()` boot hook + `_stockCapabilityDisabled` flag, `STOCK_RECOVERY_ENABLED` / `ASTER_*` / `BSC_USDC` / `BSC_RPC_URL` env vars, `/stocks/*` HTTP routes, `/stock` + `/positions` Telegram commands + the `/buy` reroute, and `stock_open_long|short|close` loyalty action types are all gone. Migration `0032_drop_stock_features.sql`. BSC chain (56) stays in `CHAIN_REGISTRY` (no current consumer). `signingRequest.cache.ts:planKind: "recovery"` discriminator remains wired but unused.
 
-  **(2) [BUG] `POST /predictionMarket/position/:id/finalize` is called by FE but doesn't exist on BE.** `pmApi.finalizePosition` POSTs `{status: 'closed' | 'failed'}` to this path; `httpServer.ts` never registered it. `ClosePositionHandler` calls it as the very last step after a successful sell-fill + sweep — close flows will 404 at the tail even though on-chain state is correct. **What to fix:** the simpler path is to delete `pmApi.finalizePosition` and the FE call, and rely on `/bet/:id/finalize` (which already routes close bets through `findPositionByClosingBetId` and updates the position to `closed` with realized PnL). Closes are bets — there's no separate position-finalize concept on the BE side. Alternatively, add the route as a passthrough to `finalizeBet({betId: position.closingBetId})` if the FE shape needs to stay.
+### Prediction markets (Polymarket pipeline, stages 1–4)
 
-  **(3) [CONTRACT GAP] `closingBetId` provisioning round-trip.** FE `ClosePositionHandler` POSTs `/order/sell` with `closingBetId: ''`. The BE chat capability (`closePositionCapability.confirm` → `initiateClose`) creates the close-bet row and writes its id on the position's `closingBetId` field, so the data exists — but the FE never reads it back. `/order/sell` succeeds anyway because the order POST keys on `clientOrderId` (FE-generated uuid) rather than `betId`, and `finalizeBet` looks the position up via `findPositionByClosingBetId(betId)` server-side. **Result:** technically working but undocumented. Either (a) extend the FE deep-link path to carry the `closingBetId` from the chat callback (the BE already knows it at deep-link emission time), or (b) add `GET /predictionMarket/position/:id` returning the open position joined with its in-flight `closingBetId`, and have the FE fetch it before signing. (a) is one extra URL parameter; (b) is one extra round-trip. Either is fine.
+- **2026-05-07 — Stage 4 BE foundation, BE finish, hardening, FE-side gaps.** Full bet/close/poller/receipts/setup-state-machine/encryption/HTTP-routes/chain-config/`PlaceBetCapability`/`ClosePositionCapability` ship behind `PREDICTION_MARKETS_BETS_ENABLED=false`. **READ FIRST before flipping the flag** — open-work list (12 items, ordered by severity) lives in `constructions/2026-05-07-prediction-markets-stage4.md`. The two ship-blockers: (1) bridge-initiation endpoint missing — `INITIATED → BRIDGING` transition has no BE call to start the Avax→Polygon Relay quote; FE polls and dead-ends. (2) FE `pmApi.finalizePosition` POSTs `/predictionMarket/position/:id/finalize` which doesn't exist — drop the FE call (BE `/bet/:id/finalize` already routes closes via `findPositionByClosingBetId`). Items 3–8 are EIP-712 / HMAC / sigType verifications resolvable by a `$1` mainnet validation run. Items 9–12 are launch-readiness + post-launch.
+- **Bet pipeline conventions (load-bearing).** (i) `IPredictionMarketBetRepository.updateBetStatus` validates moves against `BET_STATE_TRANSITIONS` inside a `SELECT … FOR UPDATE` txn; throws `IllegalBetTransitionError` → HTTP 409. Never absorb. (ii) Setup-step transitions are linear-monotonic (forward-by-≤1 or same). (iii) One in-flight bet per user (`countOpenBetsForUser` excludes terminal states; PARTIAL counts as in-flight until refund UserOp lands). (iv) Refunds on EOA after non-fill terminations are an in-band flag (`refundRequired`) on the bet row; FE submits a paymaster-sponsored EOA→SCA sweep on next mini-app open. (v) Receipts are pushed by `IPredictionMarketReceiptBroadcaster` (telegram-direct), never inline in handlers. (vi) Polymarket maker calls funnel through `IPolymarketAdapter` with explicit `makerAddress` + creds-envelope params — no stored client. (vii) When local position diverges from `/data/positions`, Polymarket wins. (viii) Position lifecycle: `open → closing → closed` (user-initiated), `open → resolved` (Polymarket-side), `open → closed` (silent, manual web close). (ix) `clientOrderId` (uuid, UNIQUE) is the Polymarket idempotency key. (x) Write-side and read-side prediction-market repos stay split. (xi) Polymarket exchange/CTF/NegRisk addresses live exclusively in `chainConfig.ts:CHAIN_REGISTRY[137].polymarket` via `getPolymarketConfig(chainId)`.
+- **Polymarket adapter — custom HTTP, NOT `@polymarket/clob-client`.** SDK depends on ethers v5; codebase is viem-only. Adapter wraps `/auth/api-key`, `/book`, `POST /order`, `DELETE /order`, `/data/order/:id`, `/data/positions` with L2 HMAC headers. EOA-signed orders forwarded verbatim from FE. ABI-compatible with `ClobClient` shape so a swap is mechanical.
+- **2026-05-07 — Stage 3 mispricing detection.** Per-tick `detect → verify → broadcast` over high-confidence clusters. Four patterns: `logical_inconsistency` / `term_structure_anomaly` / `implied_contradiction` / `movement_divergence`. Detector cache key `sha256(clusterId + sortedMembers@bucketedYesPriceBp + promptVersion + model)` (50bp bucket, 30-min TTL). Verifier re-fetches via `IPredictionMarketProvider.fetchByIds` (Polymarket Gamma `?condition_ids=`, batched 50/req); drops on hallucinated ids, sub-$25k liquidity, >50bp odds drift, or pattern-gap < 100bp. `rankScore = patternWeight × confidenceWeight × min(gap/1000, 1) × log10(minLiquidity)` (×1000 to fit `integer`). Per-user dedupe `pm:finding:lastSeen:{userId}:{findingId}` (7d) — cross-run dedupe intentionally absent. Carry-forward stable cluster IDs across cache-hit reclusters so `prediction_market_findings.cluster_id` correlates over runs. Default `PREDICTION_MARKETS_FINDINGS_ENABLED=false`.
+- **2026-05-06 — Stage 1+2 scan.** Worker-only job polls Polymarket Gamma every `PREDICTION_MARKETS_FETCH_INTERVAL_MS` (30 min default), filters to top-100 binary YES/NO markets meeting OI/volume/window/criteria thresholds, persists versioned snapshot with `is_latest=true` (atomic flip in txn). Stage 2 (LLM clustering) runs only on universe-hash change OR > `RECLUSTER_DELTA` churn OR > `MAX_RECLUSTER_AGE_MS` since last clustering. Classifier uses structured outputs (`response_format: json_schema, strict`) keyed on `(promptVersion, model, sha256(sortedMarketIds@resolutionEpochs))`; overlapping market_ids dropped lower-confidence-first. Multi-replica safe via `pm:scan:lock` (`SET NX PX`). Money columns are `bigint` cents; prices are `integer` basis points. `setLatestRun(runId)` is the only sanctioned way to flip the latest pointer.
+- **2026-05-07 — Cluster broadcast suppressed.** `getPredictionMarketScanUseCase` passes `null` for the cluster `IPredictionMarketBroadcaster`; only per-finding messages reach users. Class + DI getter + `pm:broadcast:lastHash:{userId}` Redis key kept for one-line revert.
 
-  **(4) [VERIFICATION REQUIRED] Polymarket EIP-712 typed data not validated against on-chain `CTFExchange.Signatures`.** `polymarketAdapter.ts` and `fe/privy-auth/src/utils/polymarket.ts` both hand-roll the order struct rather than vendoring `@polymarket/clob-client`. File header comment in `polymarket.ts` says "verify before any non-test stake." The struct has 13 fields (`salt`, `maker`, `signer`, `taker`, `tokenId`, `makerAmount`, `takerAmount`, `expiration`, `nonce`, `feeRateBps`, `side`, `signatureType`, `signature`); each must match the on-chain `Order` typehash byte-for-byte or signatures fail verification at the exchange. **What to do:** pull the live struct from `https://github.com/Polymarket/exchange-fpmm/blob/main/contracts/exchange/mixins/Signatures.sol` (or wherever the deployed CTFExchange is sourced from), compare field-by-field, and run a `$1` mainnet validation order to confirm the CLOB accepts the signature.
+### Result-card framework + auto-resume + NL routing
 
-  **(5) [VERIFICATION REQUIRED] Polymarket L1 (`/auth/api-key`) EIP-712 message format.** `polymarketAdapter.deriveApiKey` POSTs `{}` with `POLY_ADDRESS`/`POLY_SIGNATURE`/`POLY_TIMESTAMP`/`POLY_NONCE` headers; the FE `signClobAuth` builds the message client-side. The exact EIP-712 domain (`name`, `version`, `chainId`, `verifyingContract`) and the typed message struct need to be verified against the live CLOB auth flow. Same `$1` test order will exercise this path.
+- **2026-05-04/05 — Result-card framework (P1 → P7+).** Single canonical capability outcome shape (`IntentResult`) with `result_card` artifact. Renderer (`adapters/.../artifactRenderer/resultCard.{render,escape}.ts`) is the **only** place touching Telegram MarkdownV2; `escapeMd` runs over every capability-supplied substring. Conventions: terminal outcomes are `result_card`, never `chat`; capabilities never write MarkdownV2; capabilities never inline error strings — they call `interpretError(err, { verb, requestId })` from `helpers/errors/errorCatalog.ts`. New verbs go on `IntentVerb`; new error codes go on `ErrorCode` AND its `PATTERNS` table. Sign-request `preview: buildPreview({...})` attached to FIRST `SigningRequestRecord` only (subsequent steps `preview: undefined`). `complexity:"complex"` reserved for cross-chain swaps + multi-step flows + yield rebalance — single-token sends and same-chain single-step swaps default to `"simple"` so the interpreter never fires. Read-only query capabilities emit `result_card{status:"success"}` even on the empty path. `IIntentInterpreter` (OpenAI adapter, 2s timeout, optional Redis cache `interp:` ns 5-min TTL, ≤25-word output) gated by `RESULT_CARD_INTERPRETER_ENABLED` AND `OPENAI_API_KEY`.
+- **2026-05-05 — Auto-resume after Aegis-Guard reapproval.** Capabilities returning `kind:"mini_app"` for an `aegis_guard` reapproval MUST persist resolved params via `IPendingIntentStore` keyed by `guard.reapprovalRequest.requestId`. `dispatcher.resume()` is the only sanctioned way to re-enter a capability with already-resolved params. Swap params include `forceRequote?: boolean` set on resume. The http-only `httpCli` replica has no dispatcher — graceful degradation falls back to a "please re-issue" message.
+- **2026-05-05 — Unify NL onto slash-command dispatcher.** Free-text "swap …" / "send …" / "deposit into yield" route through the **same** `route_intent` LLM tool path as `/`-prefixed commands. Byte-identical signing payloads, same Aegis-Guard gate, same logs. New capabilities reach NL by adding their `INTENT_COMMAND` to `routeIntent.tool.ts:COMMAND_VALUES` — no per-feature LLM tool. Removed (legacy parallel intent path): `ExecuteIntentTool`, `TransferErc20Tool`, `OpenAIIntentParser`, `OpenAIIntentClassifier`, `IIntentParser`, `IIntentClassifier`, `ClaimRewardsSolver`, `validateIntent`, `IntentUseCase.{parseAndExecute,classifyIntent}`, the `intent.errors` module, the `execute_intent` LLM tool. Kept (load-bearing): `IntentUseCase.{searchTokens, selectTool, compileSchema, buildRequestBody, generateMissingParamQuestion}`, `SolverRegistry` + `ManifestDrivenSolver` (sendCapability builds ERC-20 calldata via manifests), `ISchemaCompiler`. `intents` + `intent_executions` tables remain for `transferHistory.usecase` enrichment but write-free.
+- **2026-05-05 — Drop dynamic tool registry (Phases A + B).** `POST/GET/DELETE /tools`, `/command-mappings`, `/http-tools` HTTP routes + their use-cases + `httpQueryTool` repos + `helpers/crypto/aes.ts` (only consumer was httpQueryTool) all deleted. `sendCapability` owns an in-code `SEND_MANIFEST: CapabilityManifest` and a private `buildTransferCalldata` helper mirroring `executeErc20Transfer` byte-for-byte (native = recipient/`0x`/value-raw; ERC-20 = `viem.encodeFunctionData(erc20Abi, "transfer", …)`). `IIntentUseCase` exposes only `searchTokens`/`compileSchema`/`generateMissingParamQuestion`. New convention: capability tools register their own `CapabilityManifest` constant inline; calldata is built directly inside the capability rather than going through a solver.
 
-  **(6) [VERIFICATION REQUIRED] EOA `signatureType` enum value.** Order tuples use `signatureType: 0` for plain ECDSA (EOA-maker). Per the Polymarket SDK enum this should be correct, but it's documented as "uncertain — confirm during impl" in the construction doc and never independently checked.
+### Yield
 
-  **(7) [VERIFICATION REQUIRED] Relay MATIC-direct-to-EOA delivery for setup `gas_funded`.** Setup §4.2 wants ~0.05 MATIC delivered to the user's Polygon EOA so it can sign 3 one-time approval txs. Whether Relay's quote endpoint accepts `destinationCurrency=native MATIC` with an EOA `recipient` (rather than just delivering to a contract) is unverified. **Fallback already documented:** deliver MATIC to the Polygon SCA and have the SCA `transfer(EOA, dust)` via paymaster-sponsored UserOp. The FE `runSetup.gas_funded` arm currently POSTs an empty intent and polls until BE flips the step — whichever direction the BE goes, the FE state machine is ready.
+- **2026-05-04 — Auto-rebalance.** `runPoolScan` maintains `yield:winner_streak:{chainId}:{token}` Redis record (TTL `4 × poolScanIntervalMs`) so a switch must persist for `YIELD_REBALANCE_STICKY_SCANS=3` consecutive scans before nudging. `userIdleScanJob` calls `scanRebalanceForUser` as a sibling step to `scanIdleForUser` — both gated by their own Redis cooldowns (`yield:rebalance_cooldown:{userId}` 24h; `yield:rebalance_pending:{userId}` 1h). `YieldCapability` owns both `yield:` and `rebalance:` callback prefixes (`TriggerSpec.callbackPrefix: string | string[]`). On rebalance only the supply leg gets `tokenAddress + amountRaw` (the withdraw burns aTokens). Without a second adapter the path stays dormant in production.
+- **2026-05-04 — Yield bug-fix batch.** EMA ranker uses `α = 2/(N+1)` on newest-first APY history. Aave V3 APY formula verified against Aave's `aave-utilities` `calculateCompoundedInterest` (matches `app.aave.com`). `yieldReportJob` user discovery unions `listUsersWithRecentSnapshots` ∪ `telegramSessions.listActiveUserIds`, fan-out via `pLimit(5)`. `IYieldRepository.listSnapshotsBetween(userId, fromInclusive, toExclusive)` replaces the off-by-one `listSnapshots(_, sinceEpoch-1)`. `finalizeWithdrawal` re-discovers + `upsertSnapshot` per (chain, protocol, token); failures `warn` and never rethrow. `SubgraphPrincipalProvider` warns once at boot when `THEGRAPH_API_KEY` is unset; `status(): "ok"|"degraded"|"disabled"` surfaced via `/health`.
+- **2026-04-28 — Yield positions revamp.** Active-protocol discovery is on-chain (`OnChainPositionDiscovery` fans out across `protocol × stablecoin`); principal source is The Graph Messari Aave V3 subgraph. `yield_deposits` + `yield_withdrawals` tables **dropped** (`0026_stale_mandrill.sql`). `buildDepositPlan` no longer writes a DB row. `finalizeWithdrawal` is a no-op (positions are snapshots).
+- **2026-04-24 — Yield optimizer.** Avalanche mainnet, Aave v3. Ranking: `score = 0.7·EMA_7d(supplyApy) + 0.3·currentSupplyApy`; disqualify if liquidity < $100k; ×0.5 if utilization > 95%.
 
-  **(8) [VERIFICATION REQUIRED] Polymarket L2 HMAC header set + body shape.** The hardening pass marked the header set (`POLY_ADDRESS`/`POLY_SIGNATURE`/`POLY_TIMESTAMP`/`POLY_API_KEY`/`POLY_PASSPHRASE`) and HMAC payload (`timestamp + method + path + body`, base64-decoded secret, base64url digest) as "verified against `clob-client@^4`". This was a code-review match against the SDK's source — no live integration test was run. Same `$1` order will confirm.
+### Send / swap / buy / loyalty / chain primitives
 
-  **(9) [OPS] Polygon paymaster gas budget.** Pimlico paymaster on Polygon needs sufficient POL balance to sponsor: SCA deploy on first user, SCA→EOA stake transfer per bet, EOA→SCA refund sweep (now wired) per non-fill terminal, and close-flow EOA→SCA sweeps. Set up alerting at < 5 POL or set a recurring top-up. No code change — environmental.
-
-  **(10) [OPS] Polymarket testnet availability.** If Polymarket has no testnet endpoint that matches the production CLOB shape, the only validation path is small-stake mainnet runs at `MIN_STAKE_USDC=1`. Confirm whether the CLOB has a Mumbai/Amoy fork before mainnet, and if not, plan a $1 mainnet smoke test as part of the launch checklist.
-
-  **(11) [FE-side] "My Predictions" position list view.** Construction §8 / FE doc §8. Read-only screen reachable from a profile entry point listing open positions with mark-to-market PnL + per-row Close button. Close flow already works without it via the chat-card `[Close]` callback that deep-links into `ClosePositionHandler`. Add when product wants in-app browsing.
-
-  **(12) [FUTURE-WORK] Concurrent-bet limit > 1.** `confirmBetIntent` rejects with `BET_IN_FLIGHT` when any non-terminal bet exists for the user. Start at 1; revisit if users hit it. If raised, the SCA→EOA transfer + refund-UserOp sequencing needs to ensure no two bets race their stake/refund hops.
-
-  **Before flipping `PREDICTION_MARKETS_BETS_ENABLED=true`** — implementation order: (1) bridge-initiation endpoint, (2) drop FE `finalizePosition` or add the BE route, (3) `$1` mainnet validation run that exercises items 4–8 end-to-end. Items 9–10 are launch-readiness; 11–12 are post-launch.
-
-- **2026-05-07 — Prediction-market stage 4 (BE hardening pass — fixes called out in code review).** Closes ten review-flagged issues across the bet pipeline before flipping `PREDICTION_MARKETS_BETS_ENABLED=true`. (a) **Inline chain-id removed.** `predictionMarketReceiptBroadcaster` was reading `process.env.PREDICTION_MARKETS_BET_CHAIN_ID ?? "137"` at use site — now reads `PREDICTION_MARKETS_ENV.betChainId` like every other env consumer (chain-agnostic rule). (b) **Polymarket `signature` now lives on the order tuple.** `polymarketAdapter.placeOrder` was building the POST body with `{order, owner, …}` but never including the EIP-712 signature, so the CLOB would have 4xx'd every order — now `order.signature = input.signature` per `clob-client@^4` convention. (c) **Bet state-transition legality enforced at the repo.** New `BET_STATE_TRANSITIONS` map + `IllegalBetTransitionError` exported from `IPredictionMarketBetRepository`. `DrizzlePredictionMarketBetRepo.updateBetStatus` now does a `SELECT … FOR UPDATE` inside a txn, validates the move against the source state's allowed-set, and throws `IllegalBetTransitionError` on illegal transitions. `httpServer.handlePmTransitionBet` maps the error to **409 Conflict** so the FE can render a "this bet has moved on, refresh" message instead of a generic 5xx. **No more silent state skips.** (d) **Auto-refund flow.** New `refundRequired` (boolean default false) + `refund_tx_hash` (text) columns on `predictionMarketBets` (migration `0037_pm_bets_refund_flags.sql`, journal `when=1778889600005`). `finalizeBet` sets `refundRequired=true` when an `open` bet terminates as `PARTIAL`/`UNFILLED`/`FAILED` **and** `scaToEoaTxHash` is non-null (USDC was already moved to the EOA). New endpoint `POST /predictionMarket/bet/:id/refund` records the FE-submitted refund UserOp hash and clears the flag. The mini-app reads `bets[].refundRequired=true` from `/state` on next open and submits the EOA→SCA sweep UserOp. **No funds-stuck risk** on non-fill terminations. (e) **Partial-close size accounting fixed.** Pre-fix, partial closes wrote the position back as `status='open'` with the original `sizeShares` — silent over-statement on next reconcile. New repo method `decrementPositionShares(id, delta)` (numeric SQL subtract on the text decimal column) is called on partial closes; if the remainder is ≤ 0 the position is `closed` instead of reopened. (f) **One in-flight bet per user.** New repo method `countOpenBetsForUser(userId)` (status NOT IN {FILLED, UNFILLED, FAILED} — PARTIAL is "in-flight" because the refund UserOp must complete before the next bet's SCA→EOA transfer can race with it). `confirmBetIntent` rejects with `BET_IN_FLIGHT` when the count is non-zero. (g) **Setup-step ordering enforced.** `recordSetupStep` now rejects backwards moves (`SETUP_STEP_BACKWARDS:`) and skip-ahead moves (`SETUP_STEP_SKIP:`) — only same-step (idempotent reapply) and the next-adjacent step are allowed. (h) **Three new HTTP endpoints** (per construction §11): `GET /predictionMarket/bet/:id/bridge-status` (BE-side Relay status passthrough — `RelayClient.getIntentStatus` already existed; the endpoint normalizes `no-intent` for bets that haven't bridged yet), `POST /predictionMarket/bet/:id/drift-detected` (FE reports `livePriceBps`; BE returns `{decision: "ok"}` if ≤ `maxOrderDriftBps`, else `{decision: "reconfirm", previousRefPriceBps, newRefPriceBps, driftBps}` so FE knows to re-prompt the user in chat — `maxOrderDriftBps` is now actually consulted), and `POST /predictionMarket/order/sell` (alias of `/order/place`; `SignedPolymarketOrder.side="SELL"` already discriminates closes — alias only added so the doc URL surface is honest). (i) **Chat error sanitization.** `placeBetCapability.humanizeError` and `closePositionCapability.humanizeError` now map known error codes (`INTENT_WRONG_STATUS`, `BET_IN_FLIGHT`, `POSITION_WRONG_STATUS`, `USER_EOA_MISSING`, `POLYMARKET_CREDS_KEY_MISSING`, …) to user-friendly text. **Internal codes never leak to the chat surface.** (j) **Polymarket HMAC TODO resolved.** Header set + HMAC payload (`timestamp + method + path + body` keyed by base64-decoded L2 secret, base64url digest) verified against `clob-client@^4`. Comment block updated to reflect verification; TODO removed. **New conventions:** (i) `IllegalBetTransitionError` is the canonical 409 trigger for the bet pipeline — never silently absorb it. (ii) Money refunds on the EOA after non-fill terminations are an in-band flag on the bet row (`refundRequired`), not a separate refund-intent table — the refund itself is a paymaster-sponsored UserOp signed by the FE on next mini-app open. (iii) Setup-step transitions are linear-monotonic (forward by ≤1 or same); the FE may not skip ahead, even if it has the artifact for a later step. (iv) Per-user concurrency is a single in-flight bet — enforced at `confirmBetIntent`, not at the HTTP layer. (v) Chat surfaces never include raw `Error.message` content; all capabilities funnel errors through a `humanizeError` mapper. **New log scopes:** none (existing scopes extended with new step events). **New step events:** `bet-rejected-in-flight`, `setup-step-backwards-rejected`, `setup-step-skip-rejected`, `drift-detected`, `drift-within-tolerance`, `refund-recorded`, `refund-tx-recorded-without-flag`. **New metadata fields:** `from`, `to` (illegal-transition response), `previousRefPriceBps`, `newRefPriceBps`, `driftBps`, `inFlight` (count). **Migration verification:** after `npm run db:migrate`, `SELECT column_name FROM information_schema.columns WHERE table_name='prediction_market_bets' AND column_name IN ('refund_required','refund_tx_hash')` should return both rows; bump `_journal.json:idx=37.when` to `1778889600006` if the runner skips per the CLAUDE.md trap.
-
-- **2026-05-07 — Prediction-market stage 4 (BE finish: receipts, poller, close, DI).** Closes out construction `2026-05-07-prediction-markets-stage4.md` §13 steps 7–9 plus the DI gap left by the foundation pass. (a) **Receipt cards pushed by BE.** New port `IPredictionMarketReceiptBroadcaster` + `PredictionMarketReceiptBroadcaster` adapter (telegram-direct, `tgApi.sendMessage` + `renderResultCard`). Four receipt verbs implemented: `prediction_market_bet_placed` (post-fill), `prediction_market_bet_failed`, `prediction_market_position_closed`, `prediction_market_position_resolved`. The BE pushes receipts directly to the user's chat — `handlePmFinalizeBet` fires the appropriate one **after** the FE response (fire-and-forget; receipt failures don't fail the request because the FE already has the canonical state). The poller pushes `position_resolved` cards for newly-resolved markets. `prediction_market_position_open` is rendered inline by `closePositionCapability` as the close-confirm preview, not by the broadcaster (it's a request-response card, not a push). **Why direct push:** the construction doc and FE plan both treat poller-driven settlement events (`position_resolved`) and async terminal events (`bet_placed`/`bet_failed`) as BE-owned — the FE may have closed the mini-app or the poller may discover settlement when no FE call is in flight. (b) **Position poller** — new `PolymarketPositionPollerJob` (mirrors `PredictionMarketScanJob` shape: `setInterval` + Redis `SET NX PX` lock with `pm:position-poller:lock` key + `isWorker()` gate + best-effort lock release). Tick: `listUsersWithOpenPositions()` → fan-out via `pLimit(broadcastConcurrency)` → per user, `reconcileUserPositions` → push `position_resolved` cards for any markets that flipped. New use-case method `reconcileUserPositions({ userId, makerAddress, polymarketCredsEnc })` calls `polymarketAdapter.getPositions(...)`, diffs against local `predictionMarketPositions`, updates `currentValueUsdcCents` for mark-to-market drift, transitions `status='resolved'` with `resolvedOutcome` + `realizedPnlUsdcCents` when Polymarket marks the market resolved, and settles silently as `status='closed'` if Polymarket no longer reports the holding (manual close via web — no fill data to render a receipt with). Returns `{resolved, marked, closedFromPolymarket}` so the poller can be receipt-precise. (c) **Polymarket adapter — `getPositions`.** New `IPolymarketAdapter.getPositions({ makerAddress, polymarketCredsEnc })` → `GET /data/positions?user=<addr>` with L2 HMAC headers. Returns minimal `PolymarketPositionView[]` slice (`marketId`, `outcomeTokenId`, `sizeShares`, `avgPriceBps`, `currentValueUsdcCents`, `resolved`, `resolvedOutcome`, `realizedPnlUsdcCents`). Field naming permissive — accepts either `marketId`/`conditionId` and `outcomeTokenId`/`asset` since the public CLOB docs don't pin one shape. (d) **Close-position capability** — new `ClosePositionCapability` (callback prefixes `close_position`, `confirm_close`, `cancel_close`). Mirrors `PlaceBetCapability` shape but **skips the bet-intent table** — the position row is the source of truth and the confirm card is built on demand from `previewClose(userId, positionId)` which fetches a live top-of-book quote. On confirm: re-quote (drift between preview tap and confirm tap can be material on thin books), then `initiateClose({userId, positionId, clientOrderId, refPriceBps})` writes a new `predictionMarketBets` row with `betKind='close'` + `parentBetId=<openingBetId>`, transitions the position to `status='closing'` + `closingBetId=<betId>`. Stake on a close row is the *expected proceeds* (size × refPrice) — used only as a logging hint; the FE-signed sell order determines the actual amount. (e) **Close-aware `finalizeBet`.** Extended to handle `betKind='close'` terminal outcomes: looks up parent position via `findPositionByClosingBetId(betId)`, computes realized PnL = (exit notional − entry notional) on the closed shares (using `filledAvgPriceBps` × `filledShares` against `entryPriceAvgBps`), accumulates onto `realizedPnlUsdcCents`, and transitions the position to `closed` with `closedAtEpoch` on full close. `finalizeBet` return shape is now `{ bet, position, closedPosition }` — `position` is for opens, `closedPosition` is for closes (mutually exclusive). (f) **Repo additions.** `findPositionByOpeningBetId(betId)`, `findPositionByClosingBetId(betId)`, `listUsersWithOpenPositions()` (`SELECT DISTINCT userId WHERE status IN ('open','closing')`). (g) **DI wiring (closes the foundation gap).** `assistant.di.ts` now wires the bet pipeline end-to-end: `getPredictionMarketBetRepo()` (passthrough on `DrizzleSqlDB.predictionMarketBets`, new field on the adapter), `getPolymarketAdapter()`, `getPredictionMarketBetUseCase()` (gated by `PREDICTION_MARKETS_BETS_ENABLED` — returns `undefined` when disabled), `getPredictionMarketReceiptBroadcaster()`, `getPolymarketPositionPollerJob()` (worker-only, gated). `getCapabilityDispatcher` now registers `PlaceBetCapability` + `ClosePositionCapability` when the use-case is available. `getHttpApiServer` now passes the bet use-case + Polymarket adapter + receipt broadcaster as ctor args (previously absent — http handlers always 503'd). Worker + telegram CLIs `start()`/`stop()` the poller alongside the existing scan job. (h) **Use-case ctor signature change.** `PredictionMarketBetUseCase` now requires an `IPolymarketAdapter` ctor arg (used by `previewClose` + `reconcileUserPositions`). **Why direct adapter dep:** the use-case has always orchestrated bet *intent* but never directly hit Polymarket — that was httpServer's job. Close + poller flip that: the BE now needs to fetch quotes/positions on its own (no FE in the loop). **Conventions added:** (i) push-based receipts go through `IPredictionMarketReceiptBroadcaster`, never inline in handlers. (ii) Polymarket maker calls (orderbook, positions) all funnel through `IPolymarketAdapter` with explicit `makerAddress` + creds-envelope params — never a stored client. (iii) Reconciliation truth is Polymarket-side: when local position diverges from `/data/positions`, Polymarket wins (per construction §5). (iv) Position lifecycle: `open → closing → closed` for user-initiated closes; `open → resolved` for Polymarket-side market resolution; `open → closed` (silent) for the manual-close-via-web path. **Deviations from plan:** (1) Plan §11 lists separate `/order/place` and `/order/sell` HTTP endpoints. We collapsed these into the existing `/order/place` — the `SignedPolymarketOrder.side: "BUY" | "SELL"` field already discriminates and Polymarket's `/order` endpoint is side-agnostic. Adding a second route would have been pure duplication. (2) The position poller does not emit `bet_placed` cards for partial-fill reconciliation discovered post-finalize — partial fills are reported by the FE via `/finalize` and trigger the receipt at that point. The poller is settlement-focused. **New env vars:** none (everything uses the existing `PREDICTION_MARKETS_*` namespace from the foundation pass). **New log scopes:** `predictionMarketReceiptBroadcaster` (fields: `userId`, `verb`, `status`), `polymarketPositionPollerJob` (fields: `userCount`, `positionsReconciled`, `divergencesFixed`, `resolvedCount`, `durationMs`), `closePositionCapability`. New step events on `predictionMarketBetUseCase`: `close-confirmed`, `tick-end` (reconcile-positions). **Migration:** none — schema unchanged from the foundation pass. **Smoke test path:** flip `PREDICTION_MARKETS_BETS_ENABLED=true`, complete a $1 bet end-to-end, confirm `bet_placed` card arrives in chat (not just in the FE response). Tap `Close` on the position card → confirm-close preview renders with live PnL → confirm → `position_closed` card after fill. Wait one poller tick (5min default) on a resolved binary market → `position_resolved` card arrives.
-
-- **2026-05-07 — Prediction-market bet execution (stage 4, BE foundation).** First pass at user-tap-to-bet on stage-3 findings. Adds the BE half of construction `2026-05-07-prediction-markets-stage4.md` §13 steps 1–6 (FE handlers + position poller + close-position deferred). Pieces: (a) **Schema** — 4 new tables (`prediction_market_user_setup`, `prediction_market_bet_intents`, `prediction_market_bets`, `prediction_market_positions`) via migration `0036_prediction_market_bets.sql` (journal `when=1778889600004`, idx 36 — monotonic per CLAUDE.md). Money columns are `bigint` cents; prices are `integer` basis points (matches stages 1–3 convention). (b) **Polygon onboarding** — `predictionMarketBet.usecase.ensureUserSetup()` derives the Polygon SCA via the existing `deriveScaAddress(eoa, chainId=137)` (chain-agnostic helper, no changes needed) and persists it on `predictionMarketUserSetup`. The session-key delegation cache (`ISessionDelegationCache`) intentionally stays single-record-per-EOA: same key signs cross-chain; per-chain SCA is computed, not stored on that cache. (c) **Relay extension** — `IRelayClient` gains `getIntentStatus(requestId)` + `awaitIntent(requestId, timeoutMs)`. Provider statuses ("delivered" / "complete" / "refund" / etc.) collapse to four normalized values `pending|success|failure|refund` so callers don't bind to provider strings; unknown values fall through to `pending` and exit on caller's timeout. `EXACT_OUTPUT` was already in the interface — verified, no widening needed. (d) **Polymarket adapter** — `PolymarketAdapter` (HTTP-direct, NOT `@polymarket/clob-client` — see *Deviation* below) wraps `/auth/api-key`, `/book`, `POST /order`, `DELETE /order`, `/data/order/:id`. L2 HMAC headers built per the public CLOB spec. EOA-signed orders are forwarded verbatim from FE. (e) **Encryption helper** — new `helpers/crypto/aesGcm.ts` (AES-256-GCM, versioned envelope `v1:<iv>:<tag>:<ct>`). No prior helper existed; this is a new convention. Master key from `PREDICTION_MARKETS_CREDS_KEY_HEX` (32-byte hex). Used to seal Polymarket L2 creds at rest in `polymarket_creds_enc`. (f) **Repos** — `IPredictionMarketBetRepository` + `DrizzlePredictionMarketBetRepo` (kept SEPARATE from `IPredictionMarketRepository`, which owns the read-only universe/clusters/findings tables — write surfaces stay isolated so the broadcast pipeline can't accidentally pick up bet writes). (g) **Use-case** — `PredictionMarketBetUseCase` orchestrates setup state machine (`pending → sca_deployed → gas_funded → approved → authed → complete`), bet-intent lifecycle (`awaiting_amount → awaiting_confirm → executing → completed|cancelled|failed`), and execution status transitions (`INITIATED → BRIDGING → BRIDGED → SCA_TO_EOA → ORDER_SIGNED → ORDER_SUBMITTED → FILLED|PARTIAL|UNFILLED|FAILED`). All transitions persisted; `clientOrderId` (uuid) is the Polymarket idempotency key. (h) **HTTP** — 12 new routes under `/predictionMarket/*` on `httpServer.ts` (setup init/step/creds, intent get/cancel, bet get/transition/finalize, orderbook, order place/cancel, positions, state). All Bearer-auth via existing `extractUserId`. Optional ctor deps so the http-only `httpCli` replica still boots without bet wiring. (i) **Chat flow** — new `PlaceBetCapability` (callback prefixes `place_bet`, `confirm_bet`, `cancel_bet`). Mirrors `BuyCapability` shape: callback → `kind:"ask"` for amount → text reply → `kind:"ok"` → run() emits a `result_card` confirm card → confirm callback writes the bet row + emits a deep-link-to-mini-app `chat` artifact. (j) **Finding broadcaster v2** — `predictionMarketFindingBroadcaster` now emits `kind:"callback"` (`place_bet:findingId:marketId:A|B`) instead of `kind:"url"` Polymarket links **iff** `PREDICTION_MARKETS_BETS_ENABLED=true`. When disabled, legacy URL behaviour is preserved so the finding card stays useful in dark-launch deployments. (k) **Result-card verbs** — added `prediction_market_bet_confirm`, `prediction_market_bet_placed`, `prediction_market_bet_failed`, `prediction_market_position_open`, `prediction_market_position_closed`, `prediction_market_position_resolved` to the `IntentVerb` union. (l) **Chain-agnostic addresses** — Polymarket `ctfExchange`/`negRiskCtfExchange`/`negRiskAdapter`/`conditionalTokens` live on `chainConfig.ts:CHAIN_REGISTRY[137].polymarket` (new optional field) accessed via `getPolymarketConfig(chainId)`. No inline addresses outside this file (CLAUDE.md rule). **Deferred (still TODO):** position-poller job (§13.8), close-position capability (§13.9), receipt result-card renderers for `bet_placed`/`bet_failed`/`position_*` (only verbs added; the renderer.ts switch arms come with the FE work), background reconciliation of stale Relay intents, FE handlers in `fe/privy-auth/`. Capability is also NOT yet wired into `assistant.di.ts` — the `register(new PlaceBetCapability(...))` line plus DI getters for `IPredictionMarketBetRepository` / `IPredictionMarketBetUseCase` / `IPolymarketAdapter` are the next reviewable diff (kept out of this commit so the schema/migration/types land in isolation). **Deviations from plan:** (1) Used a thin custom HTTP adapter for Polymarket instead of `@polymarket/clob-client`. Reason: the SDK depends on ethers v5 and the codebase is viem-only; introducing a second EVM stack risks peer-dep clashes and bloats node_modules. The HTTP surface needed is small (5 endpoints + HMAC). Adapter is ABI-compatible with the SDK's `ClobClient` interface so a swap is mechanical if we ever need richer features. (2) `predictionMarketBets.outcomeTokenId` is `NOT NULL` in schema but the chat-side intent persists with empty placeholder when the FE has not resolved it yet — the FE re-writes the actual conditional token id via `/order/place` before submission. (3) Stage 4 §15 items 2–4 (Relay MATIC-to-EOA support, Polymarket L1 EIP-712 shape, EOA sigType enum value) are unverified — adapter has TODO comments at the spots that depend on them; flip `PREDICTION_MARKETS_BETS_ENABLED=true` only after a $1 mainnet validation run. **New conventions:** (i) write-side and read-side prediction-market repos stay split (`IPredictionMarketRepository` read-only, `IPredictionMarketBetRepository` writes). (ii) `helpers/crypto/aesGcm.ts` is the canonical at-rest encryption helper for any new secret persisted in postgres — do NOT roll a new cipher. Envelope schema is versioned (`v1:`); future rotation appends `v2:` rather than mutating in place. (iii) `getPolymarketConfig(chainId)` (chainConfig.ts) is the only sanctioned source of Polymarket exchange/CTF/NegRisk addresses. (iv) `IRelayClient.awaitIntent` returns `pending` on timeout (does not throw) — callers branch on `status`, never on rejection. (v) `clientOrderId` (uuid) is the Polymarket idempotency key — `predictionMarketBets.client_order_id` has a `UNIQUE` index; same key on retry is safe. **New env vars:** `PREDICTION_MARKETS_BETS_ENABLED` (default false, dark-launch), `PREDICTION_MARKETS_BET_CHAIN_ID` (137), `PREDICTION_MARKETS_MIN_STAKE_USDC` (1), `PREDICTION_MARKETS_MAX_STAKE_USDC` (100), `PREDICTION_MARKETS_MAX_ORDER_DRIFT_BPS` (200), `PREDICTION_MARKETS_ORDER_SLIPPAGE_BPS` (50), `PREDICTION_MARKETS_UNFILLED_TIMEOUT_MS` (30000), `PREDICTION_MARKETS_BRIDGE_TIMEOUT_MS` (90000), `PREDICTION_MARKETS_POSITION_POLL_INTERVAL_MS` (300000), `PREDICTION_MARKETS_INTENT_TTL_MS` (3600000), `PREDICTION_MARKETS_CLOB_API` (`https://clob.polymarket.com`), `PREDICTION_MARKETS_MATIC_BOOTSTRAP_WEI` (`50000000000000000` = 0.05 MATIC), `PREDICTION_MARKETS_CREDS_KEY_HEX` (REQUIRED before `betsEnabled=true`; 64 hex chars / 32 bytes), `RELAY_STATUS_POLL_INTERVAL_MS` (1500). **New log scopes:** `predictionMarketBetUseCase`, `placeBetCapability`, `polymarketAdapter`, `aesGcm`. **New step events:** `setup-initialized`, `setup-step-recorded`, `creds-stored`, `started` (place-bet), `active-intent-reused`, `amount-received`, `confirmed`, `cancelled`, `bridge-submitted`, `bridged`, `sca-to-eoa`, `order-signed`, `submitted`, `filled`, `partial-fill`, `unfilled`, `failed`. **New metadata fields:** `intentId`, `betId`, `clientOrderId`, `bridgeIntentId`, `polymarketOrderId`, `findingId`, `side`, `stakeUsdc`, `refPriceBps`, `filledShares`, `filledAvgPriceBps`, `failureReason`, `polygonScaAddress`, `prevStep`. **Migration verification:** after `npm run db:migrate`, verify the new columns exist (`SELECT column_name FROM information_schema.columns WHERE table_name='prediction_market_bets'`) — drizzle's journal-`when` ordering bit is exactly the trap CLAUDE.md warns about; if migration silently skipped, bump `when` to `1778889600005` and re-run.
-
-- **2026-05-07 — Prediction-market: drop the cluster-found broadcast.** Users now receive only the per-finding (asymmetric-pattern) Telegram message; the preceding "Today's prediction-market clusters" brief is suppressed. Implementation is a one-liner in `assistant.di.ts:getPredictionMarketScanUseCase` — passes `null` for the cluster `IPredictionMarketBroadcaster` arg. `PredictionMarketScanUseCase` already guards `this.broadcaster &&`, so the broadcast block + subsequent `updateRunStatus(runId, "published", …)` are skipped; runs now terminate at status `"clustered"` (status field is write-only — not read anywhere outside the writer, verified via grep). **Why:** the cluster brief was noise — users only act on the finding card, which already embeds the cluster theme/driver. Two messages per tick was annoying. **Why this implementation:** flipping the DI wire to `null` is the smallest reversible change and leaves stage-3 untouched. `PredictionMarketBroadcaster` class, its DI getter (`getPredictionMarketBroadcaster`), the `IPredictionMarketBroadcaster` port, and the `pm:broadcast:lastHash:{userId}` Redis key remain in place but are now unreachable — kept to make a future re-enable a one-line revert and to avoid touching the persisted Redis dedupe state. **No new conventions.**
-- **2026-05-07 — Prediction-market mispricing detection (stage 3).** New unconditional per-tick block in `predictionMarketScan.usecase` that runs `detect → verify → broadcast` over every high-confidence cluster after stage 2 finishes. Three new ports under `use-cases/interface/predictionMarket/`: `IPredictionMarketDetector` (LLM, returns `DraftFinding[]`), `IPredictionMarketVerifier` (deterministic, re-fetches live odds and applies pattern-specific gates), `IPredictionMarketFindingBroadcaster` (one Telegram message per finding). Detector adapter (`OpenAIPredictionMarketDetector`) targets four patterns — `logical_inconsistency` / `term_structure_anomaly` / `implied_contradiction` / `movement_divergence` — using OpenAI structured outputs and a Redis cache keyed on `sha256(clusterId + sortedMembers@bucketedYesPriceBp + promptVersion + model)` (TTL 30 min, 50-bp price bucket). Verifier (`PredictionMarketVerifier`) re-fetches via the new `IPredictionMarketProvider.fetchByIds` (Polymarket Gamma `?condition_ids=`, batched 50/req), drops findings on hallucinated ids, sub-$25k liquidity, >50bp odds drift, or pattern-gap < 100bp; computes `magnitudeBps` per pattern and `rankScore = patternWeight × confidenceWeight × min(gap/1000, 1) × log10(minLiquidity)` (×1000 to fit `integer`). Findings broadcaster builds an `IntentResult{verb: "prediction_market_finding"}` with two URL `nextActions` linking out to Polymarket per side; per-user dedupe key `pm:finding:lastSeen:{userId}:{findingId}` (TTL 7d) prevents same `findingId` re-pushing within the window — cross-run dedupe is intentionally absent. **Carry-forward stable cluster IDs:** when stage 2 cache-hits, the use-case now passes the prior run's `clusterId` into `repo.insertClusters(runId, clusters, clusterIds)` so the detector cache key and `prediction_market_findings.cluster_id` correlate across runs (analytical: "how often did cluster X surface a finding?"). **Why:** stage-3 is the first user-visible signal of the prediction-market pipeline; sequential per-tick execution keeps the operational model trivial (one cron, one sequence) and bounds finding-broadcast latency by `PREDICTION_MARKETS_FETCH_INTERVAL_MS`. **New conventions:** (a) `IntentVerb: prediction_market_finding` is a job-driven push verb (no error patterns); (b) `RawMarket.priceChange24hBps` / `priceChange7dBps` are transient — provider-populated, NOT persisted on `prediction_market_snapshots`; (c) `IPredictionMarketRepository.insertClusters` takes optional `clusterIds[]` for carry-forward — stage-2 reclustering passes `undefined` per cluster and the repo mints a UUID. **New log scopes:** `predictionMarketDetector`, `predictionMarketVerifier`, `predictionMarketFindingBroadcaster`. **New step events:** `stage3-start`, `stage3-end`, `detect`, `verify`, `broadcast-finding-start`, `broadcast-finding-end`. **New metadata fields:** `clusterId`, `findingId`, `patternType`, `magnitudeBps`, `rankScore`, `surviving`, `drafts`, `findingsDetected`, `findingsVerified`, `findingsBroadcast`. Default `PREDICTION_MARKETS_FINDINGS_ENABLED=false` — independent dark-launch switch (read once at orchestration call site so a flip doesn't half-run).
-- **2026-05-06 — Prediction-market scan (stages 1 & 2).** Worker-only job (`predictionMarketScanJob`) polls Polymarket Gamma API every `PREDICTION_MARKETS_FETCH_INTERVAL_MS` (default 30 min), filters to top-100 binary YES/NO markets meeting OI/volume/resolution-window/criteria thresholds, and persists a versioned snapshot with `is_latest = true` (atomic flip in a transaction). Stage 2 (LLM clustering) runs only when the universe hash changes, when > `RECLUSTER_DELTA` markets churn, or when the last clustering is older than `MAX_RECLUSTER_AGE_MS`. Classifier uses OpenAI structured-outputs (`response_format: json_schema, strict`) keyed on `(promptVersion, model, sha256(sortedMarketIds@resolutionEpochs))`; overlapping market_ids are dropped lower-confidence-first. Broadcast goes to all active telegram users via the result-card framework (`IntentVerb: prediction_market_brief`), gated by per-user Redis dedupe `pm:broadcast:lastHash:{userId}` so identical cluster sets are silent. New ports: `IPredictionMarketProvider`, `IPredictionMarketClassifier`, `IPredictionMarketRepository`, `IPredictionMarketBroadcaster` under `use-cases/interface/predictionMarket/`. **Why:** stage-3 (mispricing detection) needs price-fresh universe + stable causal clusters; this lays the data layer + cadence. **New conventions:** (a) money columns on `prediction_market_snapshots` are stored as `bigint` cents and prices as `integer` basis points (no float drift); (b) `setLatestRun(runId)` is the only sanctioned way to flip the latest pointer — always inside a transaction; (c) `IntentVerb: prediction_market_brief` is a job-driven push verb (no error catalog patterns expected); (d) the scan job acquires `pm:scan:lock` via `SET NX PX` so multi-replica workers don't double-fire. **New log scopes:** `predictionMarketScan`, `polymarketProvider`, `predictionMarketClassifier`, `predictionMarketBroadcaster`, `predictionMarketScanJob`. **New metadata fields:** `runId`, `marketCount`, `clusters`, `published`, `universeHash`. Default `PREDICTION_MARKETS_ENABLED=false` — first deploy is dark.
-- **2026-05-05 — Auto-resume after Aegis-Guard reapproval.** When a /send or /swap hits an insufficient-delegation guard, `aegisGuardInterceptor` mints an `ApproveRequest`; the originating capability now also writes a `PendingIntent` (Redis `pending_intent:{approvalRequestId}`, TTL paired with the approval request, ~10 min) carrying `{capabilityId, params, userId, channelId}`. New port `IPendingIntentStore` (`use-cases/interface/output/cache/pendingIntent.cache.ts`) + `RedisPendingIntentStore` impl. `ICapabilityDispatcher` gained a `resume({capabilityId, params, ctx})` entry point that bypasses `collect()` and calls `capability.run` directly. `httpServer.applyAegisGuardApproval` reads the pending intent by approval requestId, sends "Aegis Guard enabled. Resuming your previous request…", dispatches the resume, then deletes the entry. **Why:** before this change, after the user approved more allowance the original send/swap intent was lost — they had to retype the command. **New conventions:** (a) capabilities returning `kind:"mini_app"` for an `aegis_guard` reapproval MUST persist their resolved params via `IPendingIntentStore` keyed by `guard.reapprovalRequest.requestId` so the post-approval auto-resume has something to dispatch; (b) swap params include `forceRequote?: boolean` — set when resumed so `run()` re-fetches a fresh Relay quote (today `run()` always re-quotes, but the flag pins the contract for future caching); (c) `dispatcher.resume()` is the only sanctioned way to re-enter a capability with already-resolved params — never call `capability.run` directly from outside the dispatcher. **New log fields:** `step: "approval-required"` (write side, in send/swap capabilities), `step: "approval-resumed"` (read side, in httpServer), `mode: "fresh"|"resumed"` on swap-run telemetry, `approvalRequestId` correlation id throughout. **Replicas:** the http-only `httpCli` replica has no dispatcher; if an approval lands there the resume falls back to "Aegis Guard enabled." and the user must re-issue the command (graceful degradation; the cache entry is deleted either way).
-- **2026-05-05 — Unify natural-language intents onto the slash-command capability dispatcher.** Free-text "swap …", "send …", "top up", "deposit into yield", etc. now route through the **same code path** as their `/`-prefixed counterparts. New LLM tool `route_intent` (`adapters/.../tools/routeIntent.tool.ts`) takes `{command: INTENT_COMMAND, rest: string}` and re-enters `capabilityDispatcher.handle({kind:"text", text:"${command} ${rest}"})` — modeled on the existing `StockOpenTool` pattern. `assistant.usecase.DEFAULT_SYSTEM_PROMPT` instructs the LLM to call `route_intent` for every on-chain or money request and reserve dedicated read tools (`get_portfolio`, `get_transfer_history`, `get_stock_quote`, `get_stock_positions`, `wallet_balances`, `transaction_status`) for queries. **Result:** byte-identical signing-request payloads from "/swap" and "swap", same Aegis-Guard delegation gate, same `result_card` receipts, same logs scoped to the capability — no second processor exists. **Removed** (legacy parallel intent path): `ExecuteIntentTool`, `TransferErc20Tool`, `OpenAIIntentParser`, `OpenAIIntentClassifier`, `IIntentParser`, `IIntentClassifier`, `ClaimRewardsSolver`, `validateIntent`, `MissingFieldsError`/`InvalidFieldError`/`ConversationLimitError`, `IntentUseCase.parseAndExecute`, `IntentUseCase.classifyIntent`, `IntentExecutionResult`, the `intent.errors` module, and the LLM's `execute_intent` tool. **Kept** (still load-bearing for capabilities): `IntentUseCase.{searchTokens, selectTool, compileSchema, buildRequestBody, generateMissingParamQuestion}`, `SolverRegistry` + `ManifestDrivenSolver` (sendCapability builds ERC-20 transfer calldata via manifests), `ISchemaCompiler`, `ICommandToolMappingDB`, `IntentPackage` shape (used by `ISolver.buildCalldata`). The `intents` table + `IIntentDB` repo and the `intent_executions` table + `IIntentExecutionDB` repo are now write-free; left in place to avoid migrations and so `transferHistory.usecase` keeps working with empty enrichment. `TOOL_TYPE.EXECUTE_INTENT` replaced with `TOOL_TYPE.ROUTE_INTENT` + `TOOL_TYPE.STOCK_OPEN`; `RESERVED_NAMES` for user-defined HTTP tools updated accordingly. **New convention:** new capabilities reach NL by adding their `INTENT_COMMAND` value to `routeIntent.tool.ts:COMMAND_VALUES` — no per-feature LLM tool. **Why this matters:** before this change, "swap" went through `executeIntent → intent.usecase.parseAndExecute → solverRegistry`, which had no swap solver registered, so free-text swaps either rejected ("not yet supported") or built raw calldata with no mini-app handoff — completely diverging from `/swap`'s Relay + Aegis-Guard + step-execution path.
-- **2026-05-05 — Sign-error diagnostics: surface raw revert reasons in BE logs.** `POST /response` schema gained an optional `errorRaw: string (≤1024)` field; FE `SignHandler` now sends `msg.slice(0, 1024)` (raw `${err.name}: ${err.message}` from the failing `sendTransaction`) alongside the existing `errorCode`/`errorMessage`. `signingRequest.usecase.resolveRequest` accepts it and, on rejection, emits a `warn` log `step: "signing-request-rejected-raw"` carrying `errorRaw` + `requestId` + `userId` + `errorCode`. Not persisted in the cache record, never re-displayed to the user — purely diagnostic. Motivation: when `interpretSignError.ts` falls through to `errorCode: "unknown"` (e.g. on-chain `BAL#402` from a Relay-picked Balancer pool), the BE previously had only the friendly "Something went wrong…" string and a generic `swap step rejected` log — the actual revert reason was unrecoverable without client-side capture. **New metadata field:** `errorRaw` (raw client-side error text, debug-only).
-- **2026-05-05 — Result-card framework: review-feedback closure.** `assistantChatCapability` now fully migrated via new `assistantResultRouter.ts`: read-only system tools (`get_transfer_history`, `get_stock_positions`, `get_stock_quote`, `get_portfolio`) return `{success, data, structured?}`; `data` (markdown table) feeds the LLM, `structured` is captured by `AssistantUseCaseImpl` (last-tool-wins) and surfaced via `IChatResponse.lastStructuredToolResult`. The capability emits `result_card` whenever `lastStructuredToolResult` is present and falls back to `kind:"chat"` otherwise (LLM prose intentionally suppressed on the structured branch). Renderer's "code …" support-id tail now gated to `errorCode === "internal" | undefined` only — `IntentResult.errorCode` flows from `interpretError(...).code`, so known catalog codes (`amount_too_low`, `no_route`, etc.) never leak a request id alongside friendly text. Three previously-unreachable error codes (`unsupported_token`, `insufficient_allowance` with `/permissions` recovery, `transfer_history_unavailable`) now have regex patterns + tests. `executeSignSteps` gained an `previews?: (IntentResult | undefined)[]` array (legacy single `preview` still respected, attached to step 0 only) — wired on stock open/close so the FE shows distinct cards per step ("Approve USDC" → "Swap on BSC" → "Open AAPL long"). `notifyResolved` and `yieldReportJob.sendReport` emit canonical `step:'started'|'succeeded'|'failed'` lifecycle with `durationMs` + `mode` discriminator. New `helpers/errors/errorCatalog.md` documents every code + recovery + the renderer-side internal-only requestId-tail rule.
-- **2026-05-05 — Result-card framework P7+ (jobs + helpers + queries).** `positionsCapability` migrated: skips the LLM tool loop, calls `IStockUseCase.listPositions` directly, emits `result_card{verb:"positions_query"}` with structured fields (success-empty cards instead of chat strings). `loyaltyCapability` (`/points`, `/leaderboard`) migrated: balance is a `primary` field; recent ledger entries / leaderboard rows surface via `details` + caller-row `emphasis:"primary"` highlight; legacy formatters deleted. `notifyResolved` migrated: every branch (success-with-decoded-ERC20, recovery-success, insufficient_token_balance USDC `/buy` nudge keeping `buy:y:N`/`buy:n:N` payloads byte-identical, Aster `stockErrorMessage` table) now constructs an `IntentResult` and renders via `renderResultCard`. The bespoke explorer-link helper is gone — the renderer auto-derives "View on explorer" from `IntentResult.txHashes`. `yieldReportJob.sendReport` migrated to `verb:"portfolio_summary"` + `complexity:"complex"`; the inline OpenAI prompt was removed in favour of the framework's `IIntentInterpreter`. `helpers/env/resultCardEnv.ts` centralises all `RESULT_CARD_INTERPRETER_*` reads. **New convention:** read-only query capabilities (positions, loyalty, balance, history) emit `result_card{status:"success"}` even on the empty path — "No data" is an outcome, not a `chat`. When migrating non-renderer call sites (jobs/helpers), prefer importing `renderResultCard` and sending via existing transport over plumbing the full `IArtifactRenderer` through DI.
-- **2026-05-05 — Result-card framework P2–P6 (capability migrations).** `swapCapability`, `sendCapability`, `yieldCapability` (deposit/withdraw/rebalance), `buyCapability`, `stockCapability` now emit `result_card` for terminal outcomes (verbs: `swap`, `send`, `yield_deposit`/`withdraw`/`rebalance`, `buy_onramp`, `stock_buy`/`close`/`set_exits`). Pre-sign Telegram quote summaries removed in favour of `Artifact.sign_calldata.preview?: IntentResult` (carried through `SigningRequestRecord.preview` — JSON-roundtrips through redis without serializer change) so the mini-app modal renders a clean human-readable summary instead of raw `to`/`value`/`calldata`. Status emoji map (`pending → ⏳`, `failed → ⚠️`, `success → ✅`) is consistent across the codebase via the renderer. Helpers `helpers/format/humanFormat.ts` (formatTokenAmount/Usd/RelativeTime/Duration, truncateHash) and `capabilities/buildPreview.ts` are the canonical formatters. **New conventions (do not break):** (a) capabilities emitting `sign_calldata` for ERC-20/native spends MUST attach `preview: buildPreview({...})`; (b) for multi-step flows, preview attaches to the FIRST `SigningRequestRecord` only (subsequent steps `preview: undefined`); (c) `complexity:"complex"` is reserved for cross-chain swaps, multi-step swaps, yield rebalance, stock buy — single-token sends and same-chain single-step swaps default to `"simple"` so the interpreter never fires for them; (d) pre-execution `abort` / disambiguation prompts stay `kind:"chat"` (ask-style ≠ outcome); (e) `verbForKind` in stockCapability is the canonical pattern for mapping internal-kind unions to `IntentVerb`.
-- **2026-05-04 — Result-card framework P1 (foundations).** New `IntentResult` shape and `result_card` artifact variant in `use-cases/interface/input/resultCard.types.ts` carrying `status × verb × headline × fields × txHashes? × nextActions? × complexity? × interpreterContext? × details? × requestId? × errorCode?`. Renderer (`adapters/.../artifactRenderer/resultCard.{render,escape}.ts`) is the single place that touches Telegram MarkdownV2; `escapeMd` runs over every capability-supplied substring; layout is status-emoji + headline, body fields, optional italic interpreter note, "What's next" line, MarkdownV2 spoiler `||...||` for details + tx hashes. `TelegramArtifactRenderer.render` gained `case "result_card"` that invokes the optional `IIntentInterpreter` only when `complexity === "complex"` (failures swallowed, never block the receipt; `preview`-status cards are dropped on the Telegram side — they belong to the mini-app). Telegram input handler recognises `cmd:<text>` callback data on the global callback router: strips the prefix and re-dispatches as `{kind:"text", text}` — this is what makes a result card's "command" `nextAction` button tappable end-to-end (Telegram doesn't support a button that types `/cmd` for the user). New port `IIntentInterpreter` + OpenAI adapter (`adapters/.../intentInterpreter/openai.intentInterpreter.ts`): 2s timeout via `Promise.race`, optional `RedisResponseCache` keyed by `sha256(verb|status|fields|context)` with 5-min TTL, sentence clamped to ≤25 words. **Conventions introduced:** all terminal capability outcomes MUST eventually become `kind:"result_card"` — `kind:"chat"` is reserved for intermediate ask-prompts; capabilities never write MarkdownV2; capabilities never inline error strings — they call `interpretError(err, { verb, requestId })` from `helpers/errors/errorCatalog.ts`. New verbs go on the `IntentVerb` union; new error codes go on `ErrorCode` AND its `PATTERNS` table. New log scopes: `resultCardRender`, `errorCatalog`, `intentInterpreter`.
-- **2026-05-04 — Auto-rebalance (minimal, Part B of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md`).** `runPoolScan` now maintains a `yield:winner_streak:{chainId}:{token}` Redis record (`{protocolId, apy, count, lastTs}`, TTL `4 × poolScanIntervalMs`) so a switch must persist for `YIELD_REBALANCE_STICKY_SCANS=3` consecutive scans (~6h at 2h cadence) before nudging. New use-case methods: `scanRebalanceForUser` (sticky gate + position discovery + APY-delta gate against `YIELD_REBALANCE_MIN_DELTA_BPS`), `buildRebalancePlan` (re-reads position; emits `withdrawAll(old) + supply(new)`), `finalizeRebalance` (snapshots both protocols, clears pending), `clearRebalancePending`. `userIdleScanJob` calls `scanRebalanceForUser` as a sibling step to `scanIdleForUser` — both gated by their own Redis cooldowns (`yield:rebalance_cooldown:{userId}` 24h; `yield:rebalance_pending:{userId}` 1h). `YieldCapability` owns both `yield:` and `rebalance:` callback prefixes (`TriggerSpec.callbackPrefix` extended to accept `string | string[]`); on `rebalance:y:<chainId>:<token>:<from>:<to>` it builds the plan, emits a Markdown quote summary + mini-app session, tags ONLY the supply leg with `tokenAddress + amountRaw` for delegation spend bookkeeping (the withdraw burns aTokens), and awards `yield_deposit` loyalty on success. No opt-in flag — every user with a position is nudged (mitigated by sticky + per-user cooldown). Without a second adapter the entire path stays dormant in production. New convention: `callbackPrefix: string | string[]` lets one capability own multiple prefix families.
-- **2026-05-04 — Yield bug-fix batch (Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalance.md`).** A1: `SubgraphPrincipalProvider` warns once at boot when `THEGRAPH_API_KEY` is unset, exposes `status(): "ok"|"degraded"|"disabled"` surfaced via `/health`. A2: ranker now uses a true EMA (`α = 2/(N+1)`) on the newest-first APY history (matches plan). A3: `scripts/verify-aave-apy.ts` reads raw `liquidityRate` and prints both the no-compound APR and the production-formula APY. Verified 2026-05-04 on Avalanche USDC (rate=5.7522% APR → 5.9208% APY) against Aave's own `aave-utilities` formatter (`calculateCompoundedInterest` → `binomialApproximatedRayPow`, the math `app.aave.com` itself uses). Formula kept; confirming comment added in `aaveV3Adapter.ts`. `scripts/flush-yield-apy-history.ts` staged (unused, since formula did not change). A4: `yieldReportJob` user discovery now unions `listUsersWithRecentSnapshots` with `telegramSessions.listActiveUserIds`; per-user fan-out runs through `pLimit(5)`. A5: `IYieldRepository.listSnapshotsBetween(userId, fromInclusive, toExclusive)` replaces the off-by-one `listSnapshots(_, sinceEpoch-1)` at both call sites in `yieldOptimizerUseCase`. A6: `finalizeWithdrawal` now re-discovers + `upsertSnapshot` per (chain, protocol, token) — failures `warn` and never rethrow. A7: yield-job DI getters log a one-shot `redis-missing` warning when they return `undefined`; `workerCli` logs a `yield jobs status` summary mirroring stock soft-fail. New convention: structured log fields `feature: "yield"` (lifecycle/boot warnings) and `reason: "redis-missing"` (job no-start cause).
-- **2026-05-04 — Aster tokenized stocks Phase 3 (close + SL/TP + /positions + return-swap).** `runClose` chains the venue→home return-swap into the same mini-app session via `executeSignSteps({ continueSession: true, planKind: "recovery" })` — `notifyResolved` then surfaces "Funds returned." on the resolved leg. Multi-position SL/TP picker (`stock:exits-pick:<short>:<sl|tp>:<price>`) mirrors the close-pick pattern. `/positions` ships as `PositionsCapability` (LLM-seeded, calls `get_stock_positions` system tool). PnL formatting reads `collateralToken.decimals` (was hardcoded 6 → 10^12 display bug on 18-dec USDC.bsc).
-- **2026-05-04 — Aster tokenized stocks Phase 2 (open / short execution + agent tools + read routes).** `StockUseCaseImpl` (open / close / set-exits / return-swap / list / resolve) consumes `IStockBrokerProvider` + `ICrossChainSwapPlanner` + `IStockPriceOracle` + `IStockPairRegistry` + `IStockPositionsProvider`. `RelayCrossChainSwapPlanner` adapts `IRelayClient.getQuote` to the planner port (consumes `currencyOut.amount` as `expectedOutRaw`; defensively coerces hex `value` → decimal). `StockCapability` parses `/stock buy|short|close|sl|tp` deterministically (regex). 6 sign-error codes (`aster_pair_inactive`, `aster_min_size`, `aster_max_position`, `aster_oracle_stale`, `aster_insufficient_collateral`, `stock_recovery_failed`) — lockstep contract with FE `interpretSignError.ts`. `SigningRequestRecord.planKind: "recovery"` flows through `SigningResolutionEvent` → `notifyResolved` for recovery-success UX. BSC `relayEnabled: true` flipped on. Read-only agent tools `get_stock_quote` / `get_stock_positions` (NO execution tools — agent never trades directly). HTTP `GET /stocks/quote`, `GET /stocks/positions`. Three new loyalty action types (`stock_open_long/short/close`).
-- **2026-05-04 — Aster tokenized stocks Phase 1 (read-only foundation).** BSC chain registry entry (relayEnabled initially false). `AsterDiamondClient` (single viem PublicClient pinned to BSC, fan-out via `fallback`). `AsterPairRegistry` — 6 hardcoded symbols (AAPL/AMZN/TSLA/NVDA/GOOG/META) verified against live `pairsV4()` at boot via `verifyStockCapability()`. Soft-fail boot: errors flip `_stockCapabilityDisabled` and flow as 503 `stocks_unavailable` from every stock route — backend keeps booting. New ports under `interface/output/stocks/` (`IStockBrokerProvider`, `IStockPriceOracle`, `IStockPairRegistry`, `IStockPositionsProvider`, `ICrossChainSwapPlanner`). `GET /stocks/pairs`, `npm run verify:aster` script. `divFixed` shared BigInt helper. Chain id `56` lives only in `asterBrokerProvider.ts:VENUE_CHAIN_ID` (documented exception).
-- **2026-05-04 — Native token via synthesis.** `NATIVE_PSEUDO_ADDRESS` + `getNativeTokenInfo(chainId)` in `chainConfig.ts`; `DbTokenRegistryService` synthesizes the native row (no DB seed). `manifestSolver/stepExecutors.executeErc20Transfer` branches on `isNativeAddress` to emit `{ value: amountRaw, data: "0x" }`.
-- **2026-05-04 — Native auto-sign.** Removed the `!fromToken.isNative` guard in `sendCapability`; native sends now share the autosign branch. `awardPoints` branches `send_native` vs `send_erc20`. `tryEmitDelegationRequest` still skips native (no on-chain `approve()`).
-- **2026-05-04 — Ankr transfer history.** New `ITransferHistoryProvider` port; `AnkrTransferHistoryProvider` merges `getTransactionsByAddress` + `getTokenTransfers`. `CachedTransferHistoryProvider` adds Redis cache + per-user RPM + global RPS + stale-on-gate-refusal. New `GET /transfers` route. New agent tool `get_transfer_history`. Cursor is opaque (Ankr `{tx, token}` JSON).
-- **2026-05-03 — Self-derived recipient SCA.** `helpers/aaConfig.ts` + `deriveScaAddress.ts` (1h LRU). `userProfile.repo.findByEoaAddress`; `eoa_address` lowercased on write. Resolver/sendCapability fall back to `deriveScaAddress` for un-onboarded recipients (previously returned EOA — funds unreachable). One-off script `scripts/verify-sca-derivation.ts` proved 100% match against Privy's derivation before enabling.
-- **2026-04-28 — Delegation spend bookkeeping.** `signingRequest.usecase.resolveRequest` now calls `tokenDelegationDB.addSpent` when `tokenAddress`+`amountRaw` are present. `swapCapability` only tags the last step; `yieldCapability` deposits tag `plan.amountRaw`, withdrawals omit. `upsertMany` preserves `spent_raw` when `limit_raw` unchanged (was wiping FE permission bar).
+- **2026-05-04 — Native via synthesis.** `NATIVE_PSEUDO_ADDRESS` + `getNativeTokenInfo(chainId)` in `chainConfig.ts`; `DbTokenRegistryService` synthesizes the native row (no DB seed). `manifestSolver/stepExecutors.executeErc20Transfer` branches on `isNativeAddress` to emit `{ value: amountRaw, data: "0x" }`.
+- **2026-05-04 — Native auto-sign.** `sendCapability` removed the `!fromToken.isNative` guard; native sends share the autosign branch. `awardPoints` branches `send_native` vs `send_erc20`.
+- **2026-05-04 — Ankr transfer history.** `ITransferHistoryProvider` port; `AnkrTransferHistoryProvider` merges `getTransactionsByAddress` + `getTokenTransfers`. `CachedTransferHistoryProvider` adds Redis cache + per-user RPM + global RPS + stale-on-gate-refusal. `GET /transfers` route. New agent tool `get_transfer_history`. Cursor opaque (Ankr `{tx, token}` JSON).
+- **2026-05-03 — Self-derived recipient SCA.** `helpers/aaConfig.ts` + `deriveScaAddress.ts` (1h LRU). `userProfile.repo.findByEoaAddress`; `eoa_address` lowercased on write. Resolver/sendCapability fall back to `deriveScaAddress` for un-onboarded recipients (was returning EOA — funds unreachable). `scripts/verify-sca-derivation.ts` proved 100% match against Privy's derivation.
+- **2026-04-28 — Delegation spend bookkeeping.** `signingRequest.usecase.resolveRequest` calls `tokenDelegationDB.addSpent` when `tokenAddress`+`amountRaw` are present. `swapCapability` only tags the last step; `yieldCapability` deposits tag `plan.amountRaw`, withdrawals omit. `upsertMany` preserves `spent_raw` when `limit_raw` unchanged.
 - **2026-04-28 — Recipient notifications.** `RecipientNotificationUseCase` + `recipient_notifications` table. `dispatchP2PSend` (best-effort) at every successful p2p send via `buildNotifyResolved`. `flushPendingForTelegramUser` runs on `/start` + auth.
 - **2026-04-28 — Ankr-backed portfolio.** `IBalanceProvider` port; `AnkrBalanceProvider` (single HTTP call) wrapped in `CachedBalanceProvider` (30s in-memory TTL). Feature-flagged via `PORTFOLIO_PROVIDER`. Fuji has no `ankrBlockchain` and always uses RPC.
-- **2026-04-28 — Yield positions revamp.** Active-protocol discovery is on-chain (`OnChainPositionDiscovery` fans out across `protocol × stablecoin`); principal source is The Graph Messari Aave V3 subgraph. `yield_deposits` + `yield_withdrawals` tables **dropped** (`0026_stale_mandrill.sql`). `buildDepositPlan` no longer writes a DB row. `finalizeWithdrawal` is a no-op.
 - **2026-04-27 — Sign-resolution UX.** Shared `helpers/notifyResolved.ts`. Decodes ERC-20 transfers; success → explorer link via `getExplorerTxUrl(chainId, txHash)`. `insufficient_token_balance` + USDC → `buy:y/<amount>` keyboard.
 - **2026-04-27 — `/swap` + `/yield` UX parity with `/send`.** Single mini-app session per intent (step 1 emits `mini_app`; rest stored via `miniAppRequestCache`). `swapCapability` short-circuits USDC via `getUsdcAddress(chainId)`. Final swap completion includes explorer InlineKeyboard. swap bugfixes: pass `smartAccountAddress` (not EOA) to Relay; `chainId` on every step.
 - **2026-04-27 — Global `$ → USDC` normalization.** `normalizeFiatAmount` runs in `OpenAISchemaCompiler.compile` for all capabilities.
-- **2026-04-25 — Loyalty Program (Season 0).** `computePointsV1` formula, idempotent on `intent_execution_id`. Seven canonical action types: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `send_native`, `yield_deposit`, `yield_hold_day` (deferred), `referral`, `manual_adjust`. Fire-and-forget at all call sites. `LOYALTY_STATUSES` on `users`: `normal/flagged/forbidden`.
-- **2026-04-25 — Cloud Run CI/CD + healthcheck + auth hardening.** `POST /health` (unauth, no secrets). Admin gate (`ADMIN_PRIVY_DIDS`) on `POST /tools`, `POST/DELETE /command-mappings`. Ownership gate on `GET /permissions`, `GET /request/:id` (non-auth). `POST /response` auth bypasses `resolveUserId`.
-- **2026-04-24 — Scaling.** DB pool `max:25`. `MESSAGE_HISTORY_LIMIT=30`. OpenAI global concurrency cap. DateTime out of system prompt → prefix-cache stays warm. Privy `verifyTokenLite` LRU. Redis-backed `IPendingCollectionStore`. Multi-replica safe session reads (Postgres). Tavily + Relay quote cached in Redis. `ChainEntry.defaultRpcUrls` is `string[]` (viem `fallback`).
+- **2026-04-25 — Loyalty Program (Season 0).** `computePointsV1` formula, idempotent on `intent_execution_id`. Canonical action types: `swap_same_chain`, `swap_cross_chain`, `send_erc20`, `send_native`, `yield_deposit`, `yield_hold_day` (deferred), `referral`, `manual_adjust`. Fire-and-forget at all call sites. `LOYALTY_STATUSES` on `users`: `normal/flagged/forbidden`.
 - **2026-04-24 — Swap (Relay).** `SwapCapability`. Aegis Guard check → `RelaySwapTool.execute` → per-step `SigningRequest`. Multi-step continuation via `?after=<prevId>` (Redis ZSET `user_pending_signs:<userId>`).
-- **2026-04-24 — Yield optimizer.** Avalanche mainnet, Aave v3. `runPoolScan` / `scanIdleForUser` / `buildDepositPlan` / `finalizeDeposit` / `buildWithdrawAllPlan` / `buildDailyReport`. Ranking: `score = 0.7·EMA_7d(supplyApy) + 0.3·currentSupplyApy`; disqualify if liquidity < $100k; ×0.5 if utilization > 95%.
-- **2026-05-05 — Drop dynamic tool registry (Phase B).** `sendCapability` now owns an in-code `SEND_MANIFEST: CapabilityManifest` (verbatim from `drizzle/0023_seed_send_tool.sql:36`) and a private `buildTransferCalldata` helper that mirrors `executeErc20Transfer` byte-for-byte (native = recipient/`0x`/value-raw; ERC-20 = `viem.encodeFunctionData(erc20Abi, "transfer", …)`). The `selectTool`/`buildRequestBody` calls in `sendCapability.run/collect` were replaced with the inline manifest + helper; `IIntentUseCase` now exposes only `searchTokens`/`compileSchema`/`generateMissingParamQuestion` — `selectTool`, `buildRequestBody`, `discoverRelevantTools`, `resolveConflicts` and the `commandToolMappingDB`/`toolManifestDB`/`solverRegistry`/`toolIndexService` constructor deps are gone. Deleted: `commandMapping.usecase.ts` + interface + `commandToolMapping.repo.ts` (use-case + drizzle repo); the repo's `commandToolMappings` accessor on `DrizzleSqlDB`. Added: `helpers/types/manifest.ts` exporting `CapabilityManifest` (slim 6-field type — `toolId/name/category/description/inputSchema/requiredFields?`) used by both `SEND_MANIFEST` and `SWAP_MANIFEST`. **Why:** the `selectTool` RAG/ILIKE path was the only consumer of `tool_manifests` reads; with all tools registered in DI we don't need it. **New convention:** capability tools register their own `CapabilityManifest` constant inline; calldata is built directly inside the capability rather than going through a solver. **Out of scope (Phase C):** solver framework, `tool_manifests` repo + zod types, Pinecone + OpenAI embedding deps still alive but inert. **Out of scope (Phase D):** `tool_manifests`, `command_tool_mappings`, `http_query_tools`, `http_query_tool_headers` schema declarations + DB tables.
+- **2026-04-23 — Onramp `/buy`.** `BuyCapability` bypasses `selectTool`/manifests. `buy:y` → SCA address; `buy:n` → `OnrampRequest` mini-app.
 
-- **2026-05-05 — Drop dynamic tool registry (Phase A).** Deleted the admin/runtime tool-registration surface that nothing in-code consumed: `POST/GET/DELETE /tools` (toolRegistration use-case + interface), `POST/GET/DELETE /command-mappings` HTTP routes (use-case kept until Phase B inlines `SEND_MANIFEST`), `POST/GET/DELETE /http-tools` (httpQueryTool use-case + repo + tool + per-user registration loop in `assistant.di.ts:registryFactory`), plus `helpers/crypto/aes.ts` (its only consumers were the deleted httpQueryTool files). Health-response keys `toolRegistration`, `commandMapping`, `httpQueryTool` removed. `httpQueryTools` accessor dropped from `drizzleSqlDb.adapter.ts`. **Why:** the dynamic registry was unused — no FE consumer, no in-code tool depends on `IToolManifestDB`/`ISolverRegistry`/`IToolIndexService`. Phase B inlines `SEND_MANIFEST` and removes the `selectTool`/`buildRequestBody` path in `intent.usecase.ts`. Schema declarations for `tool_manifests`, `command_tool_mappings`, `http_query_tools`, `http_query_tool_headers` and the corresponding repos are still alive (Phase C/D).
+### Platform / observability / scaling
+
+- **2026-05-05 — Sign-error diagnostics.** `POST /response` schema gained optional `errorRaw: string (≤1024)`; FE `SignHandler` sends `msg.slice(0, 1024)` (raw `${err.name}: ${err.message}`) alongside `errorCode`/`errorMessage`. `signingRequest.usecase.resolveRequest` emits `warn` `step:"signing-request-rejected-raw"` carrying `errorRaw + requestId + userId + errorCode`. Diagnostic-only — never re-displayed to users, never persisted in cache.
+- **2026-04-25 — Cloud Run CI/CD + healthcheck + auth hardening.** `POST /health` (unauth, no secrets). Admin gate (`ADMIN_PRIVY_DIDS`) on admin routes. Ownership gate on `GET /permissions`, `GET /request/:id` (non-auth). `POST /response` auth bypasses `resolveUserId`.
+- **2026-04-24 — Scaling.** DB pool `max:25`. `MESSAGE_HISTORY_LIMIT=30`. OpenAI global concurrency cap. DateTime out of system prompt → prefix-cache stays warm. Privy `verifyTokenLite` LRU. Redis-backed `IPendingCollectionStore`. Multi-replica safe session reads (Postgres). Tavily + Relay quote cached in Redis. `ChainEntry.defaultRpcUrls` is `string[]` (viem `fallback`).
 - **2026-04-24 — Structured logging.** All `console.*` migrated to pino. Singleton `helpers/observability/logger.ts:createLogger`.
 - **2026-04-23 — Capability refactor.** All Telegram flows through `ICapabilityDispatcher`. `handler.ts` ~200 LOC (was 1146). `TriggerSpec.commands[]` for multi-command capabilities. Pending state must be JSON-safe.
-- **2026-04-23 — Onramp `/buy`.** `BuyCapability` bypasses `selectTool`/manifests. `buy:y` → SCA address; `buy:n` → `OnrampRequest` mini-app.
 
 ## Backlog
 - Proactive daily market sentiment → investment verdict agent.

@@ -46,6 +46,7 @@ import type {
   DelegationRecord as MiniAppDelegationRecord,
 } from "../../../../use-cases/interface/output/cache/miniAppRequest.types";
 import type { DelegationRecord as SessionDelegationRecord } from "../../../../use-cases/interface/output/cache/sessionDelegation.cache";
+import { SESSION_KEY_STATUSES } from "../../../../helpers/enums/sessionKeyStatus.enum";
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
 import { createLogger } from "../../../../helpers/observability/logger";
@@ -210,6 +211,8 @@ export class HttpApiServer {
       "GET /delegation/approval-params": (req, res, url) => this.handleGetDelegationApprovalParams(req, res, url),
       "POST /delegation/grant":         (req, res) => this.handlePostDelegationGrant(req, res),
       "GET /delegation/grant":          (req, res) => this.handleGetDelegationGrant(req, res),
+      "GET /delegation/spending-limits": (req, res, url) => this.handleGetDelegationSpendingLimits(req, res, url),
+      "POST /delegation/revoke":        (req, res) => this.handlePostDelegationRevoke(req, res),
       "GET /yield/positions":           (req, res) => this.handleGetYieldPositions(req, res),
       "GET /loyalty/balance":           (req, res) => this.handleGetLoyaltyBalance(req, res),
       "GET /loyalty/history":           (req, res, url) => this.handleGetLoyaltyHistory(req, res, url),
@@ -1007,6 +1010,124 @@ export class HttpApiServer {
 
     const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
     return this.sendJson(res, 200, { delegations });
+  }
+
+  /**
+   * Returns the per-token spending caps the FE must seed into the on-chain
+   * `toSpendingLimitPolicy` at session-key install. Source of truth is
+   * `tokenDelegation` rows — same rows that drive `aegisGuardInterceptor`.
+   * Optional `?chainId=` filter; defaults to home chain. Tokens with no
+   * delegation row are simply absent — installer translates "absent" as
+   * "cap = 0", which is the conservative default.
+   */
+  private async handleGetDelegationSpendingLimits(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    if (!this.tokenDelegationRepo) return this.sendJson(res, 503, { error: "Delegation service not available" });
+
+    const chainIdRaw = url.searchParams.get("chainId");
+    const chainId = chainIdRaw ? parseInt(chainIdRaw, 10) : CHAIN_CONFIG.chainId;
+    if (!Number.isFinite(chainId)) {
+      return this.sendJson(res, 400, { error: "Invalid chainId" });
+    }
+
+    const delegations = await this.tokenDelegationRepo.findActiveByUserId(userId);
+    const limits = delegations.map((d) => ({
+      token: d.tokenAddress,
+      cap: d.limitRaw,
+      validUntil: d.validUntil,
+    }));
+
+    log.info({ reqId, userId, chainId, count: limits.length }, "spending-limits served");
+    return this.sendJson(res, 200, { chainId, limits });
+  }
+
+  /**
+   * Revoke the user's session key. Wipes:
+   *   - Redis sessionDelegation cache entry (so the BE no longer recognises
+   *     the session key when it sees signed userOps).
+   *   - All token_delegations rows for this user (so Aegis Guard re-prompts
+   *     for approval on the next /send or /swap).
+   *   - userProfile.sessionKey* fields (status flipped to REVOKED, address
+   *     cleared) — historical audit lives via updatedAtEpoch.
+   *
+   * Onchain plugin invalidation is handled on the FE before this endpoint is
+   * called: the user signs a sudo userOp with their Privy EOA to invalidate
+   * the kernel nonce, which voids every spending-cap policy attached to the
+   * regular validator. This endpoint records the offchain truth.
+   */
+  private async handlePostDelegationRevoke(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const start = Date.now();
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+
+    log.info({ reqId, userId, step: "started" }, "delegation revoke");
+
+    const profile = this.userProfileDB ? await this.userProfileDB.findByUserId(userId) : undefined;
+    const sessionKeyAddress = profile?.sessionKeyAddress ?? null;
+
+    // Best-effort: each step is independent, and we want the request to clean
+    // up as much as possible even if a downstream system is briefly down.
+    let cacheRevoked = false;
+    if (this.sessionDelegationUseCase && sessionKeyAddress) {
+      try {
+        await this.sessionDelegationUseCase.revoke(sessionKeyAddress);
+        cacheRevoked = true;
+      } catch (err) {
+        log.error({ err, reqId, userId, sessionKeyAddress }, "redis-delegation-revoke-failed");
+      }
+    }
+
+    let deletedDelegations = 0;
+    if (this.tokenDelegationRepo) {
+      try {
+        deletedDelegations = await this.tokenDelegationRepo.deleteAllByUserId(userId);
+      } catch (err) {
+        log.error({ err, reqId, userId }, "token-delegation-delete-failed");
+      }
+    }
+
+    if (this.userProfileDB && profile) {
+      try {
+        const now = newCurrentUTCEpoch();
+        await this.userProfileDB.update({
+          userId,
+          telegramChatId: profile.telegramChatId,
+          smartAccountAddress: profile.smartAccountAddress,
+          eoaAddress: profile.eoaAddress,
+          sessionKeyAddress: null,
+          sessionKeyScope: null,
+          sessionKeyStatus: SESSION_KEY_STATUSES.REVOKED,
+          sessionKeyExpiresAtEpoch: null,
+          updatedAtEpoch: now,
+        });
+      } catch (err) {
+        log.error({ err, reqId, userId }, "user-profile-revoke-update-failed");
+      }
+    }
+
+    log.info(
+      {
+        reqId,
+        userId,
+        step: "succeeded",
+        cacheRevoked,
+        sessionKeyAddress,
+        deletedDelegations,
+        durationMs: Date.now() - start,
+      },
+      "delegation revoke complete",
+    );
+    return this.sendJson(res, 200, { ok: true, deletedDelegations });
   }
 
   private async handleGetLoyaltyBalance(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

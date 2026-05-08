@@ -11,4 +11,8 @@ export class SessionDelegationUseCaseImpl implements ISessionDelegationUseCase {
   findByAddress(address: string): Promise<DelegationRecord | null> {
     return this.cache.findByAddress(address);
   }
+
+  revoke(address: string): Promise<void> {
+    return this.cache.deleteByAddress(address);
+  }
 }

@@ -30,4 +30,9 @@ export interface ITokenDelegationDB {
 
   /** BigInt-adds amountRaw to spentRaw for the given (userId, tokenAddress) row. */
   addSpent(userId: string, tokenAddress: string, amountRaw: string): Promise<void>;
+
+  /** Removes all token delegations for the user. Used by the revoke flow so the
+   *  Aegis Guard re-prompts on the next intent. Returns the number of rows
+   *  deleted (zero is fine — the user may have never granted any cap). */
+  deleteAllByUserId(userId: string): Promise<number>;
 }

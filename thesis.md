@@ -2,7 +2,7 @@
 
 ## The one-line pitch
 
-Aegis is the daily intelligence layer for your on-chain money — the easiest way for Southeast Asian crypto holders to earn real DeFi yield, hold US stocks, and act on market moves through a single Telegram chat, in plain language, without ever giving up custody.
+Aegis is the daily intelligence layer for your on-chain money — the easiest way for Southeast Asian crypto holders to earn real DeFi yield and act on prediction-market mispricings through a single Telegram chat, in plain language, without ever giving up custody.
 
 ---
 
@@ -17,9 +17,9 @@ They cannot access that yield, because using it requires them to:
 - Decide which protocol, which pool, which chain — and monitor it daily
 - Trust a random Telegram trading bot with their private key, knowing one breach erases everything
 
-Meanwhile, the same users are locked out of US equities entirely — you cannot open a Robinhood or Schwab account from Hanoi or Manila. They want exposure to Tesla, Nvidia, the S&P. They have no way to get it.
+Meanwhile, the same users have appetite for active speculation — sports, elections, macro events — but the venues that actually match that demand on-chain (Polymarket and similar prediction markets) sit on a different chain, behind a clunky web UI, with no mobile-native distribution and zero edge-detection on top.
 
-The result: hundreds of millions of dollars of stablecoins sitting idle in Southeast Asian retail accounts, earning nothing, while their holders watch DeFi yields and US equities from the sidelines.
+The result: hundreds of millions of dollars of stablecoins sitting idle in Southeast Asian retail accounts, earning nothing, while their holders watch DeFi yields and live mispricings from the sidelines.
 
 ---
 
@@ -33,7 +33,7 @@ Three things are converging right now that did not exist eighteen months ago:
 
 3. **Telegram is the de facto financial frontend in Southeast Asia.** Vietnam alone has tens of millions of daily Telegram users; the platform is where crypto communities, traders, and OTC desks already live. Telegram Mini Apps added native payment rails and TON wallet integration in 2024. The distribution channel is in place.
 
-Tokenized US equities (via Aster) and prediction markets (via Kalshi) became accessible to non-US users on-chain in the same window. For the first time, a single agent can give a Vietnamese retail user yield on stables, exposure to Tesla, and a position on the next Fed decision — with no offshore brokerage account and no custodial trust.
+Polymarket and other on-chain prediction venues hit production scale in the same window — multi-billion-dollar volumes, deep books on geopolitics, sports, and macro events, all settled on-chain in USDC. For the first time, a single agent can give a Vietnamese retail user yield on stables and a position on the next Fed decision — with no offshore brokerage account and no custodial trust.
 
 The window to own the "AI-native financial command center for SEA retail" category is open. It will not stay open.
 
@@ -47,13 +47,12 @@ Aegis is a Telegram-native AI agent. Every morning, the user opens it and sees:
 - What's at risk today — APY changes, idle balances, market moves on assets they hold
 - What to do about it — one tap to compound, rebalance, hedge, or take a new position
 
-Underneath that intelligence layer, every DeFi action is one sentence away. Send. Swap. Earn yield. Buy tokenized US stocks. Take a position on Kalshi. The agent resolves the intent, sequences the on-chain calls, and executes through ZeroDev session keys — non-custodial, no signing friction, no learning curve.
+Underneath that intelligence layer, every DeFi action is one sentence away. Send. Swap. Earn yield. Take a position on a prediction-market mispricing the agent surfaced. The agent resolves the intent, sequences the on-chain calls (including cross-chain bridges via Relay), and executes through ZeroDev session keys — non-custodial, no signing friction, no learning curve.
 
 ### What users actually experience
 
-- **"Earn yield on my USDC"** — Aegis surveys Aave and other protocols, ranks by 7-day EMA, suggests the highest-scoring pool, and moves funds with one approval. A daily PnL report lands in Telegram every morning.
-- **"Buy $200 of Tesla"** — Aegis routes through Aster, executes the position, and adds it to the portfolio view. No US brokerage account required.
-- **"Will the Fed cut rates in June?"** — Aegis pulls live Kalshi odds and lets the user take a position from chat.
+- **"Earn yield on my USDC"** — Aegis surveys Aave and other protocols, ranks by 7-day EMA, suggests the highest-scoring pool, and moves funds with one approval. A daily PnL report lands in Telegram every morning. Auto-rebalance nudges fire when a competing protocol's APY beats the user's current pool by ≥50 bps for 3 consecutive scans.
+- **"This Polymarket cluster has a 4-point logical inconsistency"** — A daily scan over Polymarket's universe runs LLM-assisted clustering + four-pattern mispricing detection (logical inconsistency, term-structure anomaly, implied contradiction, movement divergence), verifies findings against fresh on-chain odds, and pushes a finding card with a one-tap **Place Bet** button. Stake bridges from the user's Avalanche SCA to a derived Polygon SCA via Relay; an EOA-signed Polymarket order fills; receipt and resolution cards arrive automatically.
 - **"Send 50 USDC to @alice"** — Resolved from Telegram handle, executed in one tap.
 - **"How much did I make this week?"** — Answered from on-chain data via tool calls, in plain language.
 
@@ -75,7 +74,7 @@ The core moat is two-sided. **For users**, it is trust — non-custodial executi
 
 ### Primary: Protocol fee on execution
 
-Every swap, send, yield deposit, stock purchase, and prediction market position settled through Aegis carries a small protocol fee, abstracted into the transaction. Invisible to the user, scales linearly with volume.
+Every swap, send, yield deposit, and prediction-market position settled through Aegis carries a small protocol fee, abstracted into the transaction. Invisible to the user, scales linearly with volume.
 
 ### Secondary: Platform fees from integrated protocols
 
@@ -94,10 +93,11 @@ The Capability system is open. Lending protocols, DEXs, asset issuers, and predi
 **The product is live and fully functional on Avalanche mainnet.**
 
 - Non-custodial send, swap (cross-chain via Relay), and yield deposit/withdraw on Aave v3 are production-ready
+- Auto-rebalance across Aave and competing protocols ships with sticky-winner hysteresis to suppress noisy switches
 - Loyalty Season 0 is seeded and active — daily on-chain activity is being rewarded
-- Cloud Run backend handles real user sessions with structured observability (pino logs, Prometheus-compatible metrics, Neon Postgres, Upstash Redis)
+- Prediction-market scan + LLM clustering + four-pattern mispricing detection + per-finding broadcast ships dark-launchable behind two independent flags; stage 4 (user-tap-to-bet via cross-chain bridge to Polygon + EOA-signed Polymarket order) is implemented end-to-end with the open ship-blocker (bridge-initiation endpoint) and `$1` mainnet validation pending before flipping `PREDICTION_MARKETS_BETS_ENABLED=true`
+- Backend on Fly.io (`aegis-core`, region `iad`) handles real user sessions with structured observability (pino logs, Prometheus-compatible metrics, Neon Postgres, Upstash Redis)
 - Telegram bot and Mini App are integrated end-to-end: auth via Privy, session key delegation, signing, confirmation, and failure recovery (including auto-prompt to top up via MoonPay on insufficient balance)
-- Tokenized US stocks (via Aster) and prediction markets (via Kalshi) are the next two Capabilities, slotting into the same architecture without requiring a redesign
 
 The architecture was built from day one as a hexagonal, plugin-style platform. Adding a new protocol is a Capability, not a refactor.
 
@@ -108,7 +108,7 @@ The architecture was built from day one as a hexagonal, plugin-style platform. A
 - **Account abstraction reached production maturity in 2023–2024.** ZeroDev and Pimlico hardened the infrastructure. Building on ERC-4337 today is like building on AWS in 2008.
 - **OpenAI's function-calling API made intent parsing trustworthy with real money.** The NL → structured JSON pipeline is reliable enough to ship.
 - **Telegram Mini Apps hit an inflection point in SEA.** Native payments, TON integration, and 800M+ global daily users — heavily concentrated in our target region.
-- **Tokenized US equities are accessible on-chain for the first time.** Aster and similar issuers opened up an asset class that was effectively walled off from non-US retail.
+- **Prediction markets are at scale.** Polymarket alone cleared multi-billion-dollar volumes through 2025 election cycles and now sustains deep books across geopolitics, sports, and macro events — large enough that LLM-detected mispricings on illiquid corners of the universe are tradeable rather than theoretical.
 - **Regulatory clarity is improving in key SEA markets.** Vietnam, Thailand, and the Philippines have all signaled clearer frameworks for retail crypto products in the past 18 months.
 
 ---
@@ -117,19 +117,19 @@ The architecture was built from day one as a hexagonal, plugin-style platform. A
 
 ### Now (Avalanche mainnet, SEA launch)
 
-- Send, swap (cross-chain via Relay), yield (Aave v3 USDC)
-- Loyalty Season 0
-- Non-custodial execution via ZeroDev session keys
-- Daily yield reports and idle-fund nudges
-- P2P recipient notifications via Telegram
+- Send, swap (cross-chain via Relay), yield (Aave v3 USDC) — production
+- Auto-rebalance across yield protocols (sticky-winner hysteresis, per-user nudge cooldowns)
+- Loyalty Season 0 — daily on-chain activity rewarded
+- Non-custodial execution via ZeroDev session keys (Kernel v3.1, EntryPoint 0.7)
+- Daily yield reports and idle-fund nudges via Telegram
+- P2P recipient notifications via Telegram (gramJS MTProto)
+- Prediction-market mispricing scan + per-finding broadcasts (dark-launchable)
 
 ### Next (6 months)
 
-- **Tokenized US stocks via Aster** — Tesla, Nvidia, S&P, accessible from any SEA Telegram account
-- **Prediction markets via Kalshi** — Fed decisions, elections, sports, all from chat
+- **Flip prediction-market bets live** — close out the bridge-initiation ship-blocker, run the `$1` mainnet validation against the Polymarket CLOB, then flip `PREDICTION_MARKETS_BETS_ENABLED=true`. Position poller + close + resolve receipts already wired.
 - **Daily intelligence engine v2** — personalized portfolio reports with risk callouts and one-tap actions
-- Multi-chain expansion (Base, Arbitrum, Polygon) — chain config already abstracted
-- Additional yield protocols (Benqi, Yearn) — adapter interface is pluggable
+- Additional yield protocols (Benqi, Yearn) — adapter interface is pluggable, second adapter unlocks the dormant auto-rebalance flow
 - Onramp via MoonPay webhook — buy → watch deposit → auto-invest
 
 ### Later (12 months)
@@ -152,7 +152,7 @@ Built by founders who have shipped production DeFi infrastructure and understand
 We are raising a **pre-seed round** to:
 
 1. Hire 2 engineers and 1 growth lead for the SEA launch
-2. Cover Aster and Kalshi integration costs and launch ecosystem partnerships
+2. Close the prediction-market bet ship-blockers, run the validation, and launch ecosystem partnerships with Polymarket and additional yield protocols (Benqi, Yearn)
 3. Fund user acquisition through Vietnamese and Filipino crypto communities and Telegram channels
 4. Scale infrastructure to 10x current capacity ahead of the launch wave
 

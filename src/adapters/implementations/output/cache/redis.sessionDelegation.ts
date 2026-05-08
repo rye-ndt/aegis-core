@@ -26,4 +26,8 @@ export class RedisSessionDelegationCache implements ISessionDelegationCache {
     return JSON.parse(raw) as DelegationRecord;
   }
 
+  async deleteByAddress(address: string): Promise<void> {
+    const removed = await this.redis.del(this.key(address));
+    log.info({ address, removed }, 'delegation revoked from cache');
+  }
 }

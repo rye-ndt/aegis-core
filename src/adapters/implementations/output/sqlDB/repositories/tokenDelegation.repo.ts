@@ -2,12 +2,15 @@ import { and, eq, gt, sql } from 'drizzle-orm';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { newUuid } from '../../../../../helpers/uuid';
 import { newCurrentUTCEpoch } from '../../../../../helpers/time/dateTime';
+import { createLogger } from '../../../../../helpers/observability/logger';
 import type {
   ITokenDelegationDB,
   NewTokenDelegation,
   TokenDelegation,
 } from '../../../../../use-cases/interface/output/repository/tokenDelegation.repo';
 import { tokenDelegations } from '../schema';
+
+const log = createLogger('tokenDelegationRepo');
 
 type Row = typeof tokenDelegations.$inferSelect;
 
@@ -79,6 +82,15 @@ export class DrizzleTokenDelegationRepo implements ITokenDelegationDB {
       .update(tokenDelegations)
       .set({ spentRaw: next, updatedAtEpoch: now })
       .where(eq(tokenDelegations.id, rows[0].id));
+  }
+
+  async deleteAllByUserId(userId: string): Promise<number> {
+    const deleted = await this.db
+      .delete(tokenDelegations)
+      .where(eq(tokenDelegations.userId, userId))
+      .returning({ id: tokenDelegations.id });
+    log.info({ userId, count: deleted.length }, 'token-delegations revoked');
+    return deleted.length;
   }
 
   private toModel(row: Row): TokenDelegation {
