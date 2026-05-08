@@ -37,6 +37,8 @@ import type { SubgraphPrincipalProvider } from "../../output/yield/subgraphPrinc
 import { isRateLimitedError } from "../../../../helpers/errors/rateLimitedError";
 import { isUnsupportedChainError } from "../../../../helpers/errors/unsupportedChainError";
 import { LOYALTY_ENV } from "../../../../helpers/env/loyaltyEnv";
+import { DELEGATION_ENV, STABLE_SYMBOLS } from "../../../../helpers/env/delegationEnv";
+import { toRaw } from "../../../../helpers/bigint";
 import type {
   MiniAppResponse,
   AuthResponse,
@@ -877,87 +879,106 @@ export class HttpApiServer {
     // USDC.bsc has 18 decimals — must source from registry, not assume 6.
     const usdcAddrForChain = getUsdcAddress(chainId);
     const native = getNativeTokenInfo(chainId);
-    const tokens: Array<{
+
+    type TokenRow = {
       tokenAddress: string;
       tokenSymbol: string;
       tokenDecimals: number;
       suggestedLimitRaw: string;
       validUntil: number;
-    }> = [
-      {
-        tokenAddress: usdcAddrForChain ?? "",
-        tokenSymbol: "USDC",
-        tokenDecimals: 6,
-        suggestedLimitRaw: (500n * 10n ** 6n).toString(),
-        validUntil: validUntil30Days,
-      },
-      {
-        tokenAddress: "",
-        tokenSymbol: "USDT",
-        tokenDecimals: 6,
-        suggestedLimitRaw: (500n * 10n ** 6n).toString(),
-        validUntil: validUntil30Days,
-      },
-      ...(native
-        ? [{
-            tokenAddress: native.address,
-            tokenSymbol: native.symbol,
-            tokenDecimals: native.decimals,
-            suggestedLimitRaw: (50n * 10n ** BigInt(native.decimals)).toString(),
-            validUntil: validUntil30Days,
-          }]
-        : []),
-    ];
+    };
 
-    if (this.portfolioUseCase) {
-      const registryTokens = await this.portfolioUseCase.listTokens(chainId).catch(() => []);
-      for (const t of tokens) {
-        const found = registryTokens.find(
-          (rt) => rt.symbol.toUpperCase() === t.tokenSymbol.toUpperCase(),
-        );
-        if (found) {
-          if (!t.tokenAddress) t.tokenAddress = found.address;
-          // Pull authoritative decimals from the registry. USDC.bsc is 18,
-          // USDC.avax is 6 — the suggestedLimitRaw default above assumes 6,
-          // so re-scale when decimals differ.
-          if (t.tokenDecimals !== found.decimals) {
-            const oldDec = t.tokenDecimals;
-            t.tokenDecimals = found.decimals;
-            const scale = 10n ** BigInt(Math.abs(found.decimals - oldDec));
-            t.suggestedLimitRaw =
-              found.decimals > oldDec
-                ? (BigInt(t.suggestedLimitRaw) * scale).toString()
-                : (BigInt(t.suggestedLimitRaw) / scale).toString();
-          }
+    const requestedAddress = url.searchParams.get("tokenAddress");
+    const requestedAmount = url.searchParams.get("amountRaw");
+    const isReapproval = !!(requestedAddress && requestedAmount);
+
+    const buildStableRow = (symbol: "USDC" | "USDT"): TokenRow => {
+      const human = symbol === "USDC" ? DELEGATION_ENV.initialUsdc : DELEGATION_ENV.initialUsdt;
+      return {
+        tokenAddress: symbol === "USDC" ? (usdcAddrForChain ?? "") : "",
+        tokenSymbol: symbol,
+        // Default to 6; hydrate() re-scales when the chain's USDC/USDT uses
+        // different decimals (e.g. USDC.bsc is 18) so the human cap stays fixed.
+        tokenDecimals: 6,
+        suggestedLimitRaw: toRaw(String(human), 6),
+        validUntil: validUntil30Days,
+      };
+    };
+    const nativeRow: TokenRow | null = native
+      ? {
+          tokenAddress: native.address,
+          tokenSymbol: native.symbol,
+          tokenDecimals: native.decimals,
+          suggestedLimitRaw: toRaw(String(DELEGATION_ENV.initialNative), native.decimals),
+          validUntil: validUntil30Days,
         }
-      }
-    }
+      : null;
 
-    const resolved = tokens.filter((t) => !!t.tokenAddress);
+    const registryTokens = this.portfolioUseCase
+      ? await this.portfolioUseCase.listTokens(chainId).catch(() => [])
+      : [];
 
-    // The (tokenAddress, amountRaw) pair is a *filter/override* on the chain's
-    // resolved set, not an injector. The FE forwards a single (addr, amount)
-    // pair to every onboarding chain even though the address only exists on
-    // one chain — so on the other chain(s) the address won't match anything.
-    // Synthesising a row in that case would yield tokenSymbol="" / decimals=18,
-    // which (a) renders as a blank chip with a microscopic amount in the UI
-    // and (b) fails zod validation at POST /delegation/grant. Drop silently.
-    const overrideAddress = url.searchParams.get("tokenAddress");
-    const overrideAmount  = url.searchParams.get("amountRaw");
-    if (overrideAddress && overrideAmount) {
-      const idx = resolved.findIndex(
-        (t) => t.tokenAddress.toLowerCase() === overrideAddress.toLowerCase(),
+    const hydrate = (row: TokenRow): TokenRow => {
+      const found = registryTokens.find(
+        (rt) => rt.symbol.toUpperCase() === row.tokenSymbol.toUpperCase(),
       );
-      if (idx >= 0) {
-        resolved[idx]!.suggestedLimitRaw = overrideAmount;
+      if (!found) return row;
+      const next = { ...row };
+      if (!next.tokenAddress) next.tokenAddress = found.address;
+      if (next.tokenDecimals !== found.decimals) {
+        const oldDec = next.tokenDecimals;
+        next.tokenDecimals = found.decimals;
+        const scale = 10n ** BigInt(Math.abs(found.decimals - oldDec));
+        next.suggestedLimitRaw =
+          found.decimals > oldDec
+            ? (BigInt(next.suggestedLimitRaw) * scale).toString()
+            : (BigInt(next.suggestedLimitRaw) / scale).toString();
+      }
+      return next;
+    };
+
+    let resolved: TokenRow[];
+
+    if (!isReapproval) {
+      resolved = [
+        hydrate(buildStableRow("USDC")),
+        hydrate(buildStableRow("USDT")),
+        ...(nativeRow ? [nativeRow] : []),
+      ].filter((t) => !!t.tokenAddress);
+    } else {
+      // FE forwards the same (tokenAddress, amountRaw) to every onboarding
+      // chain — non-stable mode returns [] on chains where the token doesn't
+      // exist; stable mode refreshes both stables on every chain.
+      const failingToken = registryTokens.find(
+        (rt) => rt.address.toLowerCase() === requestedAddress!.toLowerCase(),
+      );
+      const isStableMode = failingToken ? STABLE_SYMBOLS.has(failingToken.symbol.toUpperCase()) : false;
+
+      if (isStableMode) {
+        resolved = [
+          hydrate(buildStableRow("USDC")),
+          hydrate(buildStableRow("USDT")),
+        ].filter((t) => !!t.tokenAddress);
+        log.debug({ chainId, mode: "stable-reapproval" }, "approval-params reapproval");
+      } else if (failingToken) {
+        resolved = [
+          {
+            tokenAddress: failingToken.address,
+            tokenSymbol: failingToken.symbol,
+            tokenDecimals: failingToken.decimals,
+            suggestedLimitRaw: requestedAmount!,
+            validUntil: validUntil30Days,
+          },
+        ];
         log.debug(
-          { chainId, overrideAddress, choice: "applied" },
-          "approval-params override applied",
+          { chainId, mode: "non-stable-reapproval", tokenSymbol: failingToken.symbol },
+          "approval-params reapproval",
         );
       } else {
+        resolved = [];
         log.debug(
-          { chainId, overrideAddress, choice: "skipped-not-on-chain" },
-          "approval-params override skipped — token not resolvable on chain",
+          { chainId, requestedAddress, choice: "skipped-not-on-chain" },
+          "approval-params reapproval skipped",
         );
       }
     }

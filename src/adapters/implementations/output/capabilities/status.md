@@ -1024,3 +1024,32 @@ Implemented Part A of `be/constructions/2026-05-04-yield-fixes-and-auto-rebalanc
 **Follow-up #2 (same day):** the `awaiting_amount` resume handler was eating fresh stock commands ("buy tesla stock" while a previous "buy apple stock" left the user in `awaiting_amount`) as malformed amount replies, and re-asking with a contextless "Please reply with a number, e.g. 50." Two fixes: (a) when the resume input is non-numeric, sniff for a fresh-command shape (`/`-prefix, or starts with `buy|short|sell|close|sl|tp|long|stock`) and fall through to the normal parse path so the new command takes over; (b) the re-ask question is now self-contained — "I didn't catch a number. How much USD would you like to buy of AAPL? Reply with just a number, e.g. 50." Convention: any slot-fill resume handler that reads free text MUST detect fresh-command inputs and drop pending state rather than trapping the user in the slot.
 
 **Follow-up (same day):** the model paraphrased the capability's "How much USD…" prompt back to the user, producing a duplicated question. Fixed by (a) extending the assistant system prompt's "reply with an empty string" rule from `route_intent` to also cover `stock_open`, and (b) tightening the tool's `data` string to explicitly tell the model not to ask, rephrase, or acknowledge — the capability has already shown the prompt. Convention: any tool whose dispatch results in a user-visible chat message (mini-app, ask, result card) MUST end its `data` string with "Reply with an empty string; do NOT acknowledge or rephrase," and the system prompt's empty-reply rule must list the tool name explicitly.
+
+---
+
+## 2026-05-08 — Configurable initial caps & differentiated re-approval flow
+
+**What changed:**
+- New env helper `helpers/env/delegationEnv.ts` exposes `INITIAL_USDC` (100), `INITIAL_USDT` (100), `INITIAL_NATIVE` (10), and `NON_STABLE_REAPPROVAL_MULTIPLIER` (10). Initial onboarding caps in `httpServer.handleGetDelegationApprovalParams` are now sourced from these env vars instead of hardcoded 500/500/50.
+- `aegisGuardInterceptor.checkTokenDelegation` no longer uses the `REAPPROVAL_FLOOR_HUMAN = 100` floor. It branches on whether the failing token is a stable (USDC/USDT) and writes `amountRaw` accordingly — stable: per-token `INITIAL_*` cap (advisory; BE owns final amounts in stable mode); non-stable: `intentRaw × NON_STABLE_REAPPROVAL_MULTIPLIER`.
+- `handleGetDelegationApprovalParams` re-approval branch (`?tokenAddress=…&amountRaw=…` present) now routes by token type:
+  - **Stable mode** (failing token symbol resolves to USDC/USDT in the chain registry): returns BOTH USDC and USDT at their `INITIAL_*` caps, ignoring the supplied `amountRaw`. Caps refresh together by product design — the user signs once and both stables are topped back up.
+  - **Non-stable mode** (failing token resolves to a non-stable in the chain registry): returns ONLY that token at the supplied `amountRaw` (i.e. 10× the user's send intent).
+  - **Token not resolvable on chain**: returns `[]` (multi-chain FE iterates onboarding chains; non-existent rows are skipped).
+
+**Why:** The previous flow asked users to sign for 500 USDC + 500 USDT + 50 native every time they hit a re-approval, regardless of how much they actually intended to spend. The new policy keeps stable caps env-tunable and small (100 default), while non-stable tokens get just-in-time caps proportional to the user's actual usage (10× intent), avoiding overly large blanket approvals on long-tail tokens.
+
+**Convention update (supersedes 2026-05-05 for the re-approval case):**
+The `?tokenAddress=…&amountRaw=…` query pair is no longer purely an "override on existing rows". It is now the **mode selector** for re-approval:
+- Initial mode (no params): returns `[USDC, USDT, native]` at `INITIAL_*` caps.
+- Re-approval mode (both params present): returns either `[USDC, USDT]` (stable mode) or `[<failingToken>]` (non-stable mode), or `[]` if the token doesn't exist on the chain.
+
+Initial-mode behaviour is unchanged; the cross-chain skip semantics from 2026-05-05 still hold (non-resolvable token → empty rather than synthesised).
+
+**New env vars (document elsewhere if a global env reference exists):**
+- `INITIAL_USDC` (default 100) — initial cap and stable-mode re-approval cap, USDC, in human units.
+- `INITIAL_USDT` (default 100) — same for USDT.
+- `INITIAL_NATIVE` (default 10) — initial cap for the chain's native token, applied uniformly across chains. Operators wanting different native budgets per chain should set this to the conservative minimum across their enabled chains.
+- `NON_STABLE_REAPPROVAL_MULTIPLIER` (default 10) — multiplier on `amountRaw` for non-stable token re-approvals.
+
+**New metadata fields:** `mode: 'stable-reapproval' | 'non-stable-reapproval' | 'stable' | 'non-stable'` in `httpServer` and `aegisGuardInterceptor` log lines.

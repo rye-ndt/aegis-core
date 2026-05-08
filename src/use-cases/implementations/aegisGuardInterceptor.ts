@@ -1,9 +1,13 @@
+import { DELEGATION_ENV } from "../../helpers/env/delegationEnv";
 import { estimateExecution } from "../../helpers/executionEstimator";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
+import { createLogger } from "../../helpers/observability/logger";
 import type { ITokenRecord } from "../interface/input/intent.interface";
 import type { ApproveRequest } from "../interface/output/cache/miniAppRequest.types";
 import type { ITokenDelegationDB } from "../interface/output/repository/tokenDelegation.repo";
+
+const log = createLogger("aegisGuardInterceptor");
 
 /**
  * Shared Aegis Guard delegation check used by both `/send` and `/swap`.
@@ -11,8 +15,13 @@ import type { ITokenDelegationDB } from "../interface/output/repository/tokenDel
  * Given a spend intent (token + human/raw amount), it runs `estimateExecution`
  * to check whether the user's active `token_delegations` already cover this
  * spend. When coverage is sufficient the caller may proceed with autonomous
- * signing; otherwise this helper mints a re-approval `ApproveRequest` for the
- * mini app and returns it with an explanatory message.
+ * signing; otherwise this helper mints a re-approval `ApproveRequest`.
+ *
+ * `amountRaw` on the request is `intentRaw × NON_STABLE_REAPPROVAL_MULTIPLIER`.
+ * The BE `/delegation/approval-params` endpoint owns mode selection: for
+ * stable tokens it ignores this value and returns env-pinned caps for both
+ * USDC and USDT; for non-stables it returns just the failing token at this
+ * amount.
  */
 export interface AegisGuardCheckParams {
   userId: string;
@@ -26,8 +35,6 @@ export type AegisGuardResult =
   | { ok: true }
   | { ok: false; reapprovalRequest: ApproveRequest; displayMessage: string };
 
-/** Upper bound used when minting a reapproval — see §6 of relay-swap-plan. */
-const REAPPROVAL_FLOOR_HUMAN = 100;
 const REAPPROVAL_TTL_SECONDS = 600;
 
 export async function checkTokenDelegation(
@@ -46,10 +53,9 @@ export async function checkTokenDelegation(
 
   if (!estimation.shouldApproveMore) return { ok: true };
 
-  const humanAsNum = parseFloat(amountHuman);
-  const topUpHuman = Math.max(isFinite(humanAsNum) ? humanAsNum : 0, REAPPROVAL_FLOOR_HUMAN);
+  const intentRaw = BigInt(amountRaw || "0");
   const rawForReapproval = (
-    BigInt(Math.round(topUpHuman)) * 10n ** BigInt(fromToken.decimals)
+    intentRaw * BigInt(DELEGATION_ENV.nonStableReapprovalMultiplier)
   ).toString();
 
   const now = newCurrentUTCEpoch();
@@ -64,6 +70,11 @@ export async function checkTokenDelegation(
     tokenAddress: fromToken.address,
     amountRaw: rawForReapproval,
   };
+
+  log.info(
+    { step: "reapproval-minted", userId, tokenSymbol: fromToken.symbol },
+    "aegis-guard reapproval request minted",
+  );
 
   return { ok: false, reapprovalRequest, displayMessage: estimation.displayMessage };
 }
