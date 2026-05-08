@@ -16,9 +16,7 @@ const log = createLogger("routeIntentTool");
 // to a capability at registry-match time — otherwise the recursive
 // dispatcher falls back to the default LLM capability and could re-invoke
 // `route_intent`, burning tool rounds. Read-only commands (/points,
-// /leaderboard, /positions) and dispatcher-unbound commands (/withdraw —
-// historically routed via the /yield UI buttons, never as a top-level
-// trigger) stay out.
+// /leaderboard, /positions) stay out.
 const COMMAND_VALUES = [
   INTENT_COMMAND.SWAP,
   INTENT_COMMAND.SEND,
@@ -33,6 +31,7 @@ const COMMAND_VALUES = [
   // it back here AND register a real capability.
   INTENT_COMMAND.DCA,
   INTENT_COMMAND.YIELD,
+  INTENT_COMMAND.WITHDRAW,
   INTENT_COMMAND.MONEY,
 ] as const;
 
@@ -43,8 +42,11 @@ const InputSchema = z.object({
       "Slash command for the matching capability. Pick the most specific one. " +
         "`/buy` is the USDC onramp — use it for ANY request to fund/top up/add " +
         "money to/deposit into the account (fiat or otherwise). " +
-        "`/yield` is ONLY for earn/yield/APY flows — pick it only when the user " +
-        "explicitly mentions yield, earn, APY, interest, or optimizing idle USDC. " +
+        "`/yield` is for earn/deposit yield flows — pick it when the user wants to " +
+        "deposit/optimize idle USDC, or mentions yield/earn/APY/interest. " +
+        "`/withdraw` is for pulling funds OUT of a yield position — pick it for any " +
+        "phrasing like \"withdraw\", \"withdraw my funds\", \"withdraw from aave\", " +
+        "\"pull out my yield\", \"take out my deposit\", \"unstake\", \"exit my position\". " +
         "Generic phrases like \"fund the account\", \"top up\", \"add funds\", " +
         "\"deposit money\" are NOT yield — they are `/buy`.",
     ),

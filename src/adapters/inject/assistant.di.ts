@@ -801,7 +801,7 @@ export class AssistantInject {
       if (command === INTENT_COMMAND.BUY) continue;
       if (command === INTENT_COMMAND.SWAP) continue;
       if (command === INTENT_COMMAND.YIELD) continue;
-      if (command === INTENT_COMMAND.WITHDRAW) continue;
+      if (command === INTENT_COMMAND.WITHDRAW) continue; // owned by YieldCapability
       if (command === INTENT_COMMAND.POINTS) continue;
       if (command === INTENT_COMMAND.LEADERBOARD) continue;
       // /topup is conceptually an onramp, not a transfer. Routing it through

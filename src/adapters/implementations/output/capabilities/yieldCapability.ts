@@ -69,7 +69,10 @@ function findStablecoin(chainId: number, tokenAddress: string) {
 export class YieldCapability implements Capability<YieldRunParams> {
   readonly id = "intent_yield";
   readonly triggers: TriggerSpec = {
-    command: INTENT_COMMAND.YIELD,
+    // `/withdraw` shares this capability — collect() short-circuits to the
+    // withdraw-all branch when the text starts with /withdraw, so users can
+    // type `/withdraw` directly instead of going through the /yield nudge.
+    commands: [INTENT_COMMAND.YIELD, INTENT_COMMAND.WITHDRAW],
     // Owns both the deposit/withdraw `yield:` family and the auto-rebalance
     // `rebalance:` family — the two share signing infra.
     callbackPrefix: ["yield", "rebalance"],
