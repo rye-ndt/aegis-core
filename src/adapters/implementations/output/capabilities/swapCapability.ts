@@ -335,6 +335,17 @@ export class SwapCapability implements Capability<SwapParams> {
         // and picks up the next queued request without re-opening the app.
         if (this.deps.miniAppRequestCache) {
           await this.deps.miniAppRequestCache.store(miniAppRequest);
+          log.info(
+            {
+              step: "next-step-queued",
+              userId: ctx.userId,
+              stepIndex: i,
+              totalSteps: txs.length,
+              requestId,
+              chainId: params.fromChainId,
+            },
+            "queued follow-up swap step in mini-app cache",
+          );
         }
       }
 

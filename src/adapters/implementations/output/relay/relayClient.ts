@@ -38,6 +38,8 @@ export class RelayClient implements IRelayClient {
       r.destinationCurrency.toLowerCase(),
       r.amount,
       r.tradeType,
+      r.slippageBps ?? "",
+      r.referrer ?? "",
     ].join("|");
     return createHash("sha1").update(normalized).digest("hex");
   }
@@ -50,7 +52,12 @@ export class RelayClient implements IRelayClient {
     }
 
     const url = `${this.baseUrl}${RELAY_QUOTE_PATH}`;
-    const body = {
+    // Relay's `/quote` defaults `slippageTolerance` to an auto value designed
+    // to avoid front-running. For small swaps (sub-dollar) the auto value is
+    // tight enough that solver fee variance trips the on-chain
+    // `QUOTE_SWAP_AMOUNT_TOO_SMALL` revert during simulation. Always pass an
+    // explicit value when the caller supplies one.
+    const body: Record<string, unknown> = {
       user: request.user,
       recipient: request.recipient,
       originChainId: request.originChainId,
@@ -60,6 +67,12 @@ export class RelayClient implements IRelayClient {
       amount: request.amount,
       tradeType: request.tradeType,
     };
+    if (request.slippageBps !== undefined) {
+      body.slippageTolerance = String(request.slippageBps);
+    }
+    if (request.referrer) {
+      body.referrer = request.referrer;
+    }
 
     const response = await fetch(url, {
       method: "POST",

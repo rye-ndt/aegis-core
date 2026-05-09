@@ -14,6 +14,7 @@ import {
   RELAY_NATIVE_SENTINEL,
   RELAY_SUPPORTED_CHAIN_IDS,
 } from "../../../../../helpers/chainConfig";
+import { RELAY_ENV } from "../../../../../helpers/env/relayEnv";
 import { toErrorMessage } from "../../../../../helpers/errors/toErrorMessage";
 import { createLogger } from "../../../../../helpers/observability/logger";
 
@@ -68,7 +69,15 @@ export class RelaySwapTool implements ITool {
     }
 
     log.debug(
-      { fromChainId: p.fromChainId, toChainId: p.toChainId, tokenIn: p.tokenIn, tokenOut: p.tokenOut, amountRaw: p.amountRaw },
+      {
+        fromChainId: p.fromChainId,
+        toChainId: p.toChainId,
+        tokenIn: p.tokenIn,
+        tokenOut: p.tokenOut,
+        amountRaw: p.amountRaw,
+        slippageBps: RELAY_ENV.slippageBps,
+        referrer: RELAY_ENV.referrer,
+      },
       "→ relay getQuote",
     );
 
@@ -82,6 +91,8 @@ export class RelaySwapTool implements ITool {
         destinationCurrency: normaliseCurrency(p.tokenOut),
         amount: p.amountRaw,
         tradeType: "EXACT_INPUT",
+        slippageBps: RELAY_ENV.slippageBps,
+        referrer: RELAY_ENV.referrer,
       });
 
       const txs = quote.steps.flatMap((step) => step.items.map((item) => item.data));

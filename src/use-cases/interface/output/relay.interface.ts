@@ -16,6 +16,15 @@ export interface RelayQuoteRequest {
   /** Raw amount (wei-precision string) of the origin token. */
   amount: string;
   tradeType: "EXACT_INPUT" | "EXACT_OUTPUT";
+  /**
+   * Slippage tolerance in basis points (e.g. 100 = 1%). Forwarded to Relay as
+   * the `slippageTolerance` string field. Omit to let Relay auto-pick — but
+   * the auto value is too tight for small swaps and trips
+   * `QUOTE_SWAP_AMOUNT_TOO_SMALL` on simulation, so callers should set it.
+   */
+  slippageBps?: number;
+  /** Referrer identifier surfaced in Relay analytics; opt-in. */
+  referrer?: string;
 }
 
 export interface RelayTx {
