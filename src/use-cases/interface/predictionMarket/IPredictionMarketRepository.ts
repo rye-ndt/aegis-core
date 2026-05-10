@@ -42,4 +42,5 @@ export interface IPredictionMarketRepository {
   insertFindings(findings: VerifiedFinding[]): Promise<void>;
   markFindingsBroadcasted(findingIds: string[], epoch: number): Promise<void>;
   getFindingsByRun(runId: string): Promise<StoredFinding[]>;
+  getFinding(findingId: string): Promise<StoredFinding | null>;
 }

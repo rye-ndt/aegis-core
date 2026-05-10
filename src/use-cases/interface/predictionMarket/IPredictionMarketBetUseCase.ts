@@ -110,6 +110,15 @@ export interface IPredictionMarketBetUseCase {
   cancelBetIntent(userId: string, intentId: string): Promise<void>;
 
   /**
+   * Manually escape a stuck `executing` intent: marks the intent `cancelled`
+   * and the orphaned bet `FAILED` with `failureReason='manual-cancel'`. No-op
+   * if the intent is not in `executing` or doesn't belong to the user. Use
+   * when the chat user reports the bet never completed (e.g. mini-app
+   * deeplink was broken or the FE flow was interrupted).
+   */
+  cancelExecutingIntent(userId: string, intentId: string): Promise<void>;
+
+  /**
    * Generic FE-driven state transition during execution. Caller validates the
    * bet belongs to the user (via `getBet`) before calling. Logs the transition
    * with `step` matching the new status (e.g. `bridge-submitted`, `sca-to-eoa`).

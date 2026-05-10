@@ -263,6 +263,30 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     log.info({ userId, intentId, step: "cancelled" }, "place-bet");
   }
 
+  async cancelExecutingIntent(userId: string, intentId: string): Promise<void> {
+    const intent = await this.repo.getBetIntent(intentId);
+    if (!intent || intent.userId !== userId) return;
+    if (intent.status !== "executing") return;
+    if (intent.betId) {
+      try {
+        await this.repo.setBetFailure(intent.betId, "manual-cancel");
+      } catch (err) {
+        // Bet may already be terminal (FILLED/UNFILLED/FAILED) — log and
+        // continue so the intent still gets cancelled. The whole point of
+        // this method is to unstick the chat surface.
+        log.warn(
+          { err, userId, intentId, betId: intent.betId, step: "manual-cancel-bet-failed" },
+          "place-bet",
+        );
+      }
+    }
+    await this.repo.setBetIntentStatus(intentId, "cancelled");
+    log.info(
+      { userId, intentId, betId: intent.betId, step: "manual-cancel" },
+      "place-bet",
+    );
+  }
+
   async transitionBet(
     userId: string,
     betId: string,

@@ -235,25 +235,58 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       .from(predictionMarketFindings)
       .where(eq(predictionMarketFindings.runId, runId))
       .orderBy(desc(predictionMarketFindings.rankScore));
-    return rows.map((r) => ({
-      findingId: r.findingId,
-      runId: r.runId,
-      clusterId: r.clusterId,
-      patternType: r.patternType as FindingPatternType,
-      marketsInvolved: r.marketsInvolved as string[],
-      currentState: r.currentState as FindingCurrentState,
-      liveOdds: r.liveOdds as Record<string, number>,
-      whyAnomalous: r.whyAnomalous,
-      sideA: r.sideA as SideThesis,
-      sideB: r.sideB as SideThesis,
-      confidence: r.confidence as FindingConfidence,
-      magnitudeBps: r.magnitudeBps,
-      rankScore: r.rankScore,
-      rationale: r.rationale,
-      verifiedAtEpoch: r.createdAtEpoch,
-      createdAtEpoch: r.createdAtEpoch,
-      broadcastedAtEpoch: r.broadcastedAtEpoch,
-    }));
+    return rows.map((r) => mapFindingRow(r));
   }
+
+  async getFinding(findingId: string): Promise<StoredFinding | null> {
+    const rows = await this.db
+      .select()
+      .from(predictionMarketFindings)
+      .where(eq(predictionMarketFindings.findingId, findingId))
+      .limit(1);
+    const r = rows[0];
+    return r ? mapFindingRow(r) : null;
+  }
+}
+
+type FindingRow = {
+  findingId: string;
+  runId: string;
+  clusterId: string;
+  patternType: string;
+  marketsInvolved: unknown;
+  currentState: unknown;
+  liveOdds: unknown;
+  whyAnomalous: string;
+  sideA: unknown;
+  sideB: unknown;
+  confidence: string;
+  magnitudeBps: number;
+  rankScore: number;
+  rationale: string;
+  createdAtEpoch: number;
+  broadcastedAtEpoch: number | null;
+};
+
+function mapFindingRow(r: FindingRow): StoredFinding {
+  return {
+    findingId: r.findingId,
+    runId: r.runId,
+    clusterId: r.clusterId,
+    patternType: r.patternType as FindingPatternType,
+    marketsInvolved: r.marketsInvolved as string[],
+    currentState: r.currentState as FindingCurrentState,
+    liveOdds: r.liveOdds as Record<string, number>,
+    whyAnomalous: r.whyAnomalous,
+    sideA: r.sideA as SideThesis,
+    sideB: r.sideB as SideThesis,
+    confidence: r.confidence as FindingConfidence,
+    magnitudeBps: r.magnitudeBps,
+    rankScore: r.rankScore,
+    rationale: r.rationale,
+    verifiedAtEpoch: r.createdAtEpoch,
+    createdAtEpoch: r.createdAtEpoch,
+    broadcastedAtEpoch: r.broadcastedAtEpoch,
+  };
 }
 

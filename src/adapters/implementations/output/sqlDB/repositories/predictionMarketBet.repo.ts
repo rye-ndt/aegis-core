@@ -1,4 +1,4 @@
-import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newCurrentUTCEpoch } from "../../../../../helpers/time/dateTime";
 import {
@@ -192,6 +192,11 @@ export class DrizzlePredictionMarketBetRepo implements IPredictionMarketBetRepos
   }
 
   async findActiveIntentForUser(userId: string): Promise<BetIntentRow | null> {
+    // Filter out expired intents — they're stale, not "active". Without this
+    // filter, a stuck `executing` intent (e.g. a bet whose mini-app deeplink
+    // was never completed) would shadow every subsequent `place_bet:` click
+    // and force `submitAmount` to reject with `wrong-status`.
+    const nowEpoch = Math.floor(Date.now() / 1000);
     const rows = await this.db
       .select()
       .from(predictionMarketBetIntents)
@@ -199,6 +204,7 @@ export class DrizzlePredictionMarketBetRepo implements IPredictionMarketBetRepos
         and(
           eq(predictionMarketBetIntents.userId, userId),
           inArray(predictionMarketBetIntents.status, ACTIVE_INTENT_STATUSES),
+          gt(predictionMarketBetIntents.expiresAtEpoch, nowEpoch),
         ),
       )
       .limit(1);

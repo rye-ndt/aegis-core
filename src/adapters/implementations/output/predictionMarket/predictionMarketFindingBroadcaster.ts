@@ -98,15 +98,18 @@ function buildResult(args: {
   // remains useful even before the bet pipeline is turned on for a deployment.
   const nextActions: ResultAction[] = PREDICTION_MARKETS_ENV.betsEnabled
     ? [
+        // Telegram caps callback_data at 64 bytes — Polymarket condition_ids
+        // alone are 66, so we omit the marketId from the payload and resolve it
+        // server-side via the persisted finding row in PlaceBetCapability.
         {
           label: `Bet ${finding.sideA.label}`.slice(0, 60),
           kind: "callback",
-          payload: `place_bet:${finding.findingId}:${finding.sideA.marketId}:A`,
+          payload: `place_bet:${finding.findingId}:A`,
         },
         {
           label: `Bet ${finding.sideB.label}`.slice(0, 60),
           kind: "callback",
-          payload: `place_bet:${finding.findingId}:${finding.sideB.marketId}:B`,
+          payload: `place_bet:${finding.findingId}:B`,
         },
       ]
     : [

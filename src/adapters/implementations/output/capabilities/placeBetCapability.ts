@@ -1,5 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
+import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newUuid } from "../../../../helpers/uuid";
 import type {
@@ -11,6 +12,7 @@ import type {
 } from "../../../../use-cases/interface/input/capability.interface";
 import type { IntentResult, ResultField } from "../../../../use-cases/interface/input/resultCard.types";
 import type { IPredictionMarketBetUseCase } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketBetUseCase";
+import type { IPredictionMarketRepository } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
 
 const log = createLogger("placeBetCapability");
 
@@ -26,12 +28,19 @@ type PlaceBetState =
 type PlaceBetParams =
   | { kind: "amount"; intentId: string; stakeUsdc: number }
   | { kind: "confirm"; intentId: string }
-  | { kind: "cancel"; intentId: string };
+  | { kind: "cancel"; intentId: string }
+  | { kind: "cancel_executing"; intentId: string };
 
-const CALLBACK_PREFIXES = ["place_bet", "confirm_bet", "cancel_bet"] as const;
+const CALLBACK_PREFIXES = ["place_bet", "confirm_bet", "cancel_bet", "cancel_executing"] as const;
+const CENTS_PER_USDC = 100;
 
-/** Callback layout: `place_bet:<findingId>:<marketId>:<side>` */
-const PLACE_BET_RX = /^place_bet:([^:]+):([^:]+):(A|B)$/;
+/**
+ * Callback layout: `place_bet:<findingId>:<side>`. The marketId is NOT in the
+ * payload — Telegram caps callback_data at 64 bytes and Polymarket condition
+ * ids alone are 66, so we resolve the marketId server-side by reading the
+ * persisted finding row and selecting `sideA.marketId` / `sideB.marketId`.
+ */
+const PLACE_BET_RX = /^place_bet:([^:]+):(A|B)$/;
 
 export class PlaceBetCapability implements Capability<PlaceBetParams> {
   readonly id = "place_bet";
@@ -39,7 +48,10 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
     callbackPrefix: [...CALLBACK_PREFIXES],
   };
 
-  constructor(private readonly betUseCase: IPredictionMarketBetUseCase) {}
+  constructor(
+    private readonly betUseCase: IPredictionMarketBetUseCase,
+    private readonly findingRepo: IPredictionMarketRepository,
+  ) {}
 
   async collect(
     ctx: CapabilityCtx,
@@ -57,15 +69,49 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
 
       const placeMatch = data.match(PLACE_BET_RX);
       if (placeMatch) {
-        const [, findingId, marketId, side] = placeMatch;
+        const [, findingId, side] = placeMatch;
+        const finding = await this.findingRepo.getFinding(findingId!);
+        if (!finding) {
+          log.warn(
+            { userId: ctx.userId, findingId, side, step: "finding-not-found" },
+            "place-bet",
+          );
+          return terminalChat("That finding has expired. Tap a side on a fresh card to start over.");
+        }
+        const marketId = side === "A" ? finding.sideA.marketId : finding.sideB.marketId;
         const result = await this.betUseCase.initiateBetIntent({
           userId: ctx.userId,
-          findingId: findingId === "_" ? null : findingId!,
-          marketId: marketId!,
+          findingId: findingId!,
+          marketId,
           side: side!,
           outcomeTokenId: null,
           refPriceBps: null,
         });
+        // Re-tap recovery: `initiateBetIntent` reuses any active intent, which
+        // may already be past `awaiting_amount` (e.g. user typed an amount but
+        // never saw the confirm card). Re-emit the appropriate artifact for
+        // the intent's current status instead of blindly re-asking for amount.
+        if (result.intent.status === "awaiting_confirm" && result.intent.stakeUsdcCents != null) {
+          const stakeUsdc = result.intent.stakeUsdcCents / CENTS_PER_USDC;
+          log.info(
+            { userId: ctx.userId, intentId: result.intent.id, step: "reshow-confirm" },
+            "place-bet",
+          );
+          return {
+            kind: "terminal",
+            artifact: confirmCardArtifact(result.intent, stakeUsdc),
+          };
+        }
+        if (result.intent.status === "executing") {
+          log.info(
+            { userId: ctx.userId, intentId: result.intent.id, step: "reshow-executing" },
+            "place-bet",
+          );
+          return {
+            kind: "terminal",
+            artifact: executingArtifact(result.intent.id),
+          };
+        }
         return {
           kind: "ask",
           question:
@@ -84,6 +130,11 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
       const cancelMatch = data.match(/^cancel_bet:([0-9a-f-]+)$/);
       if (cancelMatch) {
         return { kind: "ok", params: { kind: "cancel", intentId: cancelMatch[1]! } };
+      }
+
+      const cancelExecutingMatch = data.match(/^cancel_executing:([0-9a-f-]+)$/);
+      if (cancelExecutingMatch) {
+        return { kind: "ok", params: { kind: "cancel_executing", intentId: cancelExecutingMatch[1]! } };
       }
 
       return terminalChat("That bet option has expired. Tap a side on the finding again to start over.");
@@ -122,12 +173,15 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
 
     if (params.kind === "confirm") {
       try {
-        const bet = await this.betUseCase.confirmBetIntent({
+        await this.betUseCase.confirmBetIntent({
           userId: ctx.userId,
           intentId: params.intentId,
           clientOrderId: newUuid(),
         });
-        return openMiniAppArtifact(bet.id);
+        // Deep-link target is the *intentId*, not the betId — the FE
+        // PlaceBetHandler is keyed off intentId (`place_bet:<intentId>` per
+        // fe/.../utils/deepLink.ts) and looks up the bet via `pmApi.intent`.
+        return openMiniAppArtifact(params.intentId);
       } catch (err) {
         log.error({ err, userId: ctx.userId, intentId: params.intentId }, "confirm-failed");
         return resultArtifact({
@@ -142,13 +196,27 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
       }
     }
 
-    // params.kind === "cancel"
-    await this.betUseCase.cancelBetIntent(ctx.userId, params.intentId);
+    if (params.kind === "cancel") {
+      await this.betUseCase.cancelBetIntent(ctx.userId, params.intentId);
+      return resultArtifact({
+        status: "success",
+        verb: "prediction_market_bet_failed",
+        headline: "Bet cancelled",
+        fields: [{ label: "Status", value: "Intent dropped." }],
+        complexity: "simple",
+      });
+    }
+
+    // params.kind === "cancel_executing"
+    await this.betUseCase.cancelExecutingIntent(ctx.userId, params.intentId);
     return resultArtifact({
       status: "success",
       verb: "prediction_market_bet_failed",
-      headline: "Bet cancelled",
-      fields: [{ label: "Status", value: "Intent dropped." }],
+      headline: "Stuck bet cleared",
+      fields: [
+        { label: "Status", value: "Intent cancelled and bet marked failed." },
+        { label: "Next", value: "Tap a side on a finding card to place a fresh bet." },
+      ],
       complexity: "simple",
     });
   }
@@ -187,7 +255,10 @@ function confirmCardArtifact(
     fields.push({ label: "Max payout if win", value: `$${shares.toFixed(2)}` });
   }
   const result: IntentResult = {
-    status: "preview",
+    // `pending` (not `preview`) — the Telegram renderer drops preview cards
+    // by design (they belong to the mini-app surface). This card IS the
+    // user-facing confirm step on the chat surface, so it must render.
+    status: "pending",
     verb: "prediction_market_bet_confirm",
     headline: "Confirm bet",
     fields,
@@ -203,13 +274,48 @@ function confirmCardArtifact(
   return { kind: "result_card", result, keyboard };
 }
 
-function openMiniAppArtifact(betId: string): Artifact {
+function openMiniAppArtifact(intentId: string): Artifact {
+  const text = `Bet started. Open the mini app to finish placing it (intent id \`${intentId.slice(0, 8)}…\`).`;
+  // FE deeplink contract: read from `?startapp=` (URL fallback) or Telegram
+  // `start_param` — see fe/.../utils/deepLink.ts. Without MINI_APP_URL we
+  // can only emit a plain message; a callback button would be a no-op
+  // because nothing handles `open_app:*` callbacks.
+  if (!MINI_APP_URL) {
+    return { kind: "chat", text, parseMode: "Markdown" };
+  }
+  const url = `${MINI_APP_URL}?startapp=place_bet:${intentId}`;
   return {
     kind: "chat",
-    text: `Bet started. Open the mini app to finish placing it (intent id \`${betId.slice(0, 8)}…\`).`,
+    text,
     parseMode: "Markdown",
-    keyboard: new InlineKeyboard().text("Open mini app", `open_app:bet:${betId}`),
+    keyboard: new InlineKeyboard().webApp("Open mini app", url),
   };
+}
+
+/**
+ * Re-emitted when a user re-taps a finding side after their previous intent
+ * has reached `executing` but the bet was never finished (typical cause: the
+ * mini-app deeplink was broken or the user closed the FE mid-flow). Two
+ * buttons: resume in the mini-app, or cancel the stuck intent + bet so the
+ * user can place a fresh bet.
+ */
+function executingArtifact(intentId: string): Artifact {
+  const text =
+    `You already have a bet being processed (intent \`${intentId.slice(0, 8)}…\`). ` +
+    `Open the mini app to finish it, or cancel it to start a new bet.`;
+  const cancelButtonRow = new InlineKeyboard().text(
+    "Cancel & start over",
+    `cancel_executing:${intentId}`,
+  );
+  if (!MINI_APP_URL) {
+    return { kind: "chat", text, parseMode: "Markdown", keyboard: cancelButtonRow };
+  }
+  const url = `${MINI_APP_URL}?startapp=place_bet:${intentId}`;
+  const keyboard = new InlineKeyboard()
+    .webApp("Open mini app", url)
+    .row()
+    .text("Cancel & start over", `cancel_executing:${intentId}`);
+  return { kind: "chat", text, parseMode: "Markdown", keyboard };
 }
 
 function resultArtifact(result: IntentResult): Artifact {

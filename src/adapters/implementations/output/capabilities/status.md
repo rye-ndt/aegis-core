@@ -1053,3 +1053,61 @@ Initial-mode behaviour is unchanged; the cross-chain skip semantics from 2026-05
 - `NON_STABLE_REAPPROVAL_MULTIPLIER` (default 10) — multiplier on `amountRaw` for non-stable token re-approvals.
 
 **New metadata fields:** `mode: 'stable-reapproval' | 'non-stable-reapproval' | 'stable' | 'non-stable'` in `httpServer` and `aegisGuardInterceptor` log lines.
+
+---
+
+## 2026-05-09 — `place_bet` callback_data shortened (Telegram 64-byte limit)
+
+**What:** Dropped the marketId from the `place_bet` callback payload. New layout: `place_bet:<findingId>:<side>` (~48 bytes). The marketId is now resolved server-side in `PlaceBetCapability` by reading the persisted finding row via `IPredictionMarketRepository.getFinding(findingId)` and selecting `sideA.marketId` / `sideB.marketId` based on `side`.
+
+**Why:** Telegram caps `callback_data` at 64 bytes. The previous payload `place_bet:<findingId>:<marketId>:<side>` was ~115 bytes (UUID 36 + Polymarket condition_id 66 alone exceeds the cap), causing every broadcast to fail with `400 Bad Request: BUTTON_DATA_INVALID` and both retry paths (markdownV2 → plain) to return the same error since the keyboard itself was the problem.
+
+**Convention:** Any new Telegram inline-keyboard `callback_data` MUST stay under 64 bytes. If the natural payload is too long, persist the long fields server-side and put only ids/short tokens in the callback. Do NOT attempt to encode condition ids, addresses, or full URLs in `callback_data`.
+
+**New repo method:** `IPredictionMarketRepository.getFinding(findingId): Promise<StoredFinding | null>` (drizzle-backed). Use this when a callback handler needs the finding's `sideA`/`sideB` thesis details.
+
+---
+
+## 2026-05-09 — `IntentResult.status` semantics on Telegram chat surface
+
+**What:** Switched the prediction-market confirm cards (`placeBetCapability.confirmCardArtifact`, `closePositionCapability.confirmCloseArtifact`) from `status: "preview"` to `status: "pending"`. Also added a re-tap recovery path in `PlaceBetCapability.collect`: when `initiateBetIntent` returns an existing intent already in `awaiting_confirm`, the capability re-emits the confirm card (terminal artifact) instead of re-asking for the amount.
+
+**Why:** The Telegram artifact renderer at `artifactRenderer/telegram.ts:144-149` deliberately drops `result_card` artifacts whose status is `"preview"` — that status is reserved for cards rendered by the mini-app surface, not the chat. The bet/close confirm cards were emitting `preview`, so the user typed the amount, the intent transitioned to `awaiting_confirm` server-side, and **nothing** appeared in chat. Users would re-tap the side button to retry, but `findActiveIntentForUser` reused the `awaiting_confirm` intent, the callback path re-asked for amount, and `submitAmount` then rejected with `wrong-status` ("This bet is no longer awaiting an amount.").
+
+**Convention (record explicitly):** On the Telegram chat surface, `IntentResult.status` MUST be one of `"success" | "pending" | "failed"`. Reserve `"preview"` for cards intended to be rendered by the mini-app surface; the Telegram renderer drops them by design. If a chat-side capability needs an interactive "confirm/cancel" UX, use `"pending"` (waiting on user input, not yet committed).
+
+**New convention (record explicitly):** Capabilities that own a multi-step server-side state machine (intents in `awaiting_amount` → `awaiting_confirm` → ...) MUST handle the case where `initiateBetIntent`-style methods return an existing intent past the first stage. The callback-handler MUST inspect `intent.status` and re-emit the artifact appropriate to that status, otherwise the user can get stuck in a loop where the chat surface and DB state disagree.
+
+---
+
+## 2026-05-09 — `Open mini app` button: webApp button + correct deeplink target
+
+**What:** Rewrote `openMiniAppArtifact` in both `placeBetCapability.ts` and `closePositionCapability.ts`. Two fixes in the same change:
+
+1. The button is now built with `InlineKeyboard.webApp(label, url)` (a Telegram Web App button) instead of `InlineKeyboard.text(label, "open_app:bet:<id>")` (a callback button). The previous callback button was a no-op — there is no handler registered for the `open_app:*` callback prefix anywhere in the codebase, so tapping it did nothing.
+2. The deeplink target is now the correct id for each flow: `place_bet` flow encodes the **intentId** (FE's `PlaceBetHandler` is keyed off intentId), and `close_position` encodes the **positionId** (FE's `ClosePositionHandler` is keyed off positionId). Both capabilities were previously passing `bet.id` to `openMiniAppArtifact`, which would have produced a deeplink the FE couldn't resolve even after the button-type fix.
+
+**URL shape:** `${MINI_APP_URL}?startapp=<verb>:<id>`, where the FE's `parseDeepLink` (fe/.../utils/deepLink.ts) reads `?startapp=` (or `?tgWebAppStartParam=`) as the URL fallback for Telegram's `Telegram.WebApp.initDataUnsafe.start_param`.
+
+**Why:** The user reported the "Open mini app" button did nothing. Two bugs compounded: a callback button (no handler) and a wrong id in the deeplink (FE wouldn't have found anything anyway).
+
+**Convention (record explicitly):** Any chat button that should launch the mini app MUST be a `.webApp(label, url)` button, NOT a `.text(label, callbackData)` callback. The codebase has no central `open_app:*` callback dispatcher and adding one would just hide the deeplink in a redirect. Encode the deeplink directly in the URL via `?startapp=<verb>:<id>` so Telegram opens the mini app at the right state on first tap.
+
+**Convention (record explicitly):** When emitting a mini-app deeplink for prediction-market flows, match the FE's `DeepLinkAction` discriminator: `place_bet:<intentId>` (NOT `bet.id`) and `close_position:<positionId>` (NOT `bet.id`). The corresponding FE handlers in `App.tsx` mount keyed off `deepLink.intentId` / `deepLink.positionId`.
+
+---
+
+## 2026-05-09 — Stuck-intent recovery for prediction-market bets
+
+**What:** Three coordinated changes that together prevent a user from getting permanently locked out of bet placement when an earlier `executing` intent never completes:
+
+1. `findActiveIntentForUser` (drizzle repo) now filters by `expiresAtEpoch > now`. Active intents past their TTL are no longer returned and therefore stop shadowing fresh `place_bet:` clicks.
+2. `PlaceBetCapability.collect` now handles `result.intent.status === "executing"` in the callback path: it re-emits an `executingArtifact` with a Web App "Open mini app" button (so the user can resume) and an inline "Cancel & start over" callback button (so they can escape).
+3. New use-case method `IPredictionMarketBetUseCase.cancelExecutingIntent(userId, intentId)`. Marks the intent `cancelled` AND calls `setBetFailure(intent.betId, 'manual-cancel')` so `countOpenBetsForUser` no longer counts the orphaned bet as in-flight. Without the bet-side cleanup, cancelling the intent alone would leave the next `confirmBetIntent` rejected with `BET_IN_FLIGHT`. Wired through a new `cancel_executing:<intentId>` callback prefix on `PlaceBetCapability`.
+
+**Why:** A user reported "it never accepts my bets". Diagnosis: an earlier session's intent reached `executing` but the chat-side mini-app deeplink button was broken (callback button instead of `webApp(url)` and wrong id — fixed in the prior 2026-05-09 entry), so the bet never finished. Subsequent `place_bet:` callbacks reused the stuck `executing` intent (it counts as active, no expiry filter), the capability fell through to the awaiting-amount ask, and `submitAmount` rejected with `wrong-status` ("This bet is no longer awaiting an amount."). The user had no in-chat escape and would also have hit `BET_IN_FLIGHT` on a fresh confirm attempt because the orphan bet row stayed non-terminal.
+
+**Conventions (record explicitly):**
+- "Active" intents MUST be filtered by `expiresAtEpoch > now`. Status-based filtering alone leaks stale intents into every subsequent flow.
+- Every `executing`-status path that requires user follow-through MUST provide an in-chat escape hatch. Users should never need DB access to recover from a stuck state.
+- When cancelling an `executing` intent, the orphan bet row MUST be transitioned to a terminal status (`FAILED` with a `failureReason`) — otherwise `countOpenBetsForUser` keeps the user blocked by `BET_IN_FLIGHT`. Use `setBetFailure(betId, 'manual-cancel')` for this case; the `BET_STATE_TRANSITIONS` map already allows `FAILED` from every non-terminal state.

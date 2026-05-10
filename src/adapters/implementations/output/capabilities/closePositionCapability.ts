@@ -1,5 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
+import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
 import {
   formatPnlCents,
   formatPriceBps,
@@ -77,13 +78,16 @@ export class ClosePositionCapability implements Capability<ClosePositionParams> 
         // confirm taps can be material on thin books).
         const preview = await this.betUseCase.previewClose(ctx.userId, params.positionId);
         if (!preview) return chat("That position is no longer open.");
-        const bet = await this.betUseCase.initiateClose({
+        await this.betUseCase.initiateClose({
           userId: ctx.userId,
           positionId: params.positionId,
           clientOrderId: newUuid(),
           refPriceBps: preview.bestBidPriceBps,
         });
-        return openMiniAppArtifact(bet.id);
+        // Deep-link target is the *positionId*, not the new betId — the FE
+        // ClosePositionHandler is keyed off positionId per
+        // fe/.../utils/deepLink.ts (`close_position:<positionId>`).
+        return openMiniAppArtifact(params.positionId);
       } catch (err) {
         log.error(
           { err, userId: ctx.userId, positionId: params.positionId },
@@ -128,7 +132,9 @@ function previewArtifact(
     },
   ];
   const result: IntentResult = {
-    status: "preview",
+    // `pending` (not `preview`) — the Telegram renderer drops preview cards
+    // by design (mini-app surface only). Chat-side confirmation must render.
+    status: "pending",
     verb: "prediction_market_position_open",
     headline: "Confirm close",
     fields,
@@ -144,12 +150,17 @@ function previewArtifact(
   return { kind: "result_card", result, keyboard };
 }
 
-function openMiniAppArtifact(betId: string): Artifact {
+function openMiniAppArtifact(positionId: string): Artifact {
+  const text = `Close started. Open the mini app to finish (position \`${positionId.slice(0, 8)}…\`).`;
+  if (!MINI_APP_URL) {
+    return { kind: "chat", text, parseMode: "Markdown" };
+  }
+  const url = `${MINI_APP_URL}?startapp=close_position:${positionId}`;
   return {
     kind: "chat",
-    text: `Close started. Open the mini app to finish (bet \`${betId.slice(0, 8)}…\`).`,
+    text,
     parseMode: "Markdown",
-    keyboard: new InlineKeyboard().text("Open mini app", `open_app:bet:${betId}`),
+    keyboard: new InlineKeyboard().webApp("Open mini app", url),
   };
 }
 

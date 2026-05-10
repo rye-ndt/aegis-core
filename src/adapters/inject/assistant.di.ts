@@ -863,7 +863,7 @@ export class AssistantInject {
 
     const betUseCase = this.getPredictionMarketBetUseCase();
     if (betUseCase) {
-      registry.register(new PlaceBetCapability(betUseCase));
+      registry.register(new PlaceBetCapability(betUseCase, this.getPredictionMarketRepo()));
       registry.register(new ClosePositionCapability(betUseCase));
     } else {
       log.info(
