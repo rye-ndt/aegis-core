@@ -1,6 +1,8 @@
 import type Redis from "ioredis";
+import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import { isWorker } from "../../../../helpers/env/role";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { parseCutOverSubjects } from "../../../../use-cases/interface/predictionMarket/marketFactVocabularies";
 import { newUuid } from "../../../../helpers/uuid";
 import type { PredictionMarketScanUseCase } from "../../../../use-cases/implementations/predictionMarketScan.usecase";
 
@@ -22,7 +24,39 @@ export class PredictionMarketScanJob {
       log.info("not a worker role — not starting.");
       return;
     }
-    log.info({ intervalMs: this.intervalMs }, "prediction-market scan job starting");
+    // Single-shot feature-flag banner at startup so operators can verify
+    // what the worker is actually doing without grepping multiple files.
+    const cutOver = parseCutOverSubjects(PREDICTION_MARKETS_ENV.deterministicSubjects);
+    log.info(
+      {
+        intervalMs: this.intervalMs,
+        flags: {
+          scanEnabled: PREDICTION_MARKETS_ENV.enabled,
+          findingsEnabled: PREDICTION_MARKETS_ENV.findingsEnabled,
+          betsEnabled: PREDICTION_MARKETS_ENV.betsEnabled,
+          shadowMode: PREDICTION_MARKETS_ENV.shadowMode,
+          sizingEnabled: PREDICTION_MARKETS_ENV.sizingEnabled,
+          adminHttpTokenSet: !!PREDICTION_MARKETS_ENV.adminHttpToken,
+          reviewAdminChatIdSet: !!PREDICTION_MARKETS_ENV.reviewAdminChatId,
+        },
+        deterministicSubjects: Array.from(cutOver),
+        models: {
+          classifier: PREDICTION_MARKETS_ENV.classifierModel,
+          detector: PREDICTION_MARKETS_ENV.detectorModel,
+          extractor: PREDICTION_MARKETS_ENV.extractorModel,
+          promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
+        },
+        sizer: PREDICTION_MARKETS_ENV.sizingEnabled
+          ? {
+              budgetUsdc: PREDICTION_MARKETS_ENV.sizerBudgetUsdc,
+              feeBps: PREDICTION_MARKETS_ENV.sizerFeeBps,
+              gasEstimateUsdc: PREDICTION_MARKETS_ENV.sizerGasEstimateUsdc,
+              depthLevels: PREDICTION_MARKETS_ENV.sizerDepthLevels,
+            }
+          : undefined,
+      },
+      "prediction-market scan job starting",
+    );
     this.tick();
     this.timer = setInterval(() => this.tick(), this.intervalMs);
   }

@@ -290,6 +290,9 @@ export const predictionMarketSnapshots = pgTable("prediction_market_snapshots", 
   volume7dUsdCents: bigint("volume_7d_usd_cents", { mode: "number" }).notNull(),
   liquidityUsdCents: bigint("liquidity_usd_cents", { mode: "number" }).notNull(),
   url: text("url").notNull(),
+  // Polymarket Gamma `events[0].id`. Nullable for back-compat with rows
+  // written before Phase 2; future scans always populate it when present.
+  polymarketEventId: text("polymarket_event_id"),
 }, (t) => ({
   pk: unique("pm_snapshots_run_market_uniq").on(t.runId, t.marketId),
   byRun: index("pm_snapshots_by_run").on(t.runId),
@@ -304,8 +307,31 @@ export const predictionMarketClusters = pgTable("prediction_market_clusters", {
   expectedRelationships: jsonb("expected_relationships").notNull(),    // ExpectedRelationship[]
   rationale: text("rationale").notNull(),
   confidence: text("confidence").notNull(),                            // 'low' | 'medium' | 'high'
+  // Phase 3 (Part 4). Nullable: LLM-classified clusters leave this null;
+  // the deterministic clusterer fills it with the shared `MarketFact.subject`
+  // so Part 5 can route to the deterministic detector.
+  derivedSubject: text("derived_subject"),
 }, (t) => ({
   byRun: index("pm_clusters_by_run").on(t.runId),
+}));
+
+// Phase 3 (Part 4). Shadow output of the deterministic clusterer when
+// `PREDICTION_MARKETS_SHADOW_MODE=true`. Rows are never broadcast and never
+// feed the detector — only the diff script reads them.
+export const predictionMarketClustersShadow = pgTable("prediction_market_clusters_shadow", {
+  shadowClusterId: uuid("shadow_cluster_id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  pipeline: text("pipeline").notNull(),                                // 'deterministic'
+  derivedSubject: text("derived_subject"),
+  theme: text("theme").notNull(),
+  causalDriver: text("causal_driver").notNull(),
+  marketIds: jsonb("market_ids").notNull(),                            // string[]
+  expectedRelationships: jsonb("expected_relationships").notNull(),    // ExpectedRelationship[]
+  rationale: text("rationale").notNull(),
+  confidence: text("confidence").notNull(),
+  createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
+}, (t) => ({
+  byRun: index("pm_clusters_shadow_by_run").on(t.runId),
 }));
 
 export const predictionMarketFindings = pgTable("prediction_market_findings", {
@@ -331,10 +357,79 @@ export const predictionMarketFindings = pgTable("prediction_market_findings", {
   // win-rate over the held-out window. Nullable; default null. Values:
   // 'true_positive' | 'false_positive' | 'unresolved'.
   editorialOutcome: text("editorial_outcome"),
+  // Phase 5 (Part 6) — sizer outputs. Null when sizing disabled / unresolved.
+  // Stored as integer cents to match the bet-pipeline convention.
+  sizedTrades: jsonb("sized_trades"),                                  // SizedTrade[] | null
+  expectedProfitUsdcCents: integer("expected_profit_usdc_cents"),
+  minPayoffUsdcCents: integer("min_payoff_usdc_cents"),
 }, (t) => ({
   byRun: index("pm_findings_by_run").on(t.runId),
   byCluster: index("pm_findings_by_cluster").on(t.clusterId),
   byCreated: index("pm_findings_by_created").on(t.createdAtEpoch),
+}));
+
+// Phase 4 (Part 5). Shadow output of the deterministic detector when
+// `PREDICTION_MARKETS_SHADOW_MODE=true`. Never broadcast — diff script only.
+export const predictionMarketFindingsShadow = pgTable("prediction_market_findings_shadow", {
+  shadowFindingId: uuid("shadow_finding_id").primaryKey(),
+  runId: uuid("run_id").notNull(),
+  // Exactly one of these is set per row, depending on whether the source
+  // cluster was the live `predictionMarketClusters` row or the shadow row.
+  shadowClusterId: uuid("shadow_cluster_id"),
+  realClusterId: uuid("real_cluster_id"),
+  pipeline: text("pipeline").notNull(),                                // 'deterministic'
+  patternType: text("pattern_type").notNull(),                         // FindingPatternType
+  marketsInvolved: jsonb("markets_involved").notNull(),                // string[]
+  liveOdds: jsonb("live_odds").notNull(),                              // Record<marketId, 0..1>
+  magnitudeBps: integer("magnitude_bps").notNull(),
+  widerMarketId: text("wider_market_id"),
+  narrowerMarketId: text("narrower_market_id"),
+  earlierMarketId: text("earlier_market_id"),
+  laterMarketId: text("later_market_id"),
+  rationale: text("rationale").notNull(),
+  confidence: text("confidence").notNull(),                            // 'low' | 'medium' | 'high'
+  createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
+}, (t) => ({
+  byRun: index("pm_findings_shadow_by_run").on(t.runId),
+}));
+
+// Phase 1 of the deterministic-detection plan
+// (`constructions/2026-05-11-prediction-markets-deterministic-detection-part2.md`).
+// Definitions only — no readers/writers ship until Part 3 wires the extractor.
+export const predictionMarketFacts = pgTable("prediction_market_facts", {
+  marketId: text("market_id").primaryKey(),
+  subject: text("subject").notNull(),                                    // SubjectCode
+  operator: text("operator").notNull(),                                  // Operator
+  threshold: text("threshold"),                                          // nullable; null when operator='in'
+  thresholdSet: jsonb("threshold_set"),                                  // string[] | null
+  thresholdUnit: text("threshold_unit").notNull(),                       // ThresholdUnit
+  windowStart: bigint("window_start", { mode: "number" }),               // epoch sec
+  windowEnd: bigint("window_end", { mode: "number" }).notNull(),         // epoch sec
+  resolutionSource: text("resolution_source").notNull(),                 // ResolutionSourceCode
+  resolutionMethod: text("resolution_method").notNull(),                 // ResolutionMethod
+  eventFamily: text("event_family").notNull(),                           // canonicalEventFamily() output
+  polymarketEventId: text("polymarket_event_id"),
+  extractionModel: text("extraction_model").notNull(),
+  extractionPromptVersion: text("extraction_prompt_version").notNull(),
+  extractionAtEpoch: bigint("extraction_at_epoch", { mode: "number" }).notNull(),
+  regexVerified: boolean("regex_verified").notNull(),
+}, (t) => ({
+  byEventFamily: index("pm_facts_by_event_family").on(t.eventFamily),
+  bySubject: index("pm_facts_by_subject").on(t.subject),
+  byPolymarketEvent: index("pm_facts_by_polymarket_event").on(t.polymarketEventId),
+}));
+
+export const predictionMarketExtractionReviews = pgTable("prediction_market_extraction_reviews", {
+  reviewId: uuid("review_id").primaryKey(),
+  marketId: text("market_id").notNull(),
+  proposedFact: jsonb("proposed_fact").notNull(),                        // MarketFact (subset, missing regexVerified)
+  regexFailures: jsonb("regex_failures").notNull(),                      // string[]
+  status: text("status").notNull(),                                      // 'pending' | 'approved' | 'rejected'
+  resolution: jsonb("resolution"),                                       // freeform reviewer notes
+  createdAtEpoch: bigint("created_at_epoch", { mode: "number" }).notNull(),
+}, (t) => ({
+  byStatus: index("pm_reviews_by_status").on(t.status),
+  byMarket: index("pm_reviews_by_market").on(t.marketId),
 }));
 
 export const predictionMarketUserSetup = pgTable("prediction_market_user_setup", {

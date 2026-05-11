@@ -33,6 +33,13 @@ export interface RawMarket {
    */
   priceChange24hBps?: number;
   priceChange7dBps?: number;
+  /**
+   * Polymarket Gamma `events[0].id`. Co-clustered markets share an event id;
+   * the extractor (Phase 2) uses it as a fast-path collision check before
+   * computing `canonicalEventFamily`. Optional — older snapshot rows have
+   * null until refilled by the next scan.
+   */
+  polymarketEventId?: string | null;
 }
 
 export type ClusterConfidence = "low" | "medium" | "high";
@@ -57,6 +64,10 @@ export interface DraftCluster {
   expectedRelationships: ExpectedRelationship[];
   rationale: string;
   confidence: ClusterConfidence;
+  /** Populated by the deterministic clusterer (Part 4) when every member's
+   *  `MarketFact.subject` agrees. Null for LLM-clustered rows. Part 5 uses
+   *  this as the routing key between the deterministic and LLM detectors. */
+  derivedSubject?: string | null;
 }
 
 export interface StoredCluster extends DraftCluster {
@@ -123,6 +134,13 @@ export interface DraftFinding {
   confidence: FindingConfidence;
   /** Written before the sides per prompt order. */
   rationale: string;
+  /** Pattern-relative role tags. Optional for back-compat with carry-forward
+   *  / cached drafts written before Phase 0; the detector prompt + schema
+   *  require them at runtime for the structural patterns. */
+  widerMarketId?: string;
+  narrowerMarketId?: string;
+  earlierMarketId?: string;
+  laterMarketId?: string;
 }
 
 export interface VerifiedFinding extends DraftFinding {
@@ -136,6 +154,13 @@ export interface VerifiedFinding extends DraftFinding {
   magnitudeBps: number;
   /** Ranking score multiplied by 1000 to fit `integer`. */
   rankScore: number;
+  /** Phase 5 (Part 6) — optional LP-sizing outputs. Populated only when the
+   *  sizer is enabled and the finding survives the uneconomic filter. */
+  sizedTrades?: Array<{ marketId: string; outcome: "YES" | "NO"; shares: number; avgPriceFraction: number }>;
+  expectedProfitUsdc?: number;
+  /** Worst-case payoff across resolution branches; the broadcast card surfaces
+   *  this as "worst case: $Y.YY". */
+  minPayoffUsdc?: number;
 }
 
 export interface StoredFinding extends VerifiedFinding {

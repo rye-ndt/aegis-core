@@ -49,6 +49,9 @@ const log = createLogger("workerCli");
   const predictionMarketScanJob = inject.getPredictionMarketScanJob();
   predictionMarketScanJob?.start();
 
+  const predictionMarketExtractFactsJob = inject.getPredictionMarketExtractFactsJob();
+  predictionMarketExtractFactsJob?.start();
+
   const polymarketPositionPollerJob = inject.getPolymarketPositionPollerJob();
   polymarketPositionPollerJob?.start();
 
@@ -59,6 +62,7 @@ const log = createLogger("workerCli");
         idleScan: !!userIdleScanJob,
         report: !!yieldReportJob,
         predictionMarketScan: !!predictionMarketScanJob,
+        predictionMarketExtractFacts: !!predictionMarketExtractFactsJob,
         polymarketPositionPoller: !!polymarketPositionPollerJob,
       },
     },
@@ -79,6 +83,8 @@ const log = createLogger("workerCli");
     recipientNotificationUseCase,
   );
 
+  inject.getPredictionMarketReviewHandler()?.register(rawBot);
+
   const bot = new TelegramBot(rawBot, handler);
 
   log.info("worker role up.");
@@ -90,6 +96,7 @@ const log = createLogger("workerCli");
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
     predictionMarketScanJob?.stop();
+    predictionMarketExtractFactsJob?.stop();
     polymarketPositionPollerJob?.stop();
     httpServer.stop();
     await bot.stop();
@@ -104,6 +111,7 @@ const log = createLogger("workerCli");
     userIdleScanJob?.stop();
     yieldReportJob?.stop();
     predictionMarketScanJob?.stop();
+    predictionMarketExtractFactsJob?.stop();
     polymarketPositionPollerJob?.stop();
     httpServer.stop();
     await bot.stop();

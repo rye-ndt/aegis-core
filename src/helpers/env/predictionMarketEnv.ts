@@ -33,9 +33,12 @@ export const PREDICTION_MARKETS_ENV = {
   broadcastConcurrency: num("PREDICTION_MARKETS_BROADCAST_CONCURRENCY", 5),
   // Bumped from v1 → v2 alongside the verifier's pattern-aware magnitude fix
   // and the detector prompt's mutually-exclusive anti-example / calibration
-  // additions. The version is part of the detector Redis cache key, so the
-  // bump invalidates pre-fix cached drafts on first deploy.
-  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v2"),
+  // additions. v2 → v3 is Phase 0 of the deterministic-detection plan: the
+  // detector now emits per-finding role tags (wider/narrower or earlier/later)
+  // and the verifier drops wrong-direction findings. The version is part of
+  // the detector Redis cache key, so the bump invalidates pre-fix cached
+  // drafts on first deploy.
+  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v3"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
     str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "gpt-4o"),
@@ -69,4 +72,37 @@ export const PREDICTION_MARKETS_ENV = {
   // AES-256-GCM master key, 32 bytes hex (64 chars). REQUIRED before
   // `betsEnabled=true`; storePolymarketCreds throws if empty.
   credsKeyHex: str("PREDICTION_MARKETS_CREDS_KEY_HEX", ""),
+  // Phase 2 (deterministic-detection) — per-market LLM extractor + hourly job.
+  // The extractor model defaults to `gpt-4.1-mini` because the regex layer is
+  // the safety net; the cheap model is fine for first-pass structured output.
+  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "gpt-4.1-mini"),
+  extractorConcurrency: num("PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY", 8),
+  extractorPromptVersion: str("PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION", "v1"),
+  extractFactsIntervalMs: num("PREDICTION_MARKETS_EXTRACT_INTERVAL_MS", 60 * 60 * 1000),
+  // Telegram chat id (NOT user id) that receives extraction-review prompts
+  // and is gated to handle the approve/edit/reject callbacks. Empty disables
+  // the notification surface; reviews still persist for manual SQL handling.
+  reviewAdminChatId: str("PREDICTION_MARKETS_REVIEW_ADMIN_CHAT_ID", ""),
+  // Phase 3 (Part 4) — deterministic clustering rollout knobs.
+  // CSV of `SubjectCode`s. Empty (default) keeps production 100% on the LLM
+  // classifier; clusters for subjects listed here are routed through the
+  // deterministic clusterer instead and emit `derivedSubject` for Part 5.
+  deterministicSubjects: str("PREDICTION_MARKETS_DETERMINISTIC_SUBJECTS", ""),
+  // When true, the deterministic clusterer additionally runs over the FULL
+  // universe (ignoring cut-over subjects) and writes results to
+  // `prediction_market_clusters_shadow` for offline diffing. Shadow output
+  // is never broadcast and never feeds the detector.
+  shadowMode: bool("PREDICTION_MARKETS_SHADOW_MODE", false),
+  // Phase 5 (Part 6) — LP sizing. Disabled by default keeps verifier behaviour
+  // identical to today; flip after a manual sane-run. The analytical sizer
+  // ships in-tree; glpk.js WASM is a future swap-in via the same port.
+  sizingEnabled: bool("PREDICTION_MARKETS_SIZING_ENABLED", false),
+  sizerBudgetUsdc: num("PREDICTION_MARKETS_SIZER_BUDGET_USDC", 100),
+  sizerFeeBps: num("PREDICTION_MARKETS_SIZER_FEE_BPS", 200),
+  sizerGasEstimateUsdc: num("PREDICTION_MARKETS_SIZER_GAS_ESTIMATE_USDC", 0.05),
+  sizerDepthLevels: num("PREDICTION_MARKETS_SIZER_DEPTH_LEVELS", 10),
+  // Bearer-token gate for `GET /admin/prediction-markets/*`. Empty disables
+  // the endpoint entirely (returns 404). Operators must set this AND send
+  // `Authorization: Bearer <token>` to query the shadow-agreement report.
+  adminHttpToken: str("PREDICTION_MARKETS_ADMIN_HTTP_TOKEN", ""),
 } as const;

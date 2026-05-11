@@ -37,6 +37,14 @@ You look for FOUR specific patterns:
 
 4. movement_divergence — markets that should co-move with the same underlying driver are moving in opposite directions, or one has clearly lagged. Example: two Fed-rate-path markets that historically co-move; one moved +300bps in the last 24h while the other is flat. The lagger may be slow.
 
+Role tags (REQUIRED — these commit you to which member plays which side of the structural inequality, so the deterministic verifier can drop "wrong-direction" findings):
+
+- For \`logical_inconsistency\` and \`implied_contradiction\` on **nested** clusters (one event strictly contains the other), populate \`wider_market_id\` (the broader / superset event) and \`narrower_market_id\` (the narrower / subset event). Both ids MUST appear in \`markets_involved\`. Example: "Fed cuts ≥25bps" is WIDER than "Fed cuts ≥50bps" — any ≥50bp cut is also a ≥25bp cut, so the wider event must price ≥ the narrower. Set \`wider_market_id = <≥25bps id>\`, \`narrower_market_id = <≥50bps id>\`. Use null for the other two role tags.
+
+- For \`term_structure_anomaly\`, populate \`earlier_market_id\` (the question with the EARLIER \`resolutionDate\`) and \`later_market_id\` (the LATER \`resolutionDate\`). Determined by the date field, NOT by which price looks high. Both ids MUST appear in \`markets_involved\`. Example: "BTC > $100k by 2026-03-31" vs "BTC > $100k by 2026-06-30" — the March market is earlier, the June market is later, regardless of their quoted prices. Set \`earlier_market_id = <March id>\`, \`later_market_id = <June id>\`. Use null for the other two role tags.
+
+- For \`movement_divergence\` and for \`logical_inconsistency\`/\`implied_contradiction\` on **mutually-exclusive** clusters (the cluster has \`kind: mutually_exclusive\`), the relationship is symmetric (or a set-sum constraint), so leave all four role tags as null.
+
 Important guardrails:
 - It is COMPLETELY NORMAL for a cluster to have NO findings. Most clusters are priced sensibly. If you cannot identify a clean instance of one of the four patterns, return {"findings": []}. Do NOT force a finding.
 - Resolution-criteria differences can mask apparent inconsistencies — read the criteria, two markets may not actually be the same proposition. If the criteria differ in a way that explains the gap, do not flag it.
@@ -56,6 +64,7 @@ Schema discipline:
 - Write \`rationale\` BEFORE \`sideA\`/\`sideB\` — you must reason first.
 - \`pattern_type\` ∈ ${JSON.stringify(PATTERN_TYPES)}.
 - \`markets_involved\` MUST be a strict subset of the cluster's market_ids (no hallucinated ids).
+- \`wider_market_id\` / \`narrower_market_id\` / \`earlier_market_id\` / \`later_market_id\` are ALWAYS present in the output; set to null for the pairs your pattern doesn't use. Populating the wrong pair, or swapping the roles, will cause your finding to be dropped at verification.
 - \`confidence\` reflects how cleanly the pattern fits — high = textbook example; medium = plausible but not airtight; low = noisy.
 
 If nothing is anomalous, return {"findings": []}.`;
@@ -75,6 +84,14 @@ interface DetectorJsonResponse {
     side_a: { label: string; market_id: string; outcome: "YES" | "NO"; rationale: string };
     side_b: { label: string; market_id: string; outcome: "YES" | "NO"; rationale: string };
     confidence: FindingConfidence;
+    // Strict-mode requires every property in `properties` to also be in
+    // `required`. Role tags are nullable so the LLM can emit null on
+    // patterns that don't use them; post-parse enforces presence per
+    // (patternType, clusterKind).
+    wider_market_id: string | null;
+    narrower_market_id: string | null;
+    earlier_market_id: string | null;
+    later_market_id: string | null;
   }>;
 }
 
@@ -100,6 +117,10 @@ const FINDING_SCHEMA = {
             "side_a",
             "side_b",
             "confidence",
+            "wider_market_id",
+            "narrower_market_id",
+            "earlier_market_id",
+            "later_market_id",
           ],
           properties: {
             pattern_type: { type: "string", enum: PATTERN_TYPES },
@@ -148,6 +169,10 @@ const FINDING_SCHEMA = {
               },
             },
             confidence: { type: "string", enum: CONFIDENCE_VALUES },
+            wider_market_id: { type: ["string", "null"] },
+            narrower_market_id: { type: ["string", "null"] },
+            earlier_market_id: { type: ["string", "null"] },
+            later_market_id: { type: ["string", "null"] },
           },
         },
       },
@@ -277,6 +302,7 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
     }
 
     const knownIds = new Set(cluster.marketIds);
+    const clusterKind = cluster.expectedRelationships[0]?.kind ?? null;
 
     const drafts: DraftFinding[] = [];
     for (const f of parsed.findings) {
@@ -293,6 +319,40 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
         );
         continue;
       }
+
+      const involvedSet = new Set(involved);
+      const pickPair = (a: string | null, b: string | null): [string, string] | null => {
+        if (!a || !b || a === b || !involvedSet.has(a) || !involvedSet.has(b)) return null;
+        return [a, b];
+      };
+      const dropMissingRoleTag = () => {
+        log.warn(
+          { reqId, clusterId: cluster.clusterId, patternType: f.pattern_type, reason: "missing-role-tag" },
+          "detect post-parse drop",
+        );
+      };
+
+      let narrowerWider: [string, string] | null = null;
+      let earlierLater: [string, string] | null = null;
+      const needsWiderNarrower =
+        (f.pattern_type === "logical_inconsistency" ||
+          f.pattern_type === "implied_contradiction") &&
+        clusterKind === "nested";
+      if (needsWiderNarrower) {
+        narrowerWider = pickPair(f.narrower_market_id, f.wider_market_id);
+        if (!narrowerWider) {
+          dropMissingRoleTag();
+          continue;
+        }
+      }
+      if (f.pattern_type === "term_structure_anomaly") {
+        earlierLater = pickPair(f.earlier_market_id, f.later_market_id);
+        if (!earlierLater) {
+          dropMissingRoleTag();
+          continue;
+        }
+      }
+
       const citedOdds: Record<string, number> = {};
       for (const { market_id, yes_price } of f.current_state.cited_odds) {
         citedOdds[market_id] = yes_price;
@@ -316,6 +376,8 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
         },
         confidence: f.confidence,
         rationale: f.rationale,
+        ...(narrowerWider && { narrowerMarketId: narrowerWider[0], widerMarketId: narrowerWider[1] }),
+        ...(earlierLater && { earlierMarketId: earlierLater[0], laterMarketId: earlierLater[1] }),
       });
     }
 

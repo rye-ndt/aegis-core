@@ -104,6 +104,19 @@ export interface IPolymarketAdapter {
   /** Live top-of-book for a YES/NO outcome token. Cached ~2s by impl. */
   getOrderbookTopOfBook(tokenId: string): Promise<OrderbookTopOfBook>;
 
+  /**
+   * Order-book depth for the LP sizer. Returns up to `depthLevels` rungs on
+   * the requested side, best price first (asks ascending for BUY, bids
+   * descending for SELL). Backed by the same `/book?token_id=` payload the
+   * top-of-book call parses; consumers should share a `verifyFreshnessMs`-
+   * windowed cache.
+   */
+  getOrderbookDepth(args: {
+    outcomeTokenId: string;
+    side: "BUY" | "SELL";
+    depthLevels: number;
+  }): Promise<Array<{ priceFraction: number; shares: number }>>;
+
   /** POST /order with HMAC L2 headers. */
   placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
 

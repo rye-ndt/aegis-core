@@ -43,4 +43,49 @@ export interface IPredictionMarketRepository {
   markFindingsBroadcasted(findingIds: string[], epoch: number): Promise<void>;
   getFindingsByRun(runId: string): Promise<StoredFinding[]>;
   getFinding(findingId: string): Promise<StoredFinding | null>;
+  /** Phase 3 shadow output — never broadcast, only used by the diff script. */
+  insertShadowClusters(
+    runId: string,
+    clusters: DraftCluster[],
+    createdAtEpoch: number,
+  ): Promise<void>;
+  /** Phase 4 shadow output — deterministic detector results never broadcast. */
+  insertShadowFindings(input: InsertShadowFindingInput[]): Promise<void>;
+  /** Returns per-subject agreement stats over the trailing `windowSec`. Used
+   *  by `GET /admin/prediction-markets/shadow-agreement`. */
+  getShadowAgreement(windowSec: number): Promise<ShadowAgreementReport>;
+}
+
+export type ShadowFindingSource =
+  | { kind: "real"; realClusterId: string }
+  | { kind: "shadow"; shadowClusterId: string };
+
+export interface InsertShadowFindingInput {
+  runId: string;
+  source: ShadowFindingSource;
+  patternType: string;
+  marketsInvolved: string[];
+  liveOdds: Record<string, number>;
+  magnitudeBps: number;
+  widerMarketId: string | null;
+  narrowerMarketId: string | null;
+  earlierMarketId: string | null;
+  laterMarketId: string | null;
+  rationale: string;
+  confidence: string;
+  createdAtEpoch: number;
+}
+
+export interface ShadowAgreementSubjectRow {
+  subject: string;
+  llmOnly: number;
+  shadowOnly: number;
+  agreed: number;
+  agreementPct: number;
+}
+
+export interface ShadowAgreementReport {
+  perSubject: ShadowAgreementSubjectRow[];
+  overall: { llmOnly: number; shadowOnly: number; agreed: number; agreementPct: number };
+  windowDays: number;
 }

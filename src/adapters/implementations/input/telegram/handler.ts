@@ -74,6 +74,9 @@ export class TelegramAssistantHandler {
     bot.on("callback_query:data", async (ctx) => {
       const data = ctx.callbackQuery.data;
       if (!data || data === "auth:login") return;
+      // Admin extraction-review callbacks are handled by
+      // PredictionMarketReviewHandler; skip the user-dispatcher path.
+      if (data.startsWith("pm_review:")) return;
       await ctx.answerCallbackQuery();
       const chatId = ctx.chat?.id;
       if (chatId === undefined) return;

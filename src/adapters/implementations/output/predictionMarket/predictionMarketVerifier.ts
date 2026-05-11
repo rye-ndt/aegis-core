@@ -1,13 +1,19 @@
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
+import type { IPolymarketAdapter } from "../../../../use-cases/interface/predictionMarket/IPolymarketAdapter";
 import type { IPredictionMarketProvider } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
+import type {
+  IPredictionMarketSizer,
+  MarketOrderBook,
+} from "../../../../use-cases/interface/predictionMarket/IPredictionMarketSizer";
 import type {
   IPredictionMarketVerifier,
   VerifierContext,
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketVerifier";
 import type {
   DraftFinding,
+  ExpectedRelationship,
   ExpectedRelationshipKind,
   FindingConfidence,
   FindingPatternType,
@@ -55,6 +61,20 @@ export interface PredictionMarketVerifierConfig {
   /** Required deviation from 100% for `mutually_exclusive` clusters. */
   minSumDeviationBps: number;
   findingMinLiquidityUsd: number;
+  /** Optional sizing pass. When present, every surviving finding is sized;
+   *  uneconomic ones are dropped before they reach the broadcaster. All
+   *  fields are required together — "all-or-nothing" is structural. */
+  sizing?: {
+    sizer: IPredictionMarketSizer;
+    polymarket: IPolymarketAdapter;
+    /** Polymarket condition_id → CLOB outcome token ids. Returns `null` when
+     *  not yet known; the finding then survives un-sized. */
+    outcomeTokenIdResolver: (marketId: string) => { yes: string; no: string } | null;
+    budgetUsdc: number;
+    feeBps: number;
+    gasEstimateUsdc: number;
+    depthLevels: number;
+  };
 }
 
 interface CachedQuote {
@@ -97,6 +117,10 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
     const surviving: VerifiedFinding[] = [];
     const nowSec = newCurrentUTCEpoch();
     const clusterMemberIds = new Set(cluster.marketIds);
+    // Sizing-outcome tally. Surfaces at `verify.succeeded` so operators can
+    // see at a glance whether sizing is actually running or always falling
+    // back to skipped/disabled.
+    const sizingOutcomes = { disabled: 0, skipped: 0, sized: 0, uneconomic: 0 };
 
     for (const draft of drafts) {
       const findingId = newUuid();
@@ -158,23 +182,20 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
       const liveOdds: Record<string, number> = {};
       for (const m of involved) liveOdds[m.marketId] = m.yesPrice;
 
-      // Pattern + cluster-kind-aware magnitude. `null` means the alleged
-      // pattern no longer holds (e.g. mutually-exclusive cluster sums to
-      // 100%, monotonic term structure restored).
-      const gapResult = computeMagnitude(draft, involved, cluster);
-      if (gapResult === null) {
-        drop("pattern-not-violated");
+      const gap = computeMagnitude(draft, involved, cluster);
+      if (gap.kind === "drop") {
+        drop(gap.reason);
         continue;
       }
 
-      // Pattern-specific minimum gap. Mutually-exclusive clusters use the
-      // sum-deviation threshold; everything else uses the generic gap floor.
-      const kind = primaryKind(cluster);
+      // Mutually-exclusive clusters use the sum-deviation threshold; everything
+      // else uses the generic gap floor.
+      const kind = primaryKind(cluster.expectedRelationships);
       const minGap =
         draft.patternType === "implied_contradiction" && kind === "mutually_exclusive"
           ? this.cfg.minSumDeviationBps
           : this.cfg.minGapBps;
-      if (MIN_GAP_PATTERNS.has(draft.patternType) && gapResult < minGap) {
+      if (MIN_GAP_PATTERNS.has(draft.patternType) && gap.bps < minGap) {
         drop("gap-below-threshold");
         continue;
       }
@@ -183,27 +204,105 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
       const rankRaw =
         PATTERN_WEIGHT[draft.patternType] *
         CONFIDENCE_WEIGHT[draft.confidence] *
-        Math.min(gapResult / 1000, 1) *
+        Math.min(gap.bps / 1000, 1) *
         Math.log10(liquidityForRank);
       const rankScore = Math.max(0, Math.round(rankRaw * 1000));
 
-      surviving.push({
+      const verified: VerifiedFinding = {
         ...draft,
         findingId,
         runId,
         clusterId: cluster.clusterId,
         verifiedAtEpoch: nowSec,
         liveOdds,
-        magnitudeBps: Math.round(gapResult),
+        magnitudeBps: gap.bps,
         rankScore,
-      });
+      };
+
+      const sized = await this.maybeSize(verified, reqId);
+      if (sized === "drop-uneconomic") {
+        drop("uneconomic");
+        sizingOutcomes.uneconomic += 1;
+        continue;
+      }
+      if (sized) {
+        verified.sizedTrades = sized.trades;
+        verified.expectedProfitUsdc = sized.expectedProfitUsdc;
+        verified.minPayoffUsdc = sized.minPayoffUsdc;
+        sizingOutcomes.sized += 1;
+      } else if (this.cfg.sizing) {
+        sizingOutcomes.skipped += 1;
+      } else {
+        sizingOutcomes.disabled += 1;
+      }
+
+      surviving.push(verified);
     }
 
     log.info(
-      { step: "succeeded", reqId, clusterId: cluster.clusterId, surviving: surviving.length, durationMs: Date.now() - start },
+      {
+        step: "succeeded",
+        reqId,
+        clusterId: cluster.clusterId,
+        surviving: surviving.length,
+        sizing: sizingOutcomes,
+        durationMs: Date.now() - start,
+      },
       "verify",
     );
     return surviving;
+  }
+
+  /**
+   * Returns the sizer output if it succeeded; the literal `'drop-uneconomic'`
+   * if the sizer rejected the finding; `null` when sizing is disabled or
+   * misconfigured (in which case the finding survives as-is, un-sized).
+   */
+  private async maybeSize(
+    v: VerifiedFinding,
+    reqId: string,
+  ): Promise<{ trades: VerifiedFinding["sizedTrades"]; expectedProfitUsdc: number; minPayoffUsdc: number } | "drop-uneconomic" | null> {
+    const sizing = this.cfg.sizing;
+    if (!sizing) return null;
+    try {
+      const tokenMaps = v.marketsInvolved.map((id) => ({ id, tokens: sizing.outcomeTokenIdResolver(id) }));
+      const missingTokenIds = tokenMaps.filter((x) => !x.tokens).map((x) => x.id);
+      if (missingTokenIds.length > 0) {
+        log.warn(
+          { reqId, findingId: v.findingId, missingTokenIds, reason: "tokens-missing" },
+          "sizing-skipped",
+        );
+        return null;
+      }
+      const fetches = await Promise.all(
+        tokenMaps.flatMap(({ id, tokens }) => [
+          sizing.polymarket.getOrderbookDepth({ outcomeTokenId: tokens!.yes, side: "BUY", depthLevels: sizing.depthLevels })
+            .then((asks) => ({ id, side: "yesAsks" as const, levels: asks })),
+          sizing.polymarket.getOrderbookDepth({ outcomeTokenId: tokens!.no, side: "BUY", depthLevels: sizing.depthLevels })
+            .then((asks) => ({ id, side: "noAsks" as const, levels: asks })),
+        ]),
+      );
+      const orderBook: Record<string, MarketOrderBook> = {};
+      for (const { id } of tokenMaps) orderBook[id] = { yesBids: [], yesAsks: [], noBids: [], noAsks: [] };
+      for (const f of fetches) orderBook[f.id]![f.side] = f.levels;
+      const sized = await sizing.sizer.size({
+        finding: v,
+        orderBook,
+        budgetUsdc: sizing.budgetUsdc,
+        feeBps: sizing.feeBps,
+        gasEstimateUsdc: sizing.gasEstimateUsdc,
+        reqId,
+      });
+      if (sized.kind === "uneconomic") return "drop-uneconomic";
+      return {
+        trades: sized.trades,
+        expectedProfitUsdc: sized.expectedProfitUsdc,
+        minPayoffUsdc: sized.minPayoffUsdc,
+      };
+    } catch (err) {
+      log.warn({ err, reqId, findingId: v.findingId }, "sizing failed — surviving un-sized");
+      return null;
+    }
   }
 
   private async fetchLive(ids: string[], reqId: string): Promise<Map<string, RawMarket>> {
@@ -241,82 +340,60 @@ export class PredictionMarketVerifier implements IPredictionMarketVerifier {
   }
 }
 
+type GapResult =
+  | { kind: "ok"; bps: number }
+  | { kind: "drop"; reason: "missing-role-tag" | "wrong-direction" | "pattern-not-violated" };
+
+function directionalGap(
+  involved: RawMarket[],
+  aId: string | undefined,
+  bId: string | undefined,
+): GapResult {
+  if (!aId || !bId) return { kind: "drop", reason: "missing-role-tag" };
+  const a = involved.find((m) => m.marketId === aId);
+  const b = involved.find((m) => m.marketId === bId);
+  if (!a || !b) return { kind: "drop", reason: "missing-role-tag" };
+  const bps = Math.round((a.yesPrice - b.yesPrice) * 10_000);
+  if (bps <= 0) return { kind: "drop", reason: "wrong-direction" };
+  return { kind: "ok", bps };
+}
+
 function computeMagnitude(
   draft: DraftFinding,
   involved: RawMarket[],
   cluster: StoredCluster,
-): number | null {
-  const kind = primaryKind(cluster);
+): GapResult {
+  const kind = primaryKind(cluster.expectedRelationships);
   switch (draft.patternType) {
-    case "logical_inconsistency": {
-      // For mutually-exclusive or nested clusters, an inconsistency means
-      // the implied probabilities violate the structural constraint — sum
-      // far from 100% (mutually-exclusive) or narrower priced above wider
-      // (nested). Without explicit pair-of-markets metadata from the LLM we
-      // approximate via sum-deviation for mutually-exclusive and pairwise
-      // gap otherwise.
+    case "logical_inconsistency":
+    case "implied_contradiction": {
       if (kind === "mutually_exclusive") {
-        return sumDeviationBps(involved);
+        return { kind: "ok", bps: sumDeviationBps(involved.map((m) => m.yesPrice)) };
       }
-      return maxPairwiseGapBps(involved);
+      // Nested: a real inconsistency requires P(narrower) > P(wider) — the
+      // subset priced above the superset. Anything else is correct-direction.
+      return directionalGap(involved, draft.narrowerMarketId, draft.widerMarketId);
     }
-    case "term_structure_anomaly": {
-      // A real term-structure anomaly only exists when an earlier-resolving
-      // event is priced strictly above a later-resolving event covering the
-      // same underlying outcome. The wider window contains the narrower, so
-      // P(narrower) ≤ P(wider) is the structural constraint; pure presence
-      // of a price gap is not enough — it can be in the *correct* direction
-      // (e.g. "deal by May 15" 17% < "deal by May 31" 28% is healthy, not
-      // an anomaly).
-      //
-      // We sort by resolutionEpochSec and look for any pair where the
-      // earlier market's yesPrice strictly exceeds a later market's. The
-      // worst such violation in bps is the magnitude. If every earlier
-      // market is priced ≤ every later market, return null → drop with
-      // `pattern-not-violated`.
-      const sorted = [...involved].sort(
-        (a, b) => a.resolutionEpochSec - b.resolutionEpochSec,
-      );
-      let worstViolationBps = 0;
-      for (let i = 0; i < sorted.length - 1; i += 1) {
-        for (let j = i + 1; j < sorted.length; j += 1) {
-          const violation = sorted[i]!.yesPrice - sorted[j]!.yesPrice;
-          if (violation > 0) {
-            const bps = Math.round(violation * 10_000);
-            if (bps > worstViolationBps) worstViolationBps = bps;
-          }
-        }
-      }
-      return worstViolationBps > 0 ? worstViolationBps : null;
-    }
+    case "term_structure_anomaly":
+      // Earlier-resolving event is a subset of the later (its window sits
+      // inside), so P(earlier) ≤ P(later). Violation = P(earlier) > P(later).
+      return directionalGap(involved, draft.earlierMarketId, draft.laterMarketId);
     case "movement_divergence": {
       const deltas = involved
         .map((m) => m.priceChange24hBps)
         .filter((d): d is number => typeof d === "number");
-      if (deltas.length < 2) return null;
-      return Math.abs(Math.max(...deltas) - Math.min(...deltas));
-    }
-    case "implied_contradiction": {
-      // Mutually-exclusive clusters: a "contradiction" only exists if the
-      // probabilities don't sum to ~100%. Wide pairwise spreads (96/3/0) are
-      // CONSENSUS, not contradiction — drop with sum-near-100 returning a
-      // small magnitude that fails the minSumDeviationBps gate.
-      if (kind === "mutually_exclusive") {
-        return sumDeviationBps(involved);
-      }
-      // Nested: contradiction means the narrower event is priced higher than
-      // the wider one. Without pairwise metadata, fall back to pairwise gap;
-      // the LLM's rationale + odds-drift check are the primary safeguards.
-      const gap = maxPairwiseGapBps(involved);
-      return gap > 0 ? gap : null;
+      if (deltas.length < 2) return { kind: "drop", reason: "pattern-not-violated" };
+      return { kind: "ok", bps: Math.abs(Math.max(...deltas) - Math.min(...deltas)) };
     }
     case "other":
-      return maxPairwiseGapBps(involved);
+      return { kind: "ok", bps: maxPairwiseGapBps(involved) };
   }
 }
 
-function primaryKind(cluster: StoredCluster): ExpectedRelationshipKind | null {
-  return cluster.expectedRelationships[0]?.kind ?? null;
+export function primaryKind(
+  rels: ExpectedRelationship[] | null | undefined,
+): ExpectedRelationshipKind | null {
+  return rels?.[0]?.kind ?? null;
 }
 
 /**
@@ -324,9 +401,9 @@ function primaryKind(cluster: StoredCluster): ExpectedRelationshipKind | null {
  * should sum to ≈ 1.0. Returns |sum − 1.0| in bps. A small value (≤300 bps)
  * signals proper pricing — the cluster is in consensus, not contradiction.
  */
-function sumDeviationBps(markets: RawMarket[]): number {
-  if (markets.length === 0) return 0;
-  const sum = markets.reduce((acc, m) => acc + m.yesPrice, 0);
+export function sumDeviationBps(prices: number[]): number {
+  if (prices.length === 0) return 0;
+  const sum = prices.reduce((acc, p) => acc + p, 0);
   return Math.round(Math.abs(sum - 1) * 10_000);
 }
 

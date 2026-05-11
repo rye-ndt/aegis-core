@@ -36,6 +36,12 @@ export class PolymarketAdapter implements IPolymarketAdapter {
     max: 500,
     ttl: TOB_CACHE_MS,
   });
+  // Same TTL as the TOB cache — keeps depth fetches and TOB fetches in sync
+  // and lets the sizer re-use the book parsed by `getOrderbookTopOfBook`.
+  private readonly bookCache = new LRUCache<
+    string,
+    { bids: Array<{ price: string; size?: string }>; asks: Array<{ price: string; size?: string }>; fetchedAt: number }
+  >({ max: 500, ttl: TOB_CACHE_MS });
 
   constructor(private readonly baseUrl: string = PREDICTION_MARKETS_ENV.clobApiBase) {}
 
@@ -81,8 +87,8 @@ export class PolymarketAdapter implements IPolymarketAdapter {
       throw new Error(`POLYMARKET_BOOK_FAILED: HTTP ${response.status}`);
     }
     const json = (await response.json()) as {
-      bids?: Array<{ price: string }>;
-      asks?: Array<{ price: string }>;
+      bids?: Array<{ price: string; size?: string }>;
+      asks?: Array<{ price: string; size?: string }>;
     };
     const bestBidPrice = parseTopLevel(json.bids);
     const bestAskPrice = parseTopLevel(json.asks);
@@ -91,8 +97,31 @@ export class PolymarketAdapter implements IPolymarketAdapter {
       bestAskPrice,
       midPrice: (bestBidPrice + bestAskPrice) / 2,
     };
+    // store full book on cache miss for getOrderbookDepth re-use
+    this.bookCache.set(tokenId, { bids: json.bids ?? [], asks: json.asks ?? [], fetchedAt: Date.now() });
     this.tobCache.set(tokenId, result);
     return result;
+  }
+
+  async getOrderbookDepth(args: {
+    outcomeTokenId: string;
+    side: "BUY" | "SELL";
+    depthLevels: number;
+  }): Promise<Array<{ priceFraction: number; shares: number }>> {
+    // Prime caches via the same `/book` call used for TOB.
+    await this.getOrderbookTopOfBook(args.outcomeTokenId);
+    const book = this.bookCache.get(args.outcomeTokenId);
+    if (!book) return [];
+    // BUY consumes asks (best ask first, ascending price); SELL consumes
+    // bids (best bid first, descending price).
+    const rawLevels = args.side === "BUY" ? book.asks : book.bids;
+    const sorted = [...rawLevels]
+      .map((lvl) => ({ price: Number(lvl.price), size: Number(lvl.size ?? 0) }))
+      .filter((lvl) => Number.isFinite(lvl.price) && lvl.size > 0)
+      .sort((a, b) => (args.side === "BUY" ? a.price - b.price : b.price - a.price));
+    return sorted
+      .slice(0, args.depthLevels)
+      .map(({ price, size }) => ({ priceFraction: price, shares: size }));
   }
 
   async placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {

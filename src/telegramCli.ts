@@ -47,6 +47,9 @@ const log = createLogger("telegramCli");
   const predictionMarketScanJob = inject.getPredictionMarketScanJob();
   predictionMarketScanJob?.start();
 
+  const predictionMarketExtractFactsJob = inject.getPredictionMarketExtractFactsJob();
+  predictionMarketExtractFactsJob?.start();
+
   const polymarketPositionPollerJob = inject.getPolymarketPositionPollerJob();
   polymarketPositionPollerJob?.start();
 
@@ -64,6 +67,8 @@ const log = createLogger("telegramCli");
     recipientNotificationUseCase,
   );
 
+  inject.getPredictionMarketReviewHandler()?.register(rawBot);
+
   const bot = new TelegramBot(rawBot, handler);
 
   log.info("Onchain Agent Telegram is up and running.");
@@ -71,6 +76,7 @@ const log = createLogger("telegramCli");
   process.on("SIGINT", async () => {
     log.info("Shutting down…");
     tokenCrawlerJob.stop();
+    predictionMarketExtractFactsJob?.stop();
     yieldPoolScanJob?.stop();
     userIdleScanJob?.stop();
     yieldReportJob?.stop();

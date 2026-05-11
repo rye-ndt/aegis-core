@@ -92,6 +92,21 @@ function buildResult(args: {
     { label: `Side B — ${finding.sideB.label}`, value: finding.sideB.rationale },
   ];
 
+  if (finding.expectedProfitUsdc !== undefined && finding.sizedTrades && finding.sizedTrades.length > 0) {
+    const worst = finding.minPayoffUsdc ?? finding.expectedProfitUsdc;
+    details.push({
+      label: "Profit estimate",
+      value: `$${finding.expectedProfitUsdc.toFixed(2)} (worst case: $${worst.toFixed(2)})`,
+    });
+    const tradeStr = finding.sizedTrades
+      .map((t) => {
+        const q = marketById.get(t.marketId)?.question?.slice(0, 30) ?? t.marketId.slice(0, 8);
+        return `BUY ${t.shares.toFixed(1)} ${t.outcome} on "${q}" @ $${t.avgPriceFraction.toFixed(2)}`;
+      })
+      .join("; ");
+    details.push({ label: "Trades", value: tradeStr });
+  }
+
   // When bet execution is enabled (stage 4), the side buttons become callbacks
   // that drop the user into the place-bet chat flow (`PlaceBetCapability`).
   // When disabled, we keep the legacy URL-out behaviour so the finding card

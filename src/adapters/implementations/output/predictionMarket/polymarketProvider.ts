@@ -1,7 +1,9 @@
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { LRUCache } from "lru-cache";
 import type {
   IPredictionMarketProvider,
+  OutcomeTokenPair,
   ProviderFilters,
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
 import type { RawMarket } from "../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
@@ -36,9 +38,12 @@ interface GammaMarket {
   active?: boolean;
   acceptingOrders?: boolean;
   umaResolutionStatus?: string | null;
-  events?: Array<{ description?: string; slug?: string }>;
+  events?: Array<{ id?: string; description?: string; slug?: string }>;
   oneDayPriceChange?: number;        // decimal fraction, e.g. 0.0234 = +234 bps
   oneWeekPriceChange?: number;
+  // CLOB outcome token ids — JSON-encoded `[yesTokenId, noTokenId]` aligned
+  // with the `outcomes` array. Drives the sizer's outcomeTokenIdResolver.
+  clobTokenIds?: string | string[];
 }
 
 function parseMaybeJsonArray<T = string>(v: string | T[] | undefined): T[] {
@@ -77,6 +82,11 @@ function pickPriceChangeBps(decimal: number | undefined): number | undefined {
   const n = Number(decimal);
   if (!Number.isFinite(n)) return undefined;
   return Math.round(n * 10_000);
+}
+
+function pickPolymarketEventId(m: GammaMarket): string | null {
+  const id = m.events?.[0]?.id;
+  return typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
 }
 
 function pickResolutionEpochSec(m: GammaMarket): number | null {
@@ -151,10 +161,43 @@ function normalizeRaw(m: GammaMarket): RawMarket | null {
     url,
     priceChange24hBps: pickPriceChangeBps(m.oneDayPriceChange),
     priceChange7dBps: pickPriceChangeBps(m.oneWeekPriceChange),
+    polymarketEventId: pickPolymarketEventId(m),
   };
 }
 
+/** Process-wide LRU keyed on Polymarket condition_id. Populated by every
+ *  `fetchFiltered` / `fetchByIds` call; read by the sync resolver below.
+ *  Capacity covers ~2x the default topN so back-to-back ticks rarely evict
+ *  members that the verifier might still ask about. */
+const TOKEN_CACHE_MAX = 500;
+const TOKEN_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+
 export class PolymarketProvider implements IPredictionMarketProvider {
+  private readonly tokenCache = new LRUCache<string, OutcomeTokenPair>({
+    max: TOKEN_CACHE_MAX,
+    ttl: TOKEN_CACHE_TTL_MS,
+  });
+
+  getOutcomeTokens(marketId: string): OutcomeTokenPair | null {
+    return this.tokenCache.get(marketId) ?? null;
+  }
+
+  private cacheTokensFromGamma(
+    marketId: string,
+    outcomes: string[],
+    rawTokens: unknown,
+  ): void {
+    const tokens = parseMaybeJsonArray<string>(rawTokens as string | string[] | undefined);
+    if (tokens.length !== 2 || outcomes.length !== 2) return;
+    const yesIdx = outcomes.findIndex((o) => o.toLowerCase() === "yes");
+    const noIdx = outcomes.findIndex((o) => o.toLowerCase() === "no");
+    if (yesIdx < 0 || noIdx < 0) return;
+    const yes = tokens[yesIdx];
+    const no = tokens[noIdx];
+    if (!yes || !no) return;
+    this.tokenCache.set(marketId, { yes, no });
+  }
+
   async fetchFiltered(filters: ProviderFilters, reqId: string): Promise<RawMarket[]> {
     const start = Date.now();
     log.info({ step: "started", reqId }, "fetch-universe");
@@ -221,6 +264,7 @@ export class PolymarketProvider implements IPredictionMarketProvider {
       const slug = m.slug ?? "";
       const url = slug ? `https://polymarket.com/market/${slug}` : `https://polymarket.com/`;
 
+      this.cacheTokensFromGamma(marketId, outcomes, m.clobTokenIds);
       surviving.push({
         marketId,
         slug,
@@ -239,6 +283,7 @@ export class PolymarketProvider implements IPredictionMarketProvider {
         url,
         priceChange24hBps: pickPriceChangeBps(m.oneDayPriceChange),
         priceChange7dBps: pickPriceChangeBps(m.oneWeekPriceChange),
+        polymarketEventId: pickPolymarketEventId(m),
       });
     }
 
@@ -281,7 +326,11 @@ export class PolymarketProvider implements IPredictionMarketProvider {
       const rows = await fetchPage(url);
       for (const r of rows) {
         const norm = normalizeRaw(r);
-        if (norm && chunk.includes(norm.marketId)) out.push(norm);
+        if (norm && chunk.includes(norm.marketId)) {
+          const outcomes = parseMaybeJsonArray<string>(r.outcomes);
+          this.cacheTokensFromGamma(norm.marketId, outcomes, r.clobTokenIds);
+          out.push(norm);
+        }
       }
     }
 

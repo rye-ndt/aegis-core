@@ -27,6 +27,8 @@ import type { IPredictionMarketBetUseCase } from "../../../../use-cases/interfac
 import type { IPolymarketAdapter } from "../../../../use-cases/interface/predictionMarket/IPolymarketAdapter";
 import type { IPredictionMarketReceiptBroadcaster } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
 import type { IRelayClient } from "../../../../use-cases/interface/output/relay.interface";
+import type { IPredictionMarketRepository } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
+import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import {
   BET_TRANSITION_STATUSES,
   BET_TERMINAL_STATUSES,
@@ -146,6 +148,8 @@ export class HttpApiServer {
     private readonly predictionMarketReceiptBroadcaster?: IPredictionMarketReceiptBroadcaster,
     /** Stage 4: Relay status passthrough for the FE bridge poller. */
     private readonly relayClient?: IRelayClient,
+    /** Phase 4 (Part 5): admin route reads `getShadowAgreement` from here. */
+    private readonly predictionMarketRepo?: IPredictionMarketRepository,
   ) {
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
@@ -230,7 +234,47 @@ export class HttpApiServer {
       // We expose the alias so the construction-doc URL surface is honest.
       "POST /predictionMarket/order/sell":  (req, res) => this.handlePmPlaceOrder(req, res),
       "GET /predictionMarket/positions":    (req, res) => this.handlePmListPositions(req, res),
+      "GET /admin/prediction-markets/shadow-agreement": (req, res, url) => this.handleShadowAgreement(req, res, url),
     };
+  }
+
+  private async handleShadowAgreement(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    // Bearer-token gate. Empty env disables the endpoint entirely (404) so
+    // a misconfigured deploy can't accidentally leak shadow metrics.
+    const expectedToken = PREDICTION_MARKETS_ENV.adminHttpToken;
+    if (!expectedToken) {
+      log.debug({ reqId }, "shadow-agreement endpoint disabled (no admin token)");
+      return this.sendJson(res, 404, { error: "Not found" });
+    }
+    const authHeader = req.headers["authorization"];
+    const provided = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : "";
+    if (!provided || provided !== expectedToken) {
+      log.warn({ reqId, hasHeader: !!authHeader }, "shadow-agreement unauthorized");
+      return this.sendJson(res, 401, { error: "Unauthorized" });
+    }
+    if (!this.predictionMarketRepo) {
+      return this.sendJson(res, 503, { error: "Prediction market repo not available" });
+    }
+    const windowDaysRaw = url.searchParams.get("windowDays");
+    const windowDays = windowDaysRaw ? Math.max(1, Math.min(30, parseInt(windowDaysRaw, 10))) : 7;
+    if (!Number.isFinite(windowDays)) {
+      return this.sendJson(res, 400, { error: "windowDays must be an integer 1..30" });
+    }
+    try {
+      const report = await this.predictionMarketRepo.getShadowAgreement(windowDays * 86_400);
+      log.info({ reqId, windowDays }, "shadow-agreement served");
+      return this.sendJson(res, 200, report);
+    } catch (err) {
+      log.error({ err, reqId }, "shadow-agreement query failed");
+      return this.sendJson(res, 500, { error: "Internal server error" });
+    }
   }
 
   private get paramRoutes(): Array<[

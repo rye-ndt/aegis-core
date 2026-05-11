@@ -12,6 +12,8 @@ import type { IPredictionMarketFindingBroadcaster } from "../interface/predictio
 import type { IPredictionMarketProvider } from "../interface/predictionMarket/IPredictionMarketProvider";
 import type { IPredictionMarketRepository } from "../interface/predictionMarket/IPredictionMarketRepository";
 import type { IPredictionMarketVerifier } from "../interface/predictionMarket/IPredictionMarketVerifier";
+import type { IPredictionMarketFactRepository } from "../interface/predictionMarket/IPredictionMarketFactRepository";
+import { parseCutOverSubjects } from "../interface/predictionMarket/marketFactVocabularies";
 import type {
   DraftCluster,
   RawMarket,
@@ -19,6 +21,7 @@ import type {
   StoredCluster,
   VerifiedFinding,
 } from "../interface/predictionMarket/PredictionMarketTypes";
+import type { PredictionMarketDeterministicClusterUseCase } from "./predictionMarketDeterministicCluster.usecase";
 
 const log = createLogger("predictionMarketScan");
 
@@ -47,6 +50,24 @@ function diffCount(prevIds: Set<string>, current: RawMarket[]): number {
   return added + removed;
 }
 
+/**
+ * Routing rule for stage-3. Exported pure function so the deterministic-only
+ * invariant (Part 7) can be enforced by a unit test:
+ * `pickDetector` must never return the LLM detector for a cut-over subject.
+ */
+export function pickDetector(
+  cluster: Pick<StoredCluster, "derivedSubject">,
+  cutOverSubjects: Set<string>,
+  llmDetector: IPredictionMarketDetector | null,
+  deterministicDetector: IPredictionMarketDetector | null,
+): IPredictionMarketDetector | null {
+  const subject = cluster.derivedSubject ?? null;
+  if (subject && cutOverSubjects.has(subject) && deterministicDetector) {
+    return deterministicDetector;
+  }
+  return llmDetector;
+}
+
 function carryForward(stored: StoredCluster[]): DraftCluster[] {
   return stored.map((s) => ({
     theme: s.theme,
@@ -55,6 +76,7 @@ function carryForward(stored: StoredCluster[]): DraftCluster[] {
     expectedRelationships: s.expectedRelationships,
     rationale: s.rationale,
     confidence: s.confidence,
+    derivedSubject: s.derivedSubject ?? null,
   }));
 }
 
@@ -71,6 +93,9 @@ export class PredictionMarketScanUseCase {
     private readonly detector: IPredictionMarketDetector | null = null,
     private readonly verifier: IPredictionMarketVerifier | null = null,
     private readonly findingBroadcaster: IPredictionMarketFindingBroadcaster | null = null,
+    private readonly deterministicCluster: PredictionMarketDeterministicClusterUseCase | null = null,
+    private readonly deterministicDetector: IPredictionMarketDetector | null = null,
+    private readonly factRepo: IPredictionMarketFactRepository | null = null,
   ) {}
 
   async runOnce(reqId: string): Promise<RunOutcome> {
@@ -144,17 +169,60 @@ export class PredictionMarketScanUseCase {
     });
     await this.repo.insertMarkets(runId, markets);
 
+    const cutOverSubjects = parseCutOverSubjects(env.deterministicSubjects);
+    const needFacts =
+      !!this.deterministicCluster && (cutOverSubjects.size > 0 || env.shadowMode);
+    const factsByMarketId = needFacts && this.factRepo
+      ? await this.factRepo.getByMarketIds(markets.map((m) => m.marketId))
+      : null;
+
     let clusters: DraftCluster[];
     // Carry-forward keeps the prior run's clusterId so the stage-3 detector
     // cache and `prediction_market_findings.cluster_id` remain stable.
     let priorClusterIdByContent: Map<string, string> | null = null;
     if (shouldRecluster) {
-      log.info({ step: "classify-start", reqId, marketCount: markets.length }, "scan");
-      clusters = await this.classifier.classify({
-        markets: markets.map(toClassifierRecord),
-        reqId,
-      });
-      log.info({ step: "classify-end", reqId, clusters: clusters.length }, "scan");
+      let deterministic: DraftCluster[] = [];
+      let llmEligible = markets;
+      if (this.deterministicCluster && cutOverSubjects.size > 0) {
+        const detResult = await this.deterministicCluster.cluster({
+          runId, universe: markets, cutOverSubjects, reqId,
+          factsByMarketId: factsByMarketId ?? undefined,
+        });
+        deterministic = detResult.deterministic;
+        llmEligible = detResult.llmEligible;
+      }
+
+      log.info(
+        { step: "classify-start", reqId, marketCount: llmEligible.length, deterministicCount: deterministic.length },
+        "scan",
+      );
+      const llmClusters = llmEligible.length >= 3
+        ? await this.classifier.classify({
+            markets: llmEligible.map(toClassifierRecord),
+            reqId,
+          })
+        : [];
+      clusters = [...deterministic, ...llmClusters];
+      log.info(
+        { step: "classify-end", reqId, clusters: clusters.length, deterministic: deterministic.length, llm: llmClusters.length },
+        "scan",
+      );
+
+      if (this.deterministicCluster && env.shadowMode) {
+        try {
+          const shadow = await this.deterministicCluster.cluster({
+            runId, universe: markets, cutOverSubjects, reqId, shadowMode: true,
+            factsByMarketId: factsByMarketId ?? undefined,
+          });
+          await this.repo.insertShadowClusters(runId, shadow.deterministic, nowSec);
+          log.info(
+            { step: "shadow-write", reqId, runId, shadowClusters: shadow.deterministic.length },
+            "scan",
+          );
+        } catch (err) {
+          log.error({ err, reqId, runId }, "shadow-write failed");
+        }
+      }
     } else {
       const prior = await this.repo.getClustersByRun(lastRun!.runId);
       clusters = carryForward(prior);
@@ -220,11 +288,39 @@ export class PredictionMarketScanUseCase {
       for (const m of markets) marketById.set(m.marketId, m);
 
       const stage3Limit = pLimit(env.detectorConcurrency);
+      // Per-tick routing visibility — counts which detector served each
+      // cluster. Lets operators verify cut-over routing without grepping
+      // per-cluster logs.
+      let deterministicClustersServed = 0;
+      let llmClustersServed = 0;
+      let detectorlessClusters = 0;
+      for (const c of publishedStored) {
+        const d = this.detectorFor(c, cutOverSubjects);
+        if (!d) detectorlessClusters += 1;
+        else if (d === this.deterministicDetector) deterministicClustersServed += 1;
+        else llmClustersServed += 1;
+      }
+      log.info(
+        {
+          step: "stage3-routing",
+          reqId,
+          runId,
+          deterministicClustersServed,
+          llmClustersServed,
+          detectorlessClusters,
+          cutOverSubjects: Array.from(cutOverSubjects),
+        },
+        "scan",
+      );
       const perCluster = await Promise.all(
         publishedStored.map((cluster) =>
-          stage3Limit(() => this.runStage3ForCluster(cluster, marketById, runId, reqId)),
+          stage3Limit(() => this.runStage3ForCluster(cluster, marketById, runId, reqId, cutOverSubjects)),
         ),
       );
+
+      if (env.shadowMode && this.deterministicDetector && this.verifier) {
+        await this.runShadowDetector(publishedStored, marketById, runId, reqId, stage3Limit);
+      }
 
       findingsDetected = perCluster.reduce((acc, p) => acc + p.drafts, 0);
       const allVerified = perCluster
@@ -301,8 +397,11 @@ export class PredictionMarketScanUseCase {
     marketById: Map<string, RawMarket>,
     runId: string,
     reqId: string,
+    cutOverSubjects: Set<string>,
   ): Promise<{ drafts: number; verified: VerifiedFinding[] }> {
-    if (!this.detector || !this.verifier) return { drafts: 0, verified: [] };
+    if (!this.verifier) return { drafts: 0, verified: [] };
+    const detector = this.detectorFor(cluster, cutOverSubjects);
+    if (!detector) return { drafts: 0, verified: [] };
     const members: RawMarket[] = [];
     for (const id of cluster.marketIds) {
       const m = marketById.get(id);
@@ -310,7 +409,7 @@ export class PredictionMarketScanUseCase {
     }
     if (members.length < 2) return { drafts: 0, verified: [] };
     try {
-      const drafts = await this.detector.detect({ cluster, members, reqId });
+      const drafts = await detector.detect({ cluster, members, reqId });
       if (drafts.length === 0) return { drafts: 0, verified: [] };
       const verified = await this.verifier.verify({
         reqId,
@@ -324,5 +423,79 @@ export class PredictionMarketScanUseCase {
       log.error({ err, reqId, runId, clusterId: cluster.clusterId }, "stage3 cluster failed");
       return { drafts: 0, verified: [] };
     }
+  }
+
+  private detectorFor(
+    cluster: StoredCluster,
+    cutOverSubjects: Set<string>,
+  ): IPredictionMarketDetector | null {
+    return pickDetector(cluster, cutOverSubjects, this.detector, this.deterministicDetector);
+  }
+
+  private async runShadowDetector(
+    publishedStored: StoredCluster[],
+    marketById: Map<string, RawMarket>,
+    runId: string,
+    reqId: string,
+    limit: ReturnType<typeof pLimit>,
+  ): Promise<void> {
+    if (!this.deterministicDetector || !this.verifier) return;
+    const start = Date.now();
+    try {
+      const per = await Promise.all(
+        publishedStored.map((cluster) =>
+          limit(() => this.runShadowDetectForCluster(cluster, marketById, runId, reqId)),
+        ),
+      );
+      const shadowInputs = per.flat();
+      if (shadowInputs.length > 0) {
+        await this.repo.insertShadowFindings(shadowInputs);
+      }
+      log.info(
+        { step: "shadow-detect-end", reqId, runId, shadowFindings: shadowInputs.length, durationMs: Date.now() - start },
+        "scan",
+      );
+    } catch (err) {
+      log.error({ err, reqId, runId }, "shadow-detect failed");
+    }
+  }
+
+  private async runShadowDetectForCluster(
+    cluster: StoredCluster,
+    marketById: Map<string, RawMarket>,
+    runId: string,
+    reqId: string,
+  ): Promise<import("../interface/predictionMarket/IPredictionMarketRepository").InsertShadowFindingInput[]> {
+    if (!this.deterministicDetector || !this.verifier) return [];
+    const members: RawMarket[] = [];
+    for (const id of cluster.marketIds) {
+      const m = marketById.get(id);
+      if (m) members.push(m);
+    }
+    if (members.length < 2) return [];
+    const drafts = await this.deterministicDetector.detect({ cluster, members, reqId });
+    if (drafts.length === 0) return [];
+    const verified = await this.verifier.verify({
+      reqId,
+      runId,
+      cluster,
+      snapshotMembers: members,
+      drafts,
+    });
+    return verified.map((v) => ({
+      runId,
+      source: { kind: "real" as const, realClusterId: cluster.clusterId },
+      patternType: v.patternType,
+      marketsInvolved: v.marketsInvolved,
+      liveOdds: v.liveOdds,
+      magnitudeBps: v.magnitudeBps,
+      widerMarketId: v.widerMarketId ?? null,
+      narrowerMarketId: v.narrowerMarketId ?? null,
+      earlierMarketId: v.earlierMarketId ?? null,
+      laterMarketId: v.laterMarketId ?? null,
+      rationale: v.rationale,
+      confidence: v.confidence,
+      createdAtEpoch: v.verifiedAtEpoch,
+    }));
   }
 }

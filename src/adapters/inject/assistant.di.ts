@@ -66,16 +66,23 @@ import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
 import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
 import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { PredictionMarketScanJob } from "../implementations/input/jobs/predictionMarketScanJob";
+import { PredictionMarketExtractFactsJob } from "../implementations/input/jobs/predictionMarketExtractFactsJob";
+import { OpenAIPredictionMarketExtractor } from "../implementations/output/predictionMarket/openaiPredictionMarketExtractor";
+import { PredictionMarketExtractFactsUseCase } from "../../use-cases/implementations/predictionMarketExtractFacts.usecase";
+import { PredictionMarketReviewHandler } from "../implementations/input/telegram/predictionMarketReviewHandler";
 import { PolymarketPositionPollerJob } from "../implementations/input/jobs/polymarketPositionPollerJob";
 import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
 import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
 import { OpenAIPredictionMarketDetector } from "../implementations/output/predictionMarket/openaiPredictionMarketDetector";
+import { DeterministicPredictionMarketDetector } from "../implementations/output/predictionMarket/deterministicPredictionMarketDetector";
+import { AnalyticalPredictionMarketSizer } from "../implementations/output/predictionMarket/analyticalPredictionMarketSizer";
 import { PredictionMarketBroadcaster } from "../implementations/output/predictionMarket/predictionMarketBroadcaster";
 import { PredictionMarketFindingBroadcaster } from "../implementations/output/predictionMarket/predictionMarketFindingBroadcaster";
 import { PredictionMarketReceiptBroadcaster } from "../implementations/output/predictionMarket/predictionMarketReceiptBroadcaster";
 import { PolymarketAdapter } from "../implementations/output/predictionMarket/polymarketAdapter";
 import { PredictionMarketVerifier } from "../implementations/output/predictionMarket/predictionMarketVerifier";
 import { PredictionMarketScanUseCase } from "../../use-cases/implementations/predictionMarketScan.usecase";
+import { PredictionMarketDeterministicClusterUseCase } from "../../use-cases/implementations/predictionMarketDeterministicCluster.usecase";
 import { PredictionMarketBetUseCase } from "../../use-cases/implementations/predictionMarketBet.usecase";
 import { DrizzlePredictionMarketBetRepo } from "../implementations/output/sqlDB/repositories/predictionMarketBet.repo";
 import { PlaceBetCapability } from "../implementations/output/capabilities/placeBetCapability";
@@ -216,12 +223,19 @@ export class AssistantInject {
   private _predictionMarketVerifier: IPredictionMarketVerifier | null = null;
   private _predictionMarketFindingBroadcaster: IPredictionMarketFindingBroadcaster | null = null;
   private _predictionMarketScanUseCase: PredictionMarketScanUseCase | null = null;
+  private _predictionMarketDeterministicCluster: PredictionMarketDeterministicClusterUseCase | null = null;
+  private _predictionMarketDeterministicDetector: DeterministicPredictionMarketDetector | null = null;
   private _predictionMarketScanJob: PredictionMarketScanJob | null = null;
   private _predictionMarketNoStartWarned = false;
   private _polymarketAdapter: IPolymarketAdapter | null = null;
   private _predictionMarketBetUseCase: IPredictionMarketBetUseCase | null = null;
   private _predictionMarketReceiptBroadcaster: IPredictionMarketReceiptBroadcaster | null = null;
   private _polymarketPositionPollerJob: PolymarketPositionPollerJob | null = null;
+  private _predictionMarketExtractor: OpenAIPredictionMarketExtractor | null = null;
+  private _predictionMarketExtractFactsUseCase: PredictionMarketExtractFactsUseCase | null = null;
+  private _predictionMarketExtractFactsJob: PredictionMarketExtractFactsJob | null = null;
+  private _predictionMarketReviewHandler: PredictionMarketReviewHandler | null = null;
+  private _predictionMarketExtractNoStartWarned = false;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -1335,13 +1349,30 @@ export class AssistantInject {
 
   getPredictionMarketVerifier(): IPredictionMarketVerifier {
     if (this._predictionMarketVerifier) return this._predictionMarketVerifier;
+    // The sizer's resolver delegates to `provider.getOutcomeTokens`, which is
+    // populated as a side effect of every `fetchFiltered` / `fetchByIds` call
+    // (parses Gamma's `clobTokenIds`). Cold-start ticks may miss until the
+    // first fetch lands; the verifier logs `sizing-skipped: tokens-missing`
+    // and the finding survives un-sized.
+    const provider = this.getPredictionMarketProvider();
     this._predictionMarketVerifier = new PredictionMarketVerifier({
-      provider: this.getPredictionMarketProvider(),
+      provider,
       verifyFreshnessMs: PREDICTION_MARKETS_ENV.verifyFreshnessMs,
       oddsDriftToleranceBps: PREDICTION_MARKETS_ENV.oddsDriftToleranceBps,
       minGapBps: PREDICTION_MARKETS_ENV.minGapBps,
       minSumDeviationBps: PREDICTION_MARKETS_ENV.minSumDeviationBps,
       findingMinLiquidityUsd: PREDICTION_MARKETS_ENV.findingMinLiquidityUsd,
+      sizing: PREDICTION_MARKETS_ENV.sizingEnabled
+        ? {
+            sizer: new AnalyticalPredictionMarketSizer(),
+            polymarket: this.getPolymarketAdapter(),
+            outcomeTokenIdResolver: (marketId) => provider.getOutcomeTokens(marketId),
+            budgetUsdc: PREDICTION_MARKETS_ENV.sizerBudgetUsdc,
+            feeBps: PREDICTION_MARKETS_ENV.sizerFeeBps,
+            gasEstimateUsdc: PREDICTION_MARKETS_ENV.sizerGasEstimateUsdc,
+            depthLevels: PREDICTION_MARKETS_ENV.sizerDepthLevels,
+          }
+        : undefined,
     });
     return this._predictionMarketVerifier;
   }
@@ -1392,8 +1423,33 @@ export class AssistantInject {
       detector,
       verifier,
       findingBroadcaster,
+      this.getPredictionMarketDeterministicCluster(),
+      PREDICTION_MARKETS_ENV.findingsEnabled ? this.getPredictionMarketDeterministicDetector() : null,
+      this.getSqlDB().predictionMarketFacts,
     );
     return this._predictionMarketScanUseCase;
+  }
+
+  getPredictionMarketDeterministicCluster(): PredictionMarketDeterministicClusterUseCase {
+    if (!this._predictionMarketDeterministicCluster) {
+      this._predictionMarketDeterministicCluster =
+        new PredictionMarketDeterministicClusterUseCase(this.getSqlDB().predictionMarketFacts);
+    }
+    return this._predictionMarketDeterministicCluster;
+  }
+
+  getPredictionMarketDeterministicDetector(): DeterministicPredictionMarketDetector {
+    if (!this._predictionMarketDeterministicDetector) {
+      this._predictionMarketDeterministicDetector = new DeterministicPredictionMarketDetector(
+        this.getSqlDB().predictionMarketFacts,
+        {
+          tolBps: PREDICTION_MARKETS_ENV.minGapBps,
+          highConfidenceLiquidityUsd: PREDICTION_MARKETS_ENV.findingMinLiquidityUsd * 4,
+          highConfidenceMagnitudeBps: 500,
+        },
+      );
+    }
+    return this._predictionMarketDeterministicDetector;
   }
 
   getPredictionMarketScanJob(): PredictionMarketScanJob | undefined {
@@ -1431,6 +1487,80 @@ export class AssistantInject {
 
   getPredictionMarketBetRepo(): IPredictionMarketBetRepository {
     return this.getSqlDB().predictionMarketBets;
+  }
+
+  getPredictionMarketExtractor(): OpenAIPredictionMarketExtractor | undefined {
+    if (this._predictionMarketExtractor) return this._predictionMarketExtractor;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) return undefined;
+    this._predictionMarketExtractor = new OpenAIPredictionMarketExtractor({
+      apiKey,
+      model: PREDICTION_MARKETS_ENV.extractorModel,
+      promptVersion: PREDICTION_MARKETS_ENV.extractorPromptVersion,
+    });
+    return this._predictionMarketExtractor;
+  }
+
+  getPredictionMarketReviewHandler(): PredictionMarketReviewHandler | undefined {
+    if (!PREDICTION_MARKETS_ENV.reviewAdminChatId) return undefined;
+    if (this._predictionMarketReviewHandler) return this._predictionMarketReviewHandler;
+    this._predictionMarketReviewHandler = new PredictionMarketReviewHandler(
+      this.getSqlDB().predictionMarketFacts,
+      PREDICTION_MARKETS_ENV.reviewAdminChatId,
+    );
+    return this._predictionMarketReviewHandler;
+  }
+
+  getPredictionMarketExtractFactsUseCase(): PredictionMarketExtractFactsUseCase | undefined {
+    if (this._predictionMarketExtractFactsUseCase) {
+      return this._predictionMarketExtractFactsUseCase;
+    }
+    const extractor = this.getPredictionMarketExtractor();
+    if (!extractor) return undefined;
+    const bot = this.getBot();
+    const reviewHandler = this.getPredictionMarketReviewHandler();
+    const notifier = bot && reviewHandler ? reviewHandler.notifier(bot.api) : undefined;
+    this._predictionMarketExtractFactsUseCase = new PredictionMarketExtractFactsUseCase(
+      extractor,
+      this.getSqlDB().predictionMarketFacts,
+      { concurrency: PREDICTION_MARKETS_ENV.extractorConcurrency },
+      notifier,
+    );
+    return this._predictionMarketExtractFactsUseCase;
+  }
+
+  getPredictionMarketExtractFactsJob(): PredictionMarketExtractFactsJob | undefined {
+    if (!PREDICTION_MARKETS_ENV.enabled) {
+      if (!this._predictionMarketExtractNoStartWarned) {
+        this._predictionMarketExtractNoStartWarned = true;
+        log.info(
+          { feature: "predictionMarketExtractFacts", reason: "disabled" },
+          "extract-facts job not started — set PREDICTION_MARKETS_ENABLED=true",
+        );
+      }
+      return undefined;
+    }
+    const useCase = this.getPredictionMarketExtractFactsUseCase();
+    const redis = this.getRedis();
+    if (!useCase || !redis) {
+      if (!this._predictionMarketExtractNoStartWarned) {
+        this._predictionMarketExtractNoStartWarned = true;
+        log.warn(
+          { feature: "predictionMarketExtractFacts", reason: "deps-missing" },
+          "extract-facts job not started",
+        );
+      }
+      return undefined;
+    }
+    if (!this._predictionMarketExtractFactsJob) {
+      this._predictionMarketExtractFactsJob = new PredictionMarketExtractFactsJob(
+        useCase,
+        this.getPredictionMarketRepo(),
+        redis,
+        PREDICTION_MARKETS_ENV.extractFactsIntervalMs,
+      );
+    }
+    return this._predictionMarketExtractFactsJob;
   }
 
   getPolymarketAdapter(): IPolymarketAdapter {
@@ -1527,6 +1657,7 @@ export class AssistantInject {
       this.getPolymarketAdapter(),
       this.getPredictionMarketReceiptBroadcaster(),
       this.getRelayClient(),
+      this.getPredictionMarketRepo(),
     );
   }
 

@@ -1,10 +1,14 @@
-import { desc, eq, inArray } from "drizzle-orm";
+import { desc, eq, gte, inArray } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newUuid } from "../../../../../helpers/uuid";
 import type {
-  IPredictionMarketRepository,
   InsertRunInput,
+  InsertShadowFindingInput,
+  IPredictionMarketRepository,
+  ShadowAgreementReport,
+  ShadowAgreementSubjectRow,
 } from "../../../../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
+import { inferSubject } from "../../../../../use-cases/interface/predictionMarket/marketFactFormat";
 import type {
   DraftCluster,
   ExpectedRelationship,
@@ -21,7 +25,10 @@ import type {
 } from "../../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
 import {
   predictionMarketClusters,
+  predictionMarketClustersShadow,
+  predictionMarketFacts,
   predictionMarketFindings,
+  predictionMarketFindingsShadow,
   predictionMarketRuns,
   predictionMarketSnapshots,
 } from "../schema";
@@ -112,6 +119,7 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       volume7dUsdCents: toCents(m.volume7dUsd),
       liquidityUsdCents: toCents(m.liquidityUsd),
       url: m.url,
+      polymarketEventId: m.polymarketEventId ?? null,
     }));
     await this.db.insert(predictionMarketSnapshots).values(rows);
   }
@@ -130,6 +138,7 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       expectedRelationships: c.expectedRelationships,
       rationale: c.rationale,
       confidence: c.confidence,
+      derivedSubject: c.derivedSubject ?? null,
     }));
     await this.db.insert(predictionMarketClusters).values(rows);
     return rows.map((r) => ({
@@ -141,7 +150,30 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       expectedRelationships: r.expectedRelationships,
       rationale: r.rationale,
       confidence: r.confidence,
+      derivedSubject: r.derivedSubject,
     }));
+  }
+
+  async insertShadowClusters(
+    runId: string,
+    clusters: DraftCluster[],
+    createdAtEpoch: number,
+  ): Promise<void> {
+    if (clusters.length === 0) return;
+    const rows = clusters.map((c) => ({
+      shadowClusterId: newUuid(),
+      runId,
+      pipeline: "deterministic" as const,
+      derivedSubject: c.derivedSubject ?? null,
+      theme: c.theme,
+      causalDriver: c.causalDriver,
+      marketIds: c.marketIds,
+      expectedRelationships: c.expectedRelationships,
+      rationale: c.rationale,
+      confidence: c.confidence,
+      createdAtEpoch,
+    }));
+    await this.db.insert(predictionMarketClustersShadow).values(rows);
   }
 
   async updateRunStatus(
@@ -178,6 +210,7 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       isDisputed: false,
       outcomesCount: 2,
       url: r.url,
+      polymarketEventId: r.polymarketEventId,
     }));
   }
 
@@ -195,6 +228,7 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       expectedRelationships: r.expectedRelationships as ExpectedRelationship[],
       rationale: r.rationale,
       confidence: r.confidence as StoredCluster["confidence"],
+      derivedSubject: r.derivedSubject,
     }));
   }
 
@@ -217,6 +251,9 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       rationale: f.rationale,
       createdAtEpoch: f.verifiedAtEpoch,
       broadcastedAtEpoch: null as number | null,
+      sizedTrades: f.sizedTrades ?? null,
+      expectedProfitUsdcCents: f.expectedProfitUsdc !== undefined ? Math.round(f.expectedProfitUsdc * 100) : null,
+      minPayoffUsdcCents: f.minPayoffUsdc !== undefined ? Math.round(f.minPayoffUsdc * 100) : null,
     }));
     await this.db.insert(predictionMarketFindings).values(rows);
   }
@@ -247,7 +284,127 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
     const r = rows[0];
     return r ? mapFindingRow(r) : null;
   }
+
+  async insertShadowFindings(input: InsertShadowFindingInput[]): Promise<void> {
+    if (input.length === 0) return;
+    const rows = input.map((f) => ({
+      shadowFindingId: newUuid(),
+      runId: f.runId,
+      shadowClusterId: f.source.kind === "shadow" ? f.source.shadowClusterId : null,
+      realClusterId: f.source.kind === "real" ? f.source.realClusterId : null,
+      pipeline: "deterministic" as const,
+      patternType: f.patternType,
+      marketsInvolved: f.marketsInvolved,
+      liveOdds: f.liveOdds,
+      magnitudeBps: f.magnitudeBps,
+      widerMarketId: f.widerMarketId,
+      narrowerMarketId: f.narrowerMarketId,
+      earlierMarketId: f.earlierMarketId,
+      laterMarketId: f.laterMarketId,
+      rationale: f.rationale,
+      confidence: f.confidence,
+      createdAtEpoch: f.createdAtEpoch,
+    }));
+    await this.db.insert(predictionMarketFindingsShadow).values(rows);
+  }
+
+  /**
+   * Per-subject agreement = match on (sorted marketsInvolved + patternType)
+   * between LLM rows in `prediction_market_findings` and deterministic rows
+   * in `prediction_market_findings_shadow` for the trailing `windowSec`.
+   * Subject is read from `prediction_market_facts` using the first market in
+   * each finding's `marketsInvolved`.
+   */
+  async getShadowAgreement(windowSec: number): Promise<ShadowAgreementReport> {
+    const cutoff = Math.floor(Date.now() / 1000) - windowSec;
+    const [llm, shadow] = await Promise.all([
+      this.db
+        .select({
+          patternType: predictionMarketFindings.patternType,
+          marketsInvolved: predictionMarketFindings.marketsInvolved,
+        })
+        .from(predictionMarketFindings)
+        .where(gte(predictionMarketFindings.createdAtEpoch, cutoff)),
+      this.db
+        .select({
+          patternType: predictionMarketFindingsShadow.patternType,
+          marketsInvolved: predictionMarketFindingsShadow.marketsInvolved,
+        })
+        .from(predictionMarketFindingsShadow)
+        .where(gte(predictionMarketFindingsShadow.createdAtEpoch, cutoff)),
+    ]);
+    const allIds = Array.from(
+      new Set(
+        [...llm, ...shadow].flatMap((r) => (r.marketsInvolved as string[]) ?? []),
+      ),
+    );
+    const subjectByMarket = new Map<string, string>();
+    if (allIds.length > 0) {
+      const factRows = await this.db
+        .select({
+          marketId: predictionMarketFacts.marketId,
+          subject: predictionMarketFacts.subject,
+        })
+        .from(predictionMarketFacts)
+        .where(inArray(predictionMarketFacts.marketId, allIds));
+      for (const r of factRows) subjectByMarket.set(r.marketId, r.subject);
+    }
+
+    const key = (markets: string[], pattern: string): string =>
+      `${pattern}::${[...markets].sort().join("|")}`;
+    const llmKeys = new Map<string, string>();
+    for (const r of llm) {
+      const ids = r.marketsInvolved as string[];
+      llmKeys.set(key(ids, r.patternType), inferSubject(ids, subjectByMarket));
+    }
+    const shadowKeys = new Map<string, string>();
+    for (const r of shadow) {
+      const ids = r.marketsInvolved as string[];
+      shadowKeys.set(key(ids, r.patternType), inferSubject(ids, subjectByMarket));
+    }
+
+    const bySubject = new Map<string, ShadowAgreementSubjectRow>();
+    const get = (s: string): ShadowAgreementSubjectRow => {
+      let row = bySubject.get(s);
+      if (!row) {
+        row = { subject: s, llmOnly: 0, shadowOnly: 0, agreed: 0, agreementPct: 0 };
+        bySubject.set(s, row);
+      }
+      return row;
+    };
+    for (const [k, subj] of llmKeys) {
+      const row = get(subj);
+      if (shadowKeys.has(k)) row.agreed += 1;
+      else row.llmOnly += 1;
+    }
+    for (const [k, subj] of shadowKeys) {
+      if (llmKeys.has(k)) continue;
+      get(subj).shadowOnly += 1;
+    }
+    let overallAgreed = 0;
+    let overallLlmOnly = 0;
+    let overallShadowOnly = 0;
+    for (const row of bySubject.values()) {
+      const total = row.agreed + row.llmOnly;
+      row.agreementPct = total === 0 ? 0 : Math.round((row.agreed / total) * 1000) / 10;
+      overallAgreed += row.agreed;
+      overallLlmOnly += row.llmOnly;
+      overallShadowOnly += row.shadowOnly;
+    }
+    const overallTotal = overallAgreed + overallLlmOnly;
+    return {
+      perSubject: Array.from(bySubject.values()).sort((a, b) => a.subject.localeCompare(b.subject)),
+      overall: {
+        agreed: overallAgreed,
+        llmOnly: overallLlmOnly,
+        shadowOnly: overallShadowOnly,
+        agreementPct: overallTotal === 0 ? 0 : Math.round((overallAgreed / overallTotal) * 1000) / 10,
+      },
+      windowDays: Math.round(windowSec / 86400),
+    };
+  }
 }
+
 
 type FindingRow = {
   findingId: string;
@@ -266,6 +423,9 @@ type FindingRow = {
   rationale: string;
   createdAtEpoch: number;
   broadcastedAtEpoch: number | null;
+  sizedTrades: unknown;
+  expectedProfitUsdcCents: number | null;
+  minPayoffUsdcCents: number | null;
 };
 
 function mapFindingRow(r: FindingRow): StoredFinding {
@@ -287,6 +447,9 @@ function mapFindingRow(r: FindingRow): StoredFinding {
     verifiedAtEpoch: r.createdAtEpoch,
     createdAtEpoch: r.createdAtEpoch,
     broadcastedAtEpoch: r.broadcastedAtEpoch,
+    sizedTrades: (r.sizedTrades as VerifiedFinding["sizedTrades"]) ?? undefined,
+    expectedProfitUsdc: r.expectedProfitUsdcCents !== null ? r.expectedProfitUsdcCents / 100 : undefined,
+    minPayoffUsdc: r.minPayoffUsdcCents !== null ? r.minPayoffUsdcCents / 100 : undefined,
   };
 }
 
