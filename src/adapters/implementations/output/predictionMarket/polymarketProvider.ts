@@ -7,6 +7,7 @@ import type {
   ProviderFilters,
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketProvider";
 import type { RawMarket } from "../../../../use-cases/interface/predictionMarket/PredictionMarketTypes";
+import { parseMaybeJsonArray } from "./gammaUtils";
 
 const log = createLogger("polymarketProvider");
 
@@ -44,17 +45,6 @@ interface GammaMarket {
   // CLOB outcome token ids — JSON-encoded `[yesTokenId, noTokenId]` aligned
   // with the `outcomes` array. Drives the sizer's outcomeTokenIdResolver.
   clobTokenIds?: string | string[];
-}
-
-function parseMaybeJsonArray<T = string>(v: string | T[] | undefined): T[] {
-  if (!v) return [];
-  if (Array.isArray(v)) return v;
-  try {
-    const parsed = JSON.parse(v);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
 }
 
 function isBinaryYesNo(outcomes: string[]): boolean {

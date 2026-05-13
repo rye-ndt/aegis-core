@@ -28,6 +28,14 @@ import type { IPolymarketAdapter } from "../../../../use-cases/interface/predict
 import type { IPredictionMarketReceiptBroadcaster } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
 import type { IRelayClient } from "../../../../use-cases/interface/output/relay.interface";
 import type { IPredictionMarketRepository } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
+import {
+  PredictionMarketPaperBetUseCase,
+  PaperBetValidationError,
+  PaperBetNotFoundError,
+  PaperBetPriceUnavailableError,
+} from "../../../../use-cases/implementations/predictionMarketPaperBet.usecase";
+import type { PaperBetGroupBy } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketPaperBetRepository";
+import type { PaperBet } from "../../../../use-cases/interface/predictionMarket/PaperBetTypes";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import {
   BET_TRANSITION_STATUSES,
@@ -56,6 +64,16 @@ import { metricsRegistry } from "../../../../helpers/observability/metricsRegist
 import { createLogger } from "../../../../helpers/observability/logger";
 
 const log = createLogger("httpServer");
+
+/**
+ * `PaperBet.sharesE6` is a BigInt (fixed-point shares × 1e6) — JSON.stringify
+ * throws on BigInt, so the wire form is a decimal string. The FE re-parses
+ * with `BigInt(...)` when it needs arithmetic; for display it just trims the
+ * last 6 chars to recover whole shares.
+ */
+function serializePaperBet(b: PaperBet): Omit<PaperBet, "sharesE6"> & { sharesE6: string } {
+  return { ...b, sharesE6: b.sharesE6.toString() };
+}
 const METRICS_TOKEN = process.env.METRICS_TOKEN;
 const ADMIN_PRIVY_DIDS = new Set(
   (process.env.ADMIN_PRIVY_DIDS ?? "").split(",").map(s => s.trim()).filter(Boolean),
@@ -110,6 +128,8 @@ export class HttpApiServer {
   private readonly resLogIds = new WeakMap<http.ServerResponse, string>();
   private readonly startedAtEpoch = newCurrentUTCEpoch();
 
+  private readonly predictionMarketPaperBetUseCase: PredictionMarketPaperBetUseCase;
+
   constructor(
     private readonly authUseCase: IAuthUseCase,
     private readonly port: number,
@@ -150,7 +170,12 @@ export class HttpApiServer {
     private readonly relayClient?: IRelayClient,
     /** Phase 4 (Part 5): admin route reads `getShadowAgreement` from here. */
     private readonly predictionMarketRepo?: IPredictionMarketRepository,
+    paperBetUseCase?: PredictionMarketPaperBetUseCase,
   ) {
+    if (!paperBetUseCase) {
+      throw new Error("HttpApiServer: paperBetUseCase is required");
+    }
+    this.predictionMarketPaperBetUseCase = paperBetUseCase;
     this.server = http.createServer((req, res) => {
       this.handle(req, res).catch((err) => {
         log.error({ err }, "unhandled request error");
@@ -235,7 +260,38 @@ export class HttpApiServer {
       "POST /predictionMarket/order/sell":  (req, res) => this.handlePmPlaceOrder(req, res),
       "GET /predictionMarket/positions":    (req, res) => this.handlePmListPositions(req, res),
       "GET /admin/prediction-markets/shadow-agreement": (req, res, url) => this.handleShadowAgreement(req, res, url),
+      "POST /predictionMarket/paperBet":                      (req, res) => this.handlePmPaperBetCreate(req, res),
+      "GET /predictionMarket/paperBetPreview":                (req, res, url) => this.handlePmPaperBetPreview(req, res, url),
+      "GET /predictionMarket/paperBets":                      (req, res, url) => this.handlePmPaperBetList(req, res, url),
+      "GET /predictionMarket/paperPerformance":               (req, res, url) => this.handlePmPaperPerformance(req, res, url),
+      "GET /admin/prediction-markets/paper-performance":      (req, res, url) => this.handlePmAdminPaperPerformance(req, res, url),
     };
+  }
+
+  /**
+   * Bearer-token gate for `/admin/prediction-markets/*`. Empty env disables
+   * the endpoint entirely (returns 404) so a misconfigured deploy can't leak
+   * admin metrics. Returns true when the request may proceed; otherwise
+   * writes the response and returns false.
+   */
+  private requirePmAdminToken(req: http.IncomingMessage, res: http.ServerResponse, scope: string): boolean {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const expectedToken = PREDICTION_MARKETS_ENV.adminHttpToken;
+    if (!expectedToken) {
+      log.debug({ reqId, scope }, "pm-admin endpoint disabled (no admin token)");
+      this.sendJson(res, 404, { error: "Not found" });
+      return false;
+    }
+    const authHeader = req.headers["authorization"];
+    const provided = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice("Bearer ".length).trim()
+      : "";
+    if (!provided || provided !== expectedToken) {
+      log.warn({ reqId, scope, hasHeader: !!authHeader }, "pm-admin unauthorized");
+      this.sendJson(res, 401, { error: "Unauthorized" });
+      return false;
+    }
+    return true;
   }
 
   private async handleShadowAgreement(
@@ -244,21 +300,7 @@ export class HttpApiServer {
     url: URL,
   ): Promise<void> {
     const reqId = this.reqLogIds.get(req) ?? "?";
-    // Bearer-token gate. Empty env disables the endpoint entirely (404) so
-    // a misconfigured deploy can't accidentally leak shadow metrics.
-    const expectedToken = PREDICTION_MARKETS_ENV.adminHttpToken;
-    if (!expectedToken) {
-      log.debug({ reqId }, "shadow-agreement endpoint disabled (no admin token)");
-      return this.sendJson(res, 404, { error: "Not found" });
-    }
-    const authHeader = req.headers["authorization"];
-    const provided = typeof authHeader === "string" && authHeader.startsWith("Bearer ")
-      ? authHeader.slice("Bearer ".length).trim()
-      : "";
-    if (!provided || provided !== expectedToken) {
-      log.warn({ reqId, hasHeader: !!authHeader }, "shadow-agreement unauthorized");
-      return this.sendJson(res, 401, { error: "Unauthorized" });
-    }
+    if (!this.requirePmAdminToken(req, res, "shadow-agreement")) return;
     if (!this.predictionMarketRepo) {
       return this.sendJson(res, 503, { error: "Prediction market repo not available" });
     }
@@ -274,6 +316,173 @@ export class HttpApiServer {
     } catch (err) {
       log.error({ err, reqId }, "shadow-agreement query failed");
       return this.sendJson(res, 500, { error: "Internal server error" });
+    }
+  }
+
+  // ── Paper-bet (simulated) flow ──────────────────────────────────────────
+
+  private async handlePmPaperBetCreate(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+
+    let body: unknown;
+    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
+    const parsed = z.object({
+      findingId: z.string().regex(/^[0-9a-f-]{36}$/i),
+      side: z.enum(["A", "B", "YES", "NO"]),
+      stakeUsdcCents: z.number().int().positive(),
+    }).safeParse(body);
+    if (!parsed.success) {
+      return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
+    }
+    log.info({ reqId, method: "POST", path: "/predictionMarket/paperBet", userId, findingId: parsed.data.findingId }, "paper-bet request received");
+
+    const start = Date.now();
+    try {
+      const paperBet = await this.predictionMarketPaperBetUseCase.place({
+        reqId,
+        userId,
+        findingId: parsed.data.findingId,
+        side: parsed.data.side,
+        stakeUsdcCents: parsed.data.stakeUsdcCents,
+      });
+      log.info({ reqId, userId, paperBetId: paperBet.id, durationMs: Date.now() - start }, "paper-bet request done");
+      return this.sendJson(res, 200, { paperBet: serializePaperBet(paperBet) });
+    } catch (err) {
+      if (err instanceof PaperBetValidationError) {
+        log.warn({ reqId, userId, code: err.code }, "paper-bet validation failed");
+        return this.sendJson(res, 400, { error: "validation", code: err.code });
+      }
+      if (err instanceof PaperBetNotFoundError) {
+        return this.sendJson(res, 404, { error: "not-found", entity: err.entity });
+      }
+      if (err instanceof PaperBetPriceUnavailableError) {
+        return this.sendJson(res, 503, { error: "price-unavailable" });
+      }
+      log.error({ err, reqId, userId, findingId: parsed.data.findingId }, "paper-bet request failed");
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
+  }
+
+  private async handlePmPaperBetPreview(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+
+    const QuerySchema = z.object({
+      findingId: z.string().regex(/^[0-9a-f-]{36}$/i),
+      side: z.enum(["A", "B", "YES", "NO"]),
+    });
+    const parsed = QuerySchema.safeParse({
+      findingId: url.searchParams.get("findingId") ?? undefined,
+      side: url.searchParams.get("side") ?? undefined,
+    });
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid query", details: parsed.error.issues });
+
+    try {
+      const preview = await this.predictionMarketPaperBetUseCase.preview({
+        reqId,
+        findingId: parsed.data.findingId,
+        side: parsed.data.side,
+      });
+      return this.sendJson(res, 200, preview);
+    } catch (err) {
+      if (err instanceof PaperBetValidationError) {
+        return this.sendJson(res, 400, { error: "validation", code: err.code });
+      }
+      if (err instanceof PaperBetNotFoundError) {
+        return this.sendJson(res, 404, { error: "not-found", entity: err.entity });
+      }
+      if (err instanceof PaperBetPriceUnavailableError) {
+        return this.sendJson(res, 503, { error: "price-unavailable" });
+      }
+      log.error({ err, reqId, userId, findingId: parsed.data.findingId }, "paper-bet preview failed");
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
+  }
+
+  private async handlePmPaperBetList(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+
+    const QuerySchema = z.object({
+      status: z.enum(["open", "resolved", "voided"]).optional(),
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+    });
+    const parsed = QuerySchema.safeParse({
+      status: url.searchParams.get("status") ?? undefined,
+      limit: url.searchParams.get("limit") ?? undefined,
+    });
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid query", details: parsed.error.issues });
+
+    try {
+      const rows = await this.predictionMarketPaperBetUseCase.listForUser(userId, {
+        status: parsed.data.status,
+        limit: parsed.data.limit ?? 50,
+      });
+      return this.sendJson(res, 200, { paperBets: rows.map(serializePaperBet) });
+    } catch (err) {
+      log.error({ err, reqId, userId }, "paper-bet list failed");
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
+    }
+  }
+
+  private async handlePmPaperPerformance(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+    return this.servePaperPerformance(req, res, url, userId, this.predictionMarketPaperBetUseCase);
+  }
+
+  private async handlePmAdminPaperPerformance(req: http.IncomingMessage, res: http.ServerResponse, url: URL): Promise<void> {
+    if (!this.requirePmAdminToken(req, res, "paper-performance")) return;
+    return this.servePaperPerformance(req, res, url, undefined, this.predictionMarketPaperBetUseCase);
+  }
+
+  private async servePaperPerformance(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    url: URL,
+    userId: string | undefined,
+    useCase: PredictionMarketPaperBetUseCase,
+  ): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const QuerySchema = z.object({
+      groupBy: z.enum(["overall", "subject", "clusterId", "detectorSource"]).optional(),
+      status: z.enum(["open", "resolved", "voided"]).optional(),
+      // ISO-8601; empty string disables the default 30d window.
+      since: z.string().datetime().optional(),
+    });
+    const parsed = QuerySchema.safeParse({
+      groupBy: url.searchParams.get("groupBy") ?? undefined,
+      status: url.searchParams.get("status") ?? undefined,
+      since: url.searchParams.get("since") ?? undefined,
+    });
+    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid query", details: parsed.error.issues });
+    const groupBy: PaperBetGroupBy = parsed.data.groupBy ?? "overall";
+    // Default to 30 days ago so a recent regression isn't masked by old wins.
+    // The empty-string case keeps the default; pass `?since=1970-01-01T00:00:00Z`
+    // to opt into all-time.
+    const since = parsed.data.since
+      ? new Date(parsed.data.since)
+      : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    try {
+      const buckets = await useCase.aggregatePerformance({
+        userId,
+        groupBy,
+        status: parsed.data.status,
+        since,
+      });
+      log.info(
+        { reqId, userId: userId ?? "<global>", groupBy, since: since.toISOString(), betCount: buckets.length },
+        "paper-performance served",
+      );
+      return this.sendJson(res, 200, { buckets, since: since.toISOString() });
+    } catch (err) {
+      log.error({ err, reqId, userId, groupBy }, "paper-performance failed");
+      return this.sendJson(res, 500, { error: toErrorMessage(err) });
     }
   }
 

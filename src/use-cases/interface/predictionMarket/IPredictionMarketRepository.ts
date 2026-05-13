@@ -39,6 +39,12 @@ export interface IPredictionMarketRepository {
   ): Promise<void>;
   getMarketsByRun(runId: string): Promise<RawMarket[]>;
   getClustersByRun(runId: string): Promise<StoredCluster[]>;
+  /**
+   * Single-cluster lookup. Added for the paper-bet placement use-case
+   * (Part 2) which needs `derivedSubject` to set `detectorSource` at insert
+   * time without paging the whole run's clusters.
+   */
+  getClusterById(clusterId: string): Promise<StoredCluster | null>;
   insertFindings(findings: VerifiedFinding[]): Promise<void>;
   markFindingsBroadcasted(findingIds: string[], epoch: number): Promise<void>;
   getFindingsByRun(runId: string): Promise<StoredFinding[]>;

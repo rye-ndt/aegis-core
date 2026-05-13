@@ -105,4 +105,16 @@ export const PREDICTION_MARKETS_ENV = {
   // the endpoint entirely (returns 404). Operators must set this AND send
   // `Authorization: Bearer <token>` to query the shadow-agreement report.
   adminHttpToken: str("PREDICTION_MARKETS_ADMIN_HTTP_TOKEN", ""),
+  // Paper-bet (simulated) flow — `constructions/2026-05-11-prediction-markets-paper-bets-part2.md`.
+  // Stake bounds are inclusive; HTTP rejects with 400 outside them. `priceTtlMs`
+  // is consumed by Part 3's resolution job (lives here for env-table cohesion).
+  paperStakeMinUsdcCents: num("PREDICTION_MARKETS_PAPER_STAKE_MIN_USDC_CENTS", 100),
+  paperStakeMaxUsdcCents: num("PREDICTION_MARKETS_PAPER_STAKE_MAX_USDC_CENTS", 100_000),
+  paperPriceTtlMs: num("PREDICTION_MARKETS_PAPER_PRICE_TTL_MS", 15_000),
+  // Resolution job (Part 3). Hourly tick; per-tick batch caps Gamma fan-out.
+  // Lock TTL is large enough to cover a slow batch but smaller than the
+  // interval so a stuck-but-released worker doesn't wedge the loop.
+  paperResolutionIntervalMs: num("PREDICTION_MARKETS_PAPER_RESOLUTION_INTERVAL_MS", 60 * 60 * 1000),
+  paperResolutionBatchSize: num("PREDICTION_MARKETS_PAPER_RESOLUTION_BATCH_SIZE", 50),
+  paperResolutionLockTtlMs: num("PREDICTION_MARKETS_PAPER_RESOLUTION_LOCK_TTL_MS", 5 * 60 * 1000),
 } as const;

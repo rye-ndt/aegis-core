@@ -1,4 +1,4 @@
-import { bigint, boolean, integer, jsonb, pgTable, text, uuid, unique, index } from "drizzle-orm/pg-core";
+import { bigint, boolean, integer, jsonb, pgTable, text, timestamp, uuid, unique, index } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
   id: uuid("id").primaryKey(),
@@ -517,6 +517,53 @@ export const predictionMarketPositions = pgTable("prediction_market_positions", 
 }, (t) => ({
   byUserStatus: index("pm_positions_by_user_status").on(t.userId, t.status),
 }));
+
+// Paper-bet (simulated) prediction-market evaluation flow.
+// See `constructions/2026-05-11-prediction-markets-paper-bets-part1.md`.
+// `subject` and `cluster_id` are denormalized at insert time so the aggregation
+// path in Part 3 doesn't need to join the (versioned, churning) cluster table.
+// `cluster_id` has no FK because cluster rows are scan-versioned and we want
+// paper bets to outlive cluster churn.
+export const predictionMarketPaperBets = pgTable(
+  "prediction_market_paper_bets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+
+    // who & what
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    findingId: uuid("finding_id")
+      .notNull()
+      .references(() => predictionMarketFindings.findingId),
+    clusterId: uuid("cluster_id").notNull(),
+    marketId: text("market_id").notNull(),
+    subject: text("subject"),
+
+    // bet shape
+    side: text("side", { enum: ["YES", "NO"] }).notNull(),
+    stakeUsdcCents: integer("stake_usdc_cents").notNull(),
+    entryPriceBps: integer("entry_price_bps").notNull(),
+    sharesE6: bigint("shares_e6", { mode: "bigint" }).notNull(),
+
+    // detector provenance — for sliced ROI in Part 3
+    detectorSource: text("detector_source", { enum: ["deterministic", "llm"] }).notNull(),
+
+    // resolution
+    status: text("status", { enum: ["open", "resolved", "voided"] }).notNull().default("open"),
+    outcome: text("outcome", { enum: ["YES", "NO"] }),
+    payoutUsdcCents: integer("payout_usdc_cents"),
+    realizedPnlUsdcCents: integer("realized_pnl_usdc_cents"),
+
+    // timestamps
+    entryAt: timestamp("entry_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => ({
+    byUserStatus: index("paper_bets_user_status_idx").on(t.userId, t.status),
+    byFinding: index("paper_bets_finding_idx").on(t.findingId),
+    byMarketStatus: index("paper_bets_market_status_idx").on(t.marketId, t.status),
+    bySubject: index("paper_bets_subject_idx").on(t.subject),
+  }),
+);
 
 export const loyaltyPointsLedger = pgTable("loyalty_points_ledger", {
   id:                  text("id").primaryKey(),

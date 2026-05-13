@@ -232,6 +232,27 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
     }));
   }
 
+  async getClusterById(clusterId: string): Promise<StoredCluster | null> {
+    const rows = await this.db
+      .select()
+      .from(predictionMarketClusters)
+      .where(eq(predictionMarketClusters.clusterId, clusterId))
+      .limit(1);
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      clusterId: r.clusterId,
+      runId: r.runId,
+      theme: r.theme,
+      causalDriver: r.causalDriver,
+      marketIds: r.marketIds as string[],
+      expectedRelationships: r.expectedRelationships as ExpectedRelationship[],
+      rationale: r.rationale,
+      confidence: r.confidence as StoredCluster["confidence"],
+      derivedSubject: r.derivedSubject,
+    };
+  }
+
   async insertFindings(findings: VerifiedFinding[]): Promise<void> {
     if (findings.length === 0) return;
     const rows = findings.map((f) => ({
