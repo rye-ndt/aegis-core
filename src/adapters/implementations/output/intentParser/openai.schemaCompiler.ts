@@ -1,4 +1,8 @@
 import OpenAI from "openai";
+import {
+  createOpenRouterClient,
+  withRouterHints,
+} from "../../../../helpers/llm/openrouterClient";
 import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
@@ -97,8 +101,8 @@ Instructions:
 export class OpenAISchemaCompiler implements ISchemaCompiler {
   private readonly client: OpenAI;
 
-  constructor(apiKey: string) {
-    this.client = new OpenAI({ apiKey });
+  constructor() {
+    this.client = createOpenRouterClient();
   }
 
   async compile(opts: {
@@ -122,14 +126,16 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
     const systemPrompt = buildSystemPrompt(manifest, autoFilled, partialParams);
 
     const response = await openaiLimiter(() =>
-      this.client.chat.completions.parse({
-        model: OPENAI_MODEL,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        response_format: zodResponseFormat(CompileSchema, "compile_result"),
-      }),
+      this.client.chat.completions.parse(
+        withRouterHints({
+          model: OPENAI_MODEL,
+          messages: [
+            { role: "system" as const, content: systemPrompt },
+            { role: "user" as const, content: userContent },
+          ],
+          response_format: zodResponseFormat(CompileSchema, "compile_result"),
+        }),
+      ),
     );
 
     const parsed = response.choices[0]?.message.parsed;
@@ -185,15 +191,17 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       .join(", ");
 
     const response = await openaiLimiter(() =>
-      this.client.chat.completions.create({
-        model: OPENAI_MODEL,
-        messages: [
-          {
-            role: "user",
-            content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
-          },
-        ],
-      }),
+      this.client.chat.completions.create(
+        withRouterHints({
+          model: OPENAI_MODEL,
+          messages: [
+            {
+              role: "user" as const,
+              content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
+            },
+          ],
+        }),
+      ),
     );
 
     return (

@@ -1,6 +1,9 @@
 import { createHash } from "crypto";
 import OpenAI from "openai";
-import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
+import {
+  callJsonSchemaWithRetry,
+  createOpenRouterClient,
+} from "../../../../helpers/llm/openrouterClient";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type {
@@ -153,7 +156,6 @@ function dedupeOverlap(clusters: DraftCluster[], reqId: string): DraftCluster[] 
 }
 
 export interface OpenAIPredictionMarketClassifierConfig {
-  apiKey: string;
   model: string;
   cache?: RedisResponseCache;
   maxCriteriaChars: number;
@@ -165,7 +167,7 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
   private readonly client: OpenAI;
 
   constructor(private readonly cfg: OpenAIPredictionMarketClassifierConfig) {
-    this.client = new OpenAI({ apiKey: cfg.apiKey });
+    this.client = createOpenRouterClient();
   }
 
   async classify(input: ClassifierInput): Promise<DraftCluster[]> {
@@ -222,37 +224,14 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
       JSON.stringify(records, null, 2) +
       "\n```";
 
-    let parsed: ClassifierJsonResponse | null = null;
-    let raw = "";
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const completion = await openaiLimiter(() =>
-          this.client.chat.completions.create({
-            model: this.cfg.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: userMessage },
-              ...(attempt === 2
-                ? [
-                    {
-                      role: "user" as const,
-                      content:
-                        "Your previous output was not valid JSON for the schema. Retry, returning ONLY the JSON object.",
-                    },
-                  ]
-                : []),
-            ],
-            response_format: { type: "json_schema", json_schema: CLUSTER_SCHEMA },
-          }),
-        );
-        raw = completion.choices[0]?.message?.content ?? "";
-        parsed = JSON.parse(raw) as ClassifierJsonResponse;
-        break;
-      } catch (err) {
-        log.warn({ reqId, attempt, err }, "classify parse/call failed");
-        parsed = null;
-      }
-    }
+    const { parsed, raw } = await callJsonSchemaWithRetry<ClassifierJsonResponse>({
+      client: this.client,
+      model: this.cfg.model,
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage,
+      jsonSchema: { type: "json_schema", json_schema: CLUSTER_SCHEMA },
+      logCtx: { reqId, op: "classify" },
+    });
 
     if (!parsed) {
       log.error({ reqId, raw: raw.slice(0, 200) }, "classify failed");

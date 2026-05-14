@@ -25,7 +25,7 @@ export const PREDICTION_MARKETS_ENV = {
   minVolume7dUsd: num("PREDICTION_MARKETS_MIN_7D_VOLUME_USD", 20_000),
   minDaysToResolution: num("PREDICTION_MARKETS_MIN_DAYS", 3),
   maxDaysToResolution: num("PREDICTION_MARKETS_MAX_DAYS", 60),
-  classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "gpt-4o"),
+  classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-mini"),
   maxCriteriaChars: num("PREDICTION_MARKETS_MAX_CRITERIA_CHARS", 4000),
   reclusterDelta: num("PREDICTION_MARKETS_RECLUSTER_DELTA", 10),
   maxReclusterAgeMs: num("PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS", 24 * 60 * 60 * 1000),
@@ -41,7 +41,7 @@ export const PREDICTION_MARKETS_ENV = {
   promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v3"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
-    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "gpt-4o"),
+    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-mini"),
   ),
   detectorConcurrency: num("PREDICTION_MARKETS_DETECTOR_CONCURRENCY", 3),
   detectorCacheTtlSec: num("PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC", 1800),
@@ -73,9 +73,9 @@ export const PREDICTION_MARKETS_ENV = {
   // `betsEnabled=true`; storePolymarketCreds throws if empty.
   credsKeyHex: str("PREDICTION_MARKETS_CREDS_KEY_HEX", ""),
   // Phase 2 (deterministic-detection) — per-market LLM extractor + hourly job.
-  // The extractor model defaults to `gpt-4.1-mini` because the regex layer is
-  // the safety net; the cheap model is fine for first-pass structured output.
-  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "gpt-4.1-mini"),
+  // The regex layer is the safety net so a small/cheap model is fine for
+  // first-pass structured output.
+  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "openai/gpt-5-mini"),
   extractorConcurrency: num("PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY", 8),
   extractorPromptVersion: str("PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION", "v1"),
   extractFactsIntervalMs: num("PREDICTION_MARKETS_EXTRACT_INTERVAL_MS", 60 * 60 * 1000),

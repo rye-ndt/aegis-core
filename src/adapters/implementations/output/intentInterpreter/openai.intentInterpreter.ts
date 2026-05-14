@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { createOpenRouterClient } from "../../../../helpers/llm/openrouterClient";
 import { createHash } from "node:crypto";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
@@ -9,7 +10,11 @@ import type {
 
 const log = createLogger("intentInterpreter");
 
-const TIMEOUT_MS = 2000;
+// Reasoning-capable OpenRouter models (e.g. openai/gpt-5-mini) routinely
+// exceed the prior 2s cap on cold paths because reasoning tokens are produced
+// before any user-visible content. Below this the result-card italic note
+// silently disappears; cache hits remain sub-millisecond.
+const TIMEOUT_MS = 5000;
 const CACHE_TTL_SEC = 300;
 const MAX_WORDS = 25;
 
@@ -30,7 +35,6 @@ Fields:
 Extra context (JSON): {context}`;
 
 export interface OpenAIIntentInterpreterOptions {
-  apiKey: string;
   model: string;
   cache?: RedisResponseCache;
 }
@@ -41,7 +45,7 @@ export class OpenAIIntentInterpreter implements IIntentInterpreter {
   private readonly cache?: RedisResponseCache;
 
   constructor(opts: OpenAIIntentInterpreterOptions) {
-    this.client = new OpenAI({ apiKey: opts.apiKey });
+    this.client = createOpenRouterClient();
     this.model = opts.model;
     this.cache = opts.cache;
   }
@@ -73,11 +77,13 @@ export class OpenAIIntentInterpreter implements IIntentInterpreter {
 
     const prompt = renderPrompt(input);
 
+    let timeoutHandle: NodeJS.Timeout | undefined;
     try {
-      const note = await Promise.race([
-        this.callModel(prompt),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), TIMEOUT_MS)),
-      ]);
+      const timeout = new Promise<null>((resolve) => {
+        timeoutHandle = setTimeout(() => resolve(null), TIMEOUT_MS);
+      });
+      const note = await Promise.race([this.callModel(prompt), timeout]);
+      clearTimeout(timeoutHandle);
 
       if (!note) {
         log.warn(
@@ -107,6 +113,7 @@ export class OpenAIIntentInterpreter implements IIntentInterpreter {
       );
       return cleaned;
     } catch (err) {
+      clearTimeout(timeoutHandle);
       log.warn(
         { err, verb: input.verb, status: input.status, durationMs: Date.now() - startedAt, step: "failed" },
         "interpret-failed",
@@ -119,7 +126,9 @@ export class OpenAIIntentInterpreter implements IIntentInterpreter {
     const resp = await this.client.chat.completions.create({
       model: this.model,
       messages: [{ role: "system", content: prompt }],
-      max_tokens: 80,
+      // Reasoning models consume tokens silently for chain-of-thought, so a
+      // tight cap can yield empty user-visible content. Keep this loose.
+      max_tokens: 300,
       temperature: 0.4,
     });
     const text = resp.choices[0]?.message?.content?.trim() ?? "";

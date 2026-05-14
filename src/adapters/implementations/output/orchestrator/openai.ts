@@ -1,4 +1,8 @@
 import OpenAI from "openai";
+import {
+  createOpenRouterClient,
+  withRouterHints,
+} from "../../../../helpers/llm/openrouterClient";
 import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
 import { createLogger } from "../../../../helpers/observability/logger";
@@ -20,11 +24,8 @@ const log = createLogger("openaiOrchestrator");
 export class OpenAIOrchestrator implements ILLMOrchestrator {
   private readonly client: OpenAI;
 
-  constructor(
-    private readonly apiKey: string,
-    private readonly model: string,
-  ) {
-    this.client = new OpenAI({ apiKey });
+  constructor(private readonly model: string) {
+    this.client = createOpenRouterClient();
   }
 
   async chat(input: IOrchestratorInput): Promise<IOrchestratorResponse> {
@@ -72,11 +73,13 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     log.debug({ model: this.model, messageCount: messages.length, toolCount: tools.length }, "calling model");
     const startedAt = Date.now();
     const response = await openaiLimiter(() =>
-      this.client.chat.completions.create({
-        model: this.model,
-        messages,
-        ...(tools.length > 0 ? { tools, tool_choice: "auto" } : {}),
-      }),
+      this.client.chat.completions.create(
+        withRouterHints({
+          model: this.model,
+          messages,
+          ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
+        }),
+      ),
     );
     const elapsed = Date.now() - startedAt;
     const cached = response.usage?.prompt_tokens_details?.cached_tokens ?? 0;

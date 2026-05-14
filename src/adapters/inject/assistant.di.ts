@@ -12,6 +12,7 @@ import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
 import { OPENAI_MODEL } from "../../helpers/env/openaiEnv";
+import { isOpenRouterConfigured } from "../../helpers/llm/openrouterClient";
 import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
 import { createLogger } from "../../helpers/observability/logger";
@@ -359,8 +360,8 @@ export class AssistantInject {
 
   /**
    * Result-card LLM interpreter. Returns undefined when
-   * `RESULT_CARD_INTERPRETER_ENABLED` is not "true" or `OPENAI_API_KEY` is
-   * unset — the renderer treats undefined as "interpreter off" and just
+   * `RESULT_CARD_INTERPRETER_ENABLED` is not "true" or `OPENROUTER_API_KEY`
+   * is unset — the renderer treats undefined as "interpreter off" and just
    * skips the optional italic note. Cache is best-effort: if Redis isn't
    * configured we run uncached.
    */
@@ -370,11 +371,10 @@ export class AssistantInject {
     }
     this._intentInterpreterChecked = true;
     const env = getResultCardEnv();
-    if (!env.enabled || !env.apiKey) return undefined;
+    if (!env.enabled || !env.available) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "interp") : undefined;
     this._intentInterpreter = new OpenAIIntentInterpreter({
-      apiKey: env.apiKey,
       model: env.model,
       cache,
     });
@@ -383,9 +383,7 @@ export class AssistantInject {
 
   getSchemaCompiler(): OpenAISchemaCompiler {
     if (!this._schemaCompiler) {
-      this._schemaCompiler = new OpenAISchemaCompiler(
-        process.env.OPENAI_API_KEY ?? "",
-      );
+      this._schemaCompiler = new OpenAISchemaCompiler();
     }
     return this._schemaCompiler;
   }
@@ -406,10 +404,7 @@ export class AssistantInject {
     if (!this.useCase) {
       const sqlDB = this.getSqlDB();
 
-      const orchestrator = new OpenAIOrchestrator(
-        process.env.OPENAI_API_KEY ?? "",
-        OPENAI_MODEL,
-      );
+      const orchestrator = new OpenAIOrchestrator(OPENAI_MODEL);
 
       const webSearchService = new TavilyWebSearchService(
         process.env.TAVILY_API_KEY ?? "",
@@ -1306,12 +1301,10 @@ export class AssistantInject {
 
   getPredictionMarketClassifier(): IPredictionMarketClassifier | undefined {
     if (this._predictionMarketClassifier) return this._predictionMarketClassifier;
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return undefined;
+    if (!isOpenRouterConfigured()) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "pm-cluster") : undefined;
     this._predictionMarketClassifier = new OpenAIPredictionMarketClassifier({
-      apiKey,
       model: PREDICTION_MARKETS_ENV.classifierModel,
       cache,
       maxCriteriaChars: PREDICTION_MARKETS_ENV.maxCriteriaChars,
@@ -1342,12 +1335,10 @@ export class AssistantInject {
 
   getPredictionMarketDetector(): IPredictionMarketDetector | undefined {
     if (this._predictionMarketDetector) return this._predictionMarketDetector;
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return undefined;
+    if (!isOpenRouterConfigured()) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "pm-detect") : undefined;
     this._predictionMarketDetector = new OpenAIPredictionMarketDetector({
-      apiKey,
       model: PREDICTION_MARKETS_ENV.detectorModel,
       cache,
       promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
@@ -1501,10 +1492,8 @@ export class AssistantInject {
 
   getPredictionMarketExtractor(): OpenAIPredictionMarketExtractor | undefined {
     if (this._predictionMarketExtractor) return this._predictionMarketExtractor;
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) return undefined;
+    if (!isOpenRouterConfigured()) return undefined;
     this._predictionMarketExtractor = new OpenAIPredictionMarketExtractor({
-      apiKey,
       model: PREDICTION_MARKETS_ENV.extractorModel,
       promptVersion: PREDICTION_MARKETS_ENV.extractorPromptVersion,
     });

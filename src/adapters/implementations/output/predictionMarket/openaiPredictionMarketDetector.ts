@@ -1,7 +1,10 @@
 import { createHash } from "crypto";
 import OpenAI from "openai";
+import {
+  callJsonSchemaWithRetry,
+  createOpenRouterClient,
+} from "../../../../helpers/llm/openrouterClient";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
-import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type {
   DetectorInput,
@@ -181,7 +184,6 @@ const FINDING_SCHEMA = {
 } as const;
 
 export interface OpenAIPredictionMarketDetectorConfig {
-  apiKey: string;
   model: string;
   cache?: RedisResponseCache;
   promptVersion: string;
@@ -200,7 +202,7 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
   private readonly client: OpenAI;
 
   constructor(private readonly cfg: OpenAIPredictionMarketDetectorConfig) {
-    this.client = new OpenAI({ apiKey: cfg.apiKey });
+    this.client = createOpenRouterClient();
   }
 
   private cacheKey(input: DetectorInput): string {
@@ -264,37 +266,14 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
       "\n```\n\n" +
       `Identify any of the four mispricing patterns. Empty findings array is acceptable.`;
 
-    let parsed: DetectorJsonResponse | null = null;
-    let raw = "";
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const completion = await openaiLimiter(() =>
-          this.client.chat.completions.create({
-            model: this.cfg.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: userMessage },
-              ...(attempt === 2
-                ? [
-                    {
-                      role: "user" as const,
-                      content:
-                        "Your previous output was not valid JSON for the schema. Retry, returning ONLY the JSON object.",
-                    },
-                  ]
-                : []),
-            ],
-            response_format: { type: "json_schema", json_schema: FINDING_SCHEMA },
-          }),
-        );
-        raw = completion.choices[0]?.message?.content ?? "";
-        parsed = JSON.parse(raw) as DetectorJsonResponse;
-        break;
-      } catch (err) {
-        log.warn({ reqId, clusterId: cluster.clusterId, attempt, err }, "detect parse/call failed");
-        parsed = null;
-      }
-    }
+    const { parsed, raw } = await callJsonSchemaWithRetry<DetectorJsonResponse>({
+      client: this.client,
+      model: this.cfg.model,
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage,
+      jsonSchema: { type: "json_schema", json_schema: FINDING_SCHEMA },
+      logCtx: { reqId, clusterId: cluster.clusterId, op: "detect" },
+    });
 
     if (!parsed) {
       log.error({ reqId, clusterId: cluster.clusterId, raw: raw.slice(0, 200) }, "detect failed");

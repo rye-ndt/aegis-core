@@ -1,5 +1,8 @@
 import OpenAI from "openai";
-import { openaiLimiter } from "../../../../helpers/concurrency/openaiLimiter";
+import {
+  callJsonSchemaWithRetry,
+  createOpenRouterClient,
+} from "../../../../helpers/llm/openrouterClient";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import type {
@@ -104,7 +107,6 @@ const EXTRACTOR_SCHEMA = {
 } as const;
 
 export interface OpenAIPredictionMarketExtractorConfig {
-  apiKey: string;
   model: string;
   promptVersion: string;
 }
@@ -113,7 +115,7 @@ export class OpenAIPredictionMarketExtractor implements IPredictionMarketExtract
   private readonly client: OpenAI;
 
   constructor(private readonly cfg: OpenAIPredictionMarketExtractorConfig) {
-    this.client = new OpenAI({ apiKey: cfg.apiKey });
+    this.client = createOpenRouterClient();
   }
 
   async extract(input: ExtractorInput): Promise<ExtractorOutcome> {
@@ -133,37 +135,14 @@ export class OpenAIPredictionMarketExtractor implements IPredictionMarketExtract
       `Allowed subjects: ${JSON.stringify(SUBJECTS)}\n` +
       `Allowed resolution sources: ${JSON.stringify(RESOLUTION_SOURCES)}`;
 
-    let parsed: ExtractorJsonResponse | null = null;
-    let raw = "";
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        const completion = await openaiLimiter(() =>
-          this.client.chat.completions.create({
-            model: this.cfg.model,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: userMessage },
-              ...(attempt === 2
-                ? [
-                    {
-                      role: "user" as const,
-                      content:
-                        "Your previous output was not valid JSON for the schema. Retry, returning ONLY the JSON object.",
-                    },
-                  ]
-                : []),
-            ],
-            response_format: { type: "json_schema", json_schema: EXTRACTOR_SCHEMA },
-          }),
-        );
-        raw = completion.choices[0]?.message?.content ?? "";
-        parsed = JSON.parse(raw) as ExtractorJsonResponse;
-        break;
-      } catch (err) {
-        log.warn({ reqId, marketId: market.marketId, attempt, err }, "extract parse/call failed");
-        parsed = null;
-      }
-    }
+    const { parsed, raw } = await callJsonSchemaWithRetry<ExtractorJsonResponse>({
+      client: this.client,
+      model: this.cfg.model,
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage,
+      jsonSchema: { type: "json_schema", json_schema: EXTRACTOR_SCHEMA },
+      logCtx: { reqId, marketId: market.marketId, op: "extract" },
+    });
 
     if (!parsed) {
       log.error({ reqId, marketId: market.marketId, raw: raw.slice(0, 200) }, "extract failed");
