@@ -74,11 +74,20 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     const startedAt = Date.now();
     const response = await openaiLimiter(() =>
       this.client.chat.completions.create(
-        withRouterHints({
-          model: this.model,
-          messages,
-          ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
-        }),
+        withRouterHints(
+          {
+            model: this.model,
+            messages,
+            ...(tools.length > 0 ? { tools, tool_choice: "auto" as const } : {}),
+            // Reasoning-capable models (gpt-5-mini) consume hidden reasoning
+            // tokens against `max_tokens`. 8000 leaves ample room for both
+            // tool-call argument JSON and free-form assistant replies even
+            // after a meaningful reasoning prefix. `effort: "low"` keeps
+            // tool-selection genuinely deliberate without bloating latency.
+            max_tokens: 8000,
+          },
+          { reasoningEffort: "low" },
+        ),
       ),
     );
     const elapsed = Date.now() - startedAt;

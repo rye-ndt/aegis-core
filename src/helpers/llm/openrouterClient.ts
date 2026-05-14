@@ -29,17 +29,41 @@ export function createOpenRouterClient(): OpenAI {
   });
 }
 
-// OpenAI SDK types omit OpenRouter's `provider` field. We attach this AFTER
-// the literal is built so the SDK's parse-shape inference is preserved. The
-// return type widens `T` to include the hint so call sites that introspect
-// the body don't lose track of the extra field at the type level.
-type RouterHints = { provider: { require_parameters: true } };
+// OpenAI SDK types omit OpenRouter's `provider` and `reasoning` fields. We
+// attach them AFTER the literal is built so the SDK's parse-shape inference
+// is preserved.
+//
+// `reasoning.effort` is critical for reasoning-capable models (e.g.
+// `openai/gpt-5-mini`): such models charge BOTH hidden reasoning tokens AND
+// visible output tokens against the same `max_tokens` budget. Without an
+// effort cap, reasoning can consume most of the budget and truncate visible
+// content (empty interpreter notes, truncated JSON that fails to parse). For
+// flows where the output is bounded by a strict schema or a short word-cap,
+// `"minimal"` leaves nearly the whole budget for visible content. For the
+// orchestrator's tool-selection step, `"low"` keeps some genuine reasoning
+// available without bloating latency.
+export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
 
-export function withRouterHints<T extends object>(body: T): T & RouterHints {
-  // Fresh object per call — never reuse the singleton so callers can mutate
-  // their body freely.
+export interface RouterHintOptions {
+  reasoningEffort?: ReasoningEffort;
+}
+
+type RouterHints = {
+  provider: { require_parameters: true };
+  reasoning?: { effort: ReasoningEffort };
+};
+
+export function withRouterHints<T extends object>(
+  body: T,
+  opts: RouterHintOptions = {},
+): T & RouterHints {
+  // Fresh hint object per call — never share a reference so callers can
+  // mutate their body freely.
   return Object.assign(body, {
     provider: { require_parameters: true },
+    ...(opts.reasoningEffort
+      ? { reasoning: { effort: opts.reasoningEffort } }
+      : {}),
   }) as T & RouterHints;
 }
 
@@ -53,6 +77,17 @@ interface JsonSchemaRetryArgs {
   userMessage: string;
   jsonSchema: ResponseFormatJSONSchema;
   maxAttempts?: number;
+  /**
+   * Cap on total output tokens (reasoning + visible content). For reasoning
+   * models, size this above the worst-case JSON payload by 2–4× to leave
+   * room for the silent reasoning prefix. Defaults to 8000.
+   */
+  maxTokens?: number;
+  /**
+   * Defaults to `"minimal"` — strict json-schema doesn't benefit from heavy
+   * reasoning, and minimizing it leaves the full budget for visible JSON.
+   */
+  reasoningEffort?: ReasoningEffort;
   logCtx: Record<string, unknown>;
 }
 
@@ -74,6 +109,8 @@ export async function callJsonSchemaWithRetry<T>(
   args: JsonSchemaRetryArgs,
 ): Promise<{ parsed: T; raw: string } | { parsed: null; raw: string }> {
   const maxAttempts = args.maxAttempts ?? 2;
+  const maxTokens = args.maxTokens ?? 8000;
+  const reasoningEffort: ReasoningEffort = args.reasoningEffort ?? "minimal";
   let raw = "";
   let lastBadOutput: string | null = null;
 
@@ -99,11 +136,15 @@ export async function callJsonSchemaWithRetry<T>(
     try {
       completion = await openaiLimiter(() =>
         args.client.chat.completions.create(
-          withRouterHints({
-            model: args.model,
-            messages,
-            response_format: args.jsonSchema,
-          }),
+          withRouterHints(
+            {
+              model: args.model,
+              messages,
+              response_format: args.jsonSchema,
+              max_tokens: maxTokens,
+            },
+            { reasoningEffort },
+          ),
         ),
       );
     } catch (err) {
@@ -128,6 +169,17 @@ export async function callJsonSchemaWithRetry<T>(
     }
 
     raw = completion.choices[0]?.message?.content ?? "";
+    const finishReason = completion.choices[0]?.finish_reason;
+    if (finishReason === "length") {
+      // Reasoning models hit this when reasoning + visible output exceeds
+      // `max_tokens`. The visible JSON is almost certainly truncated, so log
+      // a distinct warning operators can grep for to raise `maxTokens` or
+      // drop `reasoningEffort`.
+      log.warn(
+        { ...args.logCtx, attempt, maxTokens, reasoningEffort },
+        "json-schema output truncated (finish_reason=length)",
+      );
+    }
     try {
       return { parsed: JSON.parse(raw) as T, raw };
     } catch (err) {

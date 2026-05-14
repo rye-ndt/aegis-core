@@ -1,5 +1,8 @@
 import OpenAI from "openai";
-import { createOpenRouterClient } from "../../../../helpers/llm/openrouterClient";
+import {
+  createOpenRouterClient,
+  withRouterHints,
+} from "../../../../helpers/llm/openrouterClient";
 import { createHash } from "node:crypto";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
@@ -123,14 +126,23 @@ export class OpenAIIntentInterpreter implements IIntentInterpreter {
   }
 
   private async callModel(prompt: string): Promise<string | null> {
-    const resp = await this.client.chat.completions.create({
-      model: this.model,
-      messages: [{ role: "system", content: prompt }],
-      // Reasoning models consume tokens silently for chain-of-thought, so a
-      // tight cap can yield empty user-visible content. Keep this loose.
-      max_tokens: 300,
-      temperature: 0.4,
-    });
+    // The visible output is bounded to ≤25 words (clampSentence enforces it
+    // post-hoc). With `reasoningEffort: minimal`, gpt-5-mini reserves only a
+    // small slice of the budget for reasoning, so 600 leaves ≥400 tokens for
+    // the user-visible sentence — far more than 25 words ever consumes.
+    // Without minimal effort the prior 300 cap was burned entirely on
+    // reasoning and the call returned empty content.
+    const resp = await this.client.chat.completions.create(
+      withRouterHints(
+        {
+          model: this.model,
+          messages: [{ role: "system", content: prompt }],
+          max_tokens: 600,
+          temperature: 0.4,
+        },
+        { reasoningEffort: "minimal" },
+      ),
+    );
     const text = resp.choices[0]?.message?.content?.trim() ?? "";
     return text.length > 0 ? text : null;
   }

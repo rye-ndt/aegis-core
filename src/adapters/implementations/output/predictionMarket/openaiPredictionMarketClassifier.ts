@@ -230,6 +230,13 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: CLUSTER_SCHEMA },
+      // Causal clustering is a judgment-heavy step — the difference
+      // between a topical grouping ("markets about Trump") and a real
+      // causal cluster comes from careful reasoning about shared drivers.
+      // `effort: medium` is a deliberate spend for clustering quality;
+      // 14k leaves room for the multi-cluster JSON after reasoning.
+      maxTokens: 14000,
+      reasoningEffort: "medium",
       logCtx: { reqId, op: "classify" },
     });
 

@@ -141,6 +141,13 @@ export class OpenAIPredictionMarketExtractor implements IPredictionMarketExtract
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: EXTRACTOR_SCHEMA },
+      // Single MarketFact — small JSON, but `subject` / `resolution_source`
+      // classification has real subtleties (e.g. distinguishing Coinbase vs
+      // CoinGecko-TWAP from criteria phrasing). The regex verifier catches
+      // shape errors, not semantic mispicks — so we spend medium reasoning
+      // for better category selection. 8k leaves headroom after reasoning.
+      maxTokens: 8000,
+      reasoningEffort: "medium",
       logCtx: { reqId, marketId: market.marketId, op: "extract" },
     });
 

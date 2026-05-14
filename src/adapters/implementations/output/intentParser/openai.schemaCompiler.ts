@@ -127,14 +127,22 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
 
     const response = await openaiLimiter(() =>
       this.client.chat.completions.parse(
-        withRouterHints({
-          model: OPENAI_MODEL,
-          messages: [
-            { role: "system" as const, content: systemPrompt },
-            { role: "user" as const, content: userContent },
-          ],
-          response_format: zodResponseFormat(CompileSchema, "compile_result"),
-        }),
+        withRouterHints(
+          {
+            model: OPENAI_MODEL,
+            messages: [
+              { role: "system" as const, content: systemPrompt },
+              { role: "user" as const, content: userContent },
+            ],
+            response_format: zodResponseFormat(CompileSchema, "compile_result"),
+            // CompileSchema fits in <1k tokens of JSON; the extra headroom is
+            // for the reasoning prefix that gpt-5-mini emits silently against
+            // the same budget. Without this explicit cap a thin default would
+            // see reasoning eat the visible JSON and `.parsed` come back null.
+            max_tokens: 4000,
+          },
+          { reasoningEffort: "minimal" },
+        ),
       ),
     );
 
@@ -192,15 +200,21 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
 
     const response = await openaiLimiter(() =>
       this.client.chat.completions.create(
-        withRouterHints({
-          model: OPENAI_MODEL,
-          messages: [
-            {
-              role: "user" as const,
-              content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
-            },
-          ],
-        }),
+        withRouterHints(
+          {
+            model: OPENAI_MODEL,
+            messages: [
+              {
+                role: "user" as const,
+                content: `You are a DeFi assistant. Ask the user to provide the following missing transaction fields in a short, friendly, natural sentence: ${fieldDescriptions}`,
+              },
+            ],
+            // One-sentence question — see `compile()` for the rationale on
+            // headroom against reasoning-token consumption.
+            max_tokens: 600,
+          },
+          { reasoningEffort: "minimal" },
+        ),
       ),
     );
 
