@@ -268,10 +268,7 @@ function confirmCardArtifact(
       { label: "Cancel", kind: "callback", payload: `cancel_bet:${intent.id}` },
     ],
   };
-  const keyboard = new InlineKeyboard()
-    .text("Confirm", `confirm_bet:${intent.id}`)
-    .text("Cancel", `cancel_bet:${intent.id}`);
-  return { kind: "result_card", result, keyboard };
+  return { kind: "result_card", result };
 }
 
 function openMiniAppArtifact(intentId: string): Artifact {

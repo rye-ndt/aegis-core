@@ -46,19 +46,13 @@ function stubFetch(behaviour: { status: number; body: Buffer } | "throw"): { res
 
 async function boot(): Promise<{ baseUrl: string; close: () => void }> {
   // Construct with the bare minimum: authUseCase, port=0 (we override below),
-  // and the bundler proxy. Every other dep is optional.
-  // Constructor takes authUseCase, port, then 22 optional deps, then a required
-  // paperBetUseCase, then the optional bundler proxy. Build the arg list
-  // explicitly so the count is unambiguous.
+  // and the bundler proxy. Every other dep is optional. Constructor takes
+  // authUseCase, port, then 24 optional deps, then the optional bundler proxy.
   const optionalDeps = new Array(24).fill(undefined);
   const server = new HttpApiServer(
     fakeAuth,
     0,
     ...(optionalDeps as []),
-    // paperBetUseCase is required (constructor throws otherwise) — pass a
-    // minimal stand-in. Cast to satisfy the parameter type without dragging
-    // in the real use-case's deps tree.
-    {} as never,
     new PimlicoBundlerProxy(),
   );
   // The HttpApiServer manages its own http.Server — but `port: 0` makes it

@@ -1,0 +1,1 @@
+DROP TABLE "prediction_market_paper_bets" CASCADE;

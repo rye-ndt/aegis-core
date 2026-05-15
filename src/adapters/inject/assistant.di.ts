@@ -82,11 +82,6 @@ import { PredictionMarketBroadcaster } from "../implementations/output/predictio
 import { PredictionMarketFindingBroadcaster } from "../implementations/output/predictionMarket/predictionMarketFindingBroadcaster";
 import { PredictionMarketReceiptBroadcaster } from "../implementations/output/predictionMarket/predictionMarketReceiptBroadcaster";
 import { PolymarketAdapter } from "../implementations/output/predictionMarket/polymarketAdapter";
-import { PredictionMarketPaperBetUseCase } from "../../use-cases/implementations/predictionMarketPaperBet.usecase";
-import { PredictionMarketPaperResolutionUseCase } from "../../use-cases/implementations/predictionMarketPaperResolution.usecase";
-import { PolymarketResolutionFetcher } from "../implementations/output/predictionMarket/polymarketResolutionFetcher";
-import { PredictionMarketPaperResolutionJob } from "../implementations/input/jobs/predictionMarketPaperResolutionJob";
-import type { IPolymarketResolutionFetcher } from "../../use-cases/interface/predictionMarket/IPolymarketResolutionFetcher";
 import { PredictionMarketVerifier } from "../implementations/output/predictionMarket/predictionMarketVerifier";
 import { PredictionMarketScanUseCase } from "../../use-cases/implementations/predictionMarketScan.usecase";
 import { PredictionMarketDeterministicClusterUseCase } from "../../use-cases/implementations/predictionMarketDeterministicCluster.usecase";
@@ -243,11 +238,6 @@ export class AssistantInject {
   private _predictionMarketExtractFactsJob: PredictionMarketExtractFactsJob | null = null;
   private _predictionMarketReviewHandler: PredictionMarketReviewHandler | null = null;
   private _predictionMarketExtractNoStartWarned = false;
-  private _predictionMarketPaperBetUseCase: PredictionMarketPaperBetUseCase | null = null;
-  private _polymarketResolutionFetcher: IPolymarketResolutionFetcher | null = null;
-  private _predictionMarketPaperResolutionUseCase: PredictionMarketPaperResolutionUseCase | null = null;
-  private _predictionMarketPaperResolutionJob: PredictionMarketPaperResolutionJob | null = null;
-  private _predictionMarketPaperResolutionNoStartWarned = false;
 
   private getChainId(): number {
     return CHAIN_CONFIG.chainId;
@@ -1563,87 +1553,6 @@ export class AssistantInject {
     return this._predictionMarketExtractFactsJob;
   }
 
-  /**
-   * Paper-bet (simulated) use-case — see
-   * `constructions/2026-05-11-prediction-markets-paper-bets-part2.md`.
-   * Always wired (no env flag); the HTTP route is the only entry point and
-   * it returns 503 if this somehow returns undefined.
-   */
-  getPredictionMarketPaperBetUseCase(): PredictionMarketPaperBetUseCase {
-    if (!this._predictionMarketPaperBetUseCase) {
-      this._predictionMarketPaperBetUseCase = new PredictionMarketPaperBetUseCase(
-        this.getSqlDB().predictionMarketPaperBets,
-        this.getPredictionMarketRepo(),
-        this.getPredictionMarketProvider(),
-        this.getPolymarketAdapter(),
-      );
-    }
-    return this._predictionMarketPaperBetUseCase;
-  }
-
-  getPolymarketAdapter(): IPolymarketAdapter {
-    if (!this._polymarketAdapter) {
-      this._polymarketAdapter = new PolymarketAdapter(PREDICTION_MARKETS_ENV.clobApiBase);
-    }
-    return this._polymarketAdapter;
-  }
-
-  getPolymarketResolutionFetcher(): IPolymarketResolutionFetcher {
-    if (!this._polymarketResolutionFetcher) {
-      this._polymarketResolutionFetcher = new PolymarketResolutionFetcher(
-        PREDICTION_MARKETS_ENV.gammaApiBase,
-      );
-    }
-    return this._polymarketResolutionFetcher;
-  }
-
-  getPredictionMarketPaperResolutionUseCase(): PredictionMarketPaperResolutionUseCase {
-    if (!this._predictionMarketPaperResolutionUseCase) {
-      this._predictionMarketPaperResolutionUseCase = new PredictionMarketPaperResolutionUseCase(
-        this.getSqlDB().predictionMarketPaperBets,
-        this.getPolymarketResolutionFetcher(),
-        { batchSize: PREDICTION_MARKETS_ENV.paperResolutionBatchSize },
-      );
-    }
-    return this._predictionMarketPaperResolutionUseCase;
-  }
-
-  /**
-   * Periodic resolution job. Gated on `PREDICTION_MARKETS_ENABLED` (mirrors
-   * the other PM jobs) AND on Redis availability (lock requires it).
-   */
-  getPredictionMarketPaperResolutionJob(): PredictionMarketPaperResolutionJob | undefined {
-    if (!PREDICTION_MARKETS_ENV.enabled) {
-      if (!this._predictionMarketPaperResolutionNoStartWarned) {
-        this._predictionMarketPaperResolutionNoStartWarned = true;
-        log.info(
-          { feature: "predictionMarketPaperResolution", reason: "disabled" },
-          "paper-resolution job not started — set PREDICTION_MARKETS_ENABLED=true to enable",
-        );
-      }
-      return undefined;
-    }
-    const redis = this.getRedis();
-    if (!redis) {
-      if (!this._predictionMarketPaperResolutionNoStartWarned) {
-        this._predictionMarketPaperResolutionNoStartWarned = true;
-        log.warn(
-          { feature: "predictionMarketPaperResolution", reason: "redis-missing" },
-          "paper-resolution job not started",
-        );
-      }
-      return undefined;
-    }
-    if (!this._predictionMarketPaperResolutionJob) {
-      this._predictionMarketPaperResolutionJob = new PredictionMarketPaperResolutionJob(
-        this.getPredictionMarketPaperResolutionUseCase(),
-        redis,
-        PREDICTION_MARKETS_ENV.paperResolutionIntervalMs,
-        PREDICTION_MARKETS_ENV.paperResolutionLockTtlMs,
-      );
-    }
-    return this._predictionMarketPaperResolutionJob;
-  }
 
   getPredictionMarketBetUseCase(): IPredictionMarketBetUseCase | undefined {
     if (this._predictionMarketBetUseCase) return this._predictionMarketBetUseCase;
@@ -1660,6 +1569,13 @@ export class AssistantInject {
       this.getPolymarketAdapter(),
     );
     return this._predictionMarketBetUseCase;
+  }
+
+  getPolymarketAdapter(): IPolymarketAdapter {
+    if (!this._polymarketAdapter) {
+      this._polymarketAdapter = new PolymarketAdapter(PREDICTION_MARKETS_ENV.clobApiBase);
+    }
+    return this._polymarketAdapter;
   }
 
   getPredictionMarketReceiptBroadcaster(): IPredictionMarketReceiptBroadcaster | undefined {
@@ -1733,7 +1649,6 @@ export class AssistantInject {
       this.getPredictionMarketReceiptBroadcaster(),
       this.getRelayClient(),
       this.getPredictionMarketRepo(),
-      this.getPredictionMarketPaperBetUseCase(),
       new PimlicoBundlerProxy(),
     );
   }

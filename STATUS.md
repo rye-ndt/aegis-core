@@ -7,18 +7,23 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 
 ---
 
-## Prediction markets — Paper bets (evaluation mode) — 2026-05-11
+## Prediction markets — Paper bets REMOVED — 2026-05-15
 
-- **Goal:** measure model profitability before any real money moves on-chain.
-- **Schema:** `prediction_market_paper_bets` (drizzle; indexed on userId+status, findingId, marketId+status, subject).
-- **Flow:** broadcast button → mini-app `PaperBetHandler` → `GET /predictionMarket/paperBetPreview` (live CLOB top-of-book + stake bounds + side context) → `POST /predictionMarket/paperBet` → DB row. **No SCA, no bridge, no CLOB signing.** Live ask snapshotted at confirm time.
-- **Resolution:** `predictionMarketPaperResolutionJob` ticks hourly, polls Polymarket Gamma `markets/{id}`, computes `payout_cents = sharesE6 / 10_000` if outcome matches `side`, else 0. `realizedPnlUsdcCents = payout - stake`.
-- **Evaluation:** `GET /admin/prediction-markets/paper-performance?groupBy=detectorSource` is the canonical "is the model profitable" query. Also sliceable by `subject` / `clusterId`.
-- **HTTP routes:** `POST /predictionMarket/paperBet`, `GET /predictionMarket/paperBetPreview`, `GET /predictionMarket/paperBets`, `GET /predictionMarket/paperPerformance`, `GET /admin/prediction-markets/paper-performance`. `paperBetPreview` was added in Part 4 to let the FE show a live price + bounds before the user commits (and to keep `pickSideThesis` server-authoritative — FE never duplicates the mapping).
-- **On-chain bet pipeline** (`PredictionMarketBetUseCase`, `PlaceBetCapability`, `ClosePositionCapability`) remains wired in DI but is **unreachable from the broadcast deep-link** after FE Part 4. Re-enable by reverting the route mount in `fe/privy-auth/src/App.tsx`.
-- **Env:** `PREDICTION_MARKETS_PAPER_STAKE_MIN_USDC_CENTS`, `PREDICTION_MARKETS_PAPER_STAKE_MAX_USDC_CENTS`, `PREDICTION_MARKETS_PAPER_PRICE_TTL_MS`, `PREDICTION_MARKETS_PAPER_RESOLUTION_INTERVAL_MS`, `PREDICTION_MARKETS_PAPER_RESOLUTION_BATCH_SIZE`, `PREDICTION_MARKETS_PAPER_RESOLUTION_LOCK_TTL_MS`.
-- **Log metadata fields:** `paperBetId`, `detectorSource`, `groupBy`, `betCount`, `checked`, `resolved`.
-- **New convention:** when the broadcast contract (`place_bet:findingId:A|B`) is preserved, **BE may swap the destination of the deep-link unilaterally** — FE just remounts. This contract is the boundary; everything behind it is implementation-private.
+The simulated/paper-bet evaluation flow (Parts 1–4) has been **fully deleted** in favour of the on-chain bet pipeline (`PredictionMarketBetUseCase`, `PlaceBetCapability`, `ClosePositionCapability`). The on-chain pipeline is now the only consumer of the broadcast `place_bet:findingId:A|B` deep-link.
+
+**Removed:**
+- Table `prediction_market_paper_bets` — dropped via migration `0044_parched_silvermane.sql`.
+- HTTP routes `POST /predictionMarket/paperBet`, `GET /predictionMarket/paperBetPreview`, `GET /predictionMarket/paperBets`, `GET /predictionMarket/paperPerformance`, `GET /admin/prediction-markets/paper-performance`.
+- Use cases `PredictionMarketPaperBetUseCase`, `PredictionMarketPaperResolutionUseCase`; job `PredictionMarketPaperResolutionJob`; repo + interface `predictionMarketPaperBet.repo.ts` / `IPredictionMarketPaperBetRepository.ts`; types `PaperBetTypes.ts`; resolution-fetcher port + adapter (`IPolymarketResolutionFetcher`, `PolymarketResolutionFetcher`).
+- All `PREDICTION_MARKETS_PAPER_*` env vars (and matching entries in `.env.example`).
+- Tests `predictionMarketPaperBetUseCase.test.ts`, `predictionMarketPaperResolution.test.ts`, `predictionMarketPaperBetRepo.test.ts`.
+- FE handler `PaperBetHandler.tsx`, paper-bet types/methods in `predictionMarket.types.ts` + `predictionMarketApi.ts`, and the `place_bet` branch in `App.tsx`/`deepLink.ts`.
+
+**Why:** the project is moving to real-money positions next. Keeping the parallel paper-bet stack alive doubled surface area, env config, and test maintenance with no production users on the simulated path. Construction docs (`constructions/2026-05-11-prediction-markets-paper-bets-*.md`) are kept as historical record.
+
+**On-chain bet pipeline status:** unchanged — DI wiring, capabilities, and HTTP routes for real bets remain intact. The Confirm/Cancel button duplication on the bet-confirm card was fixed in the same change set (`placeBetCapability.confirmCardArtifact` and `closePositionCapability` no longer return both `nextActions` and a redundant `keyboard`).
+
+**Follow-up for the next contributor:** `place_bet:<findingId>:A|B` deep-links currently fall through to the close-position branch in `App.tsx` (will return null from `parseDeepLink` since the `place_bet` verb was removed). Re-add a `place_bet` deep-link kind + handler when wiring the real-money mini-app flow.
 
 ---
 
@@ -484,10 +489,6 @@ Port `HTTP_API_PORT` (default 4000). CORS allows all origins. Reqid = `newUuid()
 | `GET` | `/metrics` | Bearer (`METRICS_TOKEN`) | pgPool/openai/redis/LLM metrics |
 | `GET` | `/delegation/approval-params?chainId=137` | Privy | Optional `chainId` query param routes the suggested-tokens response to a specific chain. Omitted → home chain. |
 | `*` | `/predictionMarket/*` | Privy | 12 routes covering setup state machine (`setup/init`, `setup/step`, `setup/creds`), bet intent lifecycle (`intent/:id`, `intent/:id/cancel`), bet execution (`bet/:id`, `bet/:id/transition`, `bet/:id/finalize`, `bet/:id/bridge-status`, `bet/:id/drift-detected`, `bet/:id/refund`), Polymarket orderbook + order place/cancel/sell, position list, and `/state` snapshot for mini-app rehydration. 409 on illegal bet-status transitions; 503 when `PREDICTION_MARKETS_BETS_ENABLED=false`. |
-| `POST` | `/predictionMarket/paperBet` | Privy | Place a simulated bet — body `{ findingId, side: 'A'\|'B'\|'YES'\|'NO', stakeUsdcCents }`. Loads finding + cluster, snapshots live CLOB top-of-book (best ask of the chosen outcome token), persists row to `prediction_market_paper_bets`. 400 validation, 404 finding/cluster missing, 503 price unavailable. |
-| `GET` | `/predictionMarket/paperBets?status=&limit=` | Privy | List the caller's paper bets, newest first. `limit` clamps to 200; `status` ∈ `open\|resolved\|voided`. |
-| `GET` | `/predictionMarket/paperPerformance?groupBy=&status=` | Privy | Caller-scoped aggregated paper-bet performance. `groupBy` ∈ `overall\|subject\|clusterId\|detectorSource` (default `overall`). Default status filter is `resolved`. |
-| `GET` | `/admin/prediction-markets/paper-performance?groupBy=&status=&since=` | Bearer (`PREDICTION_MARKETS_ADMIN_HTTP_TOKEN`) | Same shape as the user route but global (no `userId` filter). 404 when token unset. Both routes accept `?since=<iso>` (default 30d ago) and surface `medianStakeUsdcCents`/`medianPnlUsdcCents` per bucket. |
 
 ## Telegram commands
 | Command | Behavior |
@@ -622,7 +623,7 @@ message
 - **Lazy singletons** in `AssistantInject`: `if (!this._x) this._x = new X(...)`. Optional-env services return `undefined` when unconfigured.
 - **HTTP routing**: `exactRoutes` or `paramRoutes` only. Never if/else chains.
 - **Encrypted secrets**: `helpers/crypto/aesGcm.ts` (versioned envelope `v1:iv:tag:ciphertext`). Used for at-rest Polymarket L2 creds in `prediction_market_user_setup.polymarket_creds_enc`. Future rotations append `v2:` rather than mutating in place.
-- **Logging**: pino via `createLogger('ScopeName')`. Metadata is first arg. Never `console.*` in `src/`. Never log tokens, privyDid, signatures, raw PII. Common metadata fields: `step`, `reqId`/`userId`, `err`, `durationMs`, `status`, `attempt`, `choice` (cache hit/miss), `count`, `source: "db"|"derived"`, `stale: boolean`, `betCount` (paper-bet aggregate row count), `groupBy` (paper-bet aggregation axis: `overall|subject|clusterId|detectorSource`), `detectorSource` (`deterministic|llm`).
+- **Logging**: pino via `createLogger('ScopeName')`. Metadata is first arg. Never `console.*` in `src/`. Never log tokens, privyDid, signatures, raw PII. Common metadata fields: `step`, `reqId`/`userId`, `err`, `durationMs`, `status`, `attempt`, `choice` (cache hit/miss), `count`, `source: "db"|"derived"`, `stale: boolean`.
 - **Free-tier external providers**: wrap adapter in a `CachedXxxProvider(inner, cache, userId, cfg)` decorator using `acquireUserSlot(userId, rpm)` + `acquireGlobalSlot(rps)`. Never inline rate-limit logic into adapters. Use the generic `RateLimitedError` / `UnsupportedChainError` (HTTP layer maps to 429/400; tools surface graceful retry messages).
 - **Spend bookkeeping**: capabilities emitting autosign signing-requests for ERC20 spends MUST set `tokenAddress` (lowercased) + `amountRaw` (decimal raw string) on the `SigningRequestRecord` / `sign_calldata` artifact of the **single tx that actually moves the user's funds** — typically the last step. Native paths leave both undefined. `signingRequest.usecase.resolveRequest` calls `tokenDelegationDB.addSpent(userId, tokenAddress, amountRaw)` best-effort.
 - **Multi-step capabilities**: emit `mini_app` for step 1 only; store steps 2..N via `miniAppRequestCache.store(...)`; FE chains via `GET /request/:id?after=<prev>`. One mini-app session per intent.

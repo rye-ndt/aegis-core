@@ -144,10 +144,7 @@ function previewArtifact(
       { label: "Cancel", kind: "callback", payload: `cancel_close:${positionId}` },
     ],
   };
-  const keyboard = new InlineKeyboard()
-    .text("Confirm", `confirm_close:${positionId}`)
-    .text("Cancel", `cancel_close:${positionId}`);
-  return { kind: "result_card", result, keyboard };
+  return { kind: "result_card", result };
 }
 
 function openMiniAppArtifact(positionId: string): Artifact {
