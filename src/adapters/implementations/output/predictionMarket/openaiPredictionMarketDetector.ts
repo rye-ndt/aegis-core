@@ -272,15 +272,14 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: FINDING_SCHEMA },
-      // Mispricing detection is the highest-value LLM step in the pipeline
-      // — false negatives mean missed findings, so we spend deep reasoning
-      // budget here. `effort: high` can itself consume 8–12k tokens, and
-      // the visible JSON (multiple findings × multi-field bodies) is the
-      // largest in the pipeline, so we cap at the model's headline 16k
-      // ceiling. If `finish_reason=length` shows up in logs, dial back to
-      // `medium` rather than raising further.
-      maxTokens: 16000,
-      reasoningEffort: "high",
+      // Sized to stay under the OpenRouter key's per-request credit cap
+      // (~13k tokens). `effort: high` would burn most of this 12k budget
+      // on reasoning and truncate the visible findings JSON — so we step
+      // down to `medium`. This is the highest-stakes LLM step in the
+      // pipeline; top up OpenRouter credits and raise both knobs back to
+      // `(16000, high)` if false negatives become noticeable.
+      maxTokens: 12000,
+      reasoningEffort: "medium",
       logCtx: { reqId, clusterId: cluster.clusterId, op: "detect" },
     });
 

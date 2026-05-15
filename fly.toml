@@ -20,8 +20,11 @@ primary_region = "iad"
   # HTTP
   HTTP_API_PORT = "4000"
 
-  # OpenAI
-  OPENAI_MODEL = "gpt-4o"
+  # LLM (post-2026-05-14 OpenRouter migration). OPENAI_MODEL must be an
+  # OpenRouter slug (`<provider>/<model>` form). OPENAI_API_KEY is now the
+  # embedding-only credential; chat traffic auths via OPENROUTER_API_KEY
+  # (set as a secret, not here).
+  OPENAI_MODEL = "openai/gpt-5-mini"
   OPENAI_CONCURRENCY = "6"
   MAX_TOOL_ROUNDS = "10"
   MESSAGE_HISTORY_LIMIT = "30"
@@ -93,7 +96,7 @@ primary_region = "iad"
   # Portfolio + result-card
   PORTFOLIO_PROVIDER = "ankr"
   RESULT_CARD_INTERPRETER_ENABLED = "true"
-  RESULT_CARD_INTERPRETER_MODEL = "gpt-4o"
+  RESULT_CARD_INTERPRETER_MODEL = "openai/gpt-5-mini"
 
   # Prediction markets
   PREDICTION_MARKETS_ENABLED = "true"
@@ -105,7 +108,7 @@ primary_region = "iad"
   PREDICTION_MARKETS_MIN_7D_VOLUME_USD = "20000"
   PREDICTION_MARKETS_MIN_DAYS = "3"
   PREDICTION_MARKETS_MAX_DAYS = "60"
-  PREDICTION_MARKETS_CLASSIFIER_MODEL = "gpt-4o-mini"
+  PREDICTION_MARKETS_CLASSIFIER_MODEL = "openai/gpt-5-mini"
   PREDICTION_MARKETS_MAX_CRITERIA_CHARS = "4000"
   PREDICTION_MARKETS_PROMPT_VERSION = "v3"
   PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC = "86400"
@@ -113,7 +116,7 @@ primary_region = "iad"
   PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS = "86400000"
   PREDICTION_MARKETS_BROADCAST_CONCURRENCY = "5"
   PREDICTION_MARKETS_FINDINGS_ENABLED = "true"
-  PREDICTION_MARKETS_DETECTOR_MODEL = "gpt-4o"
+  PREDICTION_MARKETS_DETECTOR_MODEL = "openai/gpt-5-mini"
   PREDICTION_MARKETS_DETECTOR_CONCURRENCY = "3"
   PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC = "1800"
   PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS = "50"
@@ -128,7 +131,7 @@ primary_region = "iad"
   # Deterministic-detection rollout (Phase 2-5). Extractor populates
   # prediction_market_facts hourly; shadow mode runs deterministic clusterer
   # alongside LLM pipeline without broadcasting.
-  PREDICTION_MARKETS_EXTRACTOR_MODEL = "gpt-4o-mini"
+  PREDICTION_MARKETS_EXTRACTOR_MODEL = "openai/gpt-5-mini"
   PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY = "8"
   PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION = "v1"
   PREDICTION_MARKETS_EXTRACT_INTERVAL_MS = "3600000"

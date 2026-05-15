@@ -230,12 +230,12 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: CLUSTER_SCHEMA },
-      // Causal clustering is a judgment-heavy step — the difference
-      // between a topical grouping ("markets about Trump") and a real
-      // causal cluster comes from careful reasoning about shared drivers.
-      // `effort: medium` is a deliberate spend for clustering quality;
-      // 14k leaves room for the multi-cluster JSON after reasoning.
-      maxTokens: 14000,
+      // Sized to stay under the OpenRouter key's per-request credit cap
+      // (~13k tokens). Clustering benefits from reasoning, so we keep
+      // `effort: medium` — but at this budget, watch for `finish_reason=
+      // length` warnings; if they fire, drop to `low` rather than raising
+      // maxTokens (which OpenRouter will 402 on).
+      maxTokens: 12000,
       reasoningEffort: "medium",
       logCtx: { reqId, op: "classify" },
     });
