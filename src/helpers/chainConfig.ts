@@ -11,6 +11,7 @@ import {
 } from "viem/chains";
 import type { Address } from "viem";
 import { YIELD_ENV } from "./env/yieldEnv";
+import { readBundlerUrl } from "./env/aaEnv";
 import { YIELD_PROTOCOL_ID } from "./enums/yieldProtocolId.enum";
 
 interface YieldChainConfig {
@@ -358,6 +359,18 @@ export function isNativeSymbolForChain(symbol: string, chainId: number): boolean
   const native = getNativeTokenInfo(chainId);
   if (!native) return false;
   return symbol.trim().toUpperCase() === native.symbol.toUpperCase();
+}
+
+/**
+ * Per-chain pimlico bundler URL, sourced from env via aaEnv. Returns null when
+ * the chain is unknown or has no bundler configured — caller decides how to
+ * surface that (the `/aa/bundler/:chainId` route returns 503). Chain-agnostic
+ * per the CLAUDE.md rule: the env key is computed from the chainId, never
+ * hardcoded.
+ */
+export function getBundlerUrl(chainId: number): string | null {
+  if (!CHAIN_REGISTRY[chainId]) return null;
+  return readBundlerUrl(chainId);
 }
 
 export function getUsdcAddress(chainId: number): Address | null {

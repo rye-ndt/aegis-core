@@ -62,6 +62,8 @@ import { SESSION_KEY_STATUSES } from "../../../../helpers/enums/sessionKeyStatus
 import { toErrorMessage } from "../../../../helpers/errors/toErrorMessage";
 import { metricsRegistry } from "../../../../helpers/observability/metricsRegistry";
 import { createLogger } from "../../../../helpers/observability/logger";
+import { AA_ENV } from "../../../../helpers/env/aaEnv";
+import type { IBundlerProxy } from "../../../../use-cases/interface/output/aa/bundlerProxy.interface";
 
 const log = createLogger("httpServer");
 
@@ -171,6 +173,8 @@ export class HttpApiServer {
     /** Phase 4 (Part 5): admin route reads `getShadowAgreement` from here. */
     private readonly predictionMarketRepo?: IPredictionMarketRepository,
     paperBetUseCase?: PredictionMarketPaperBetUseCase,
+    /** AA bundler proxy (`POST /aa/bundler/:chainId`). Optional — route 503s when absent. */
+    private readonly pimlicoBundlerProxy?: IBundlerProxy,
   ) {
     if (!paperBetUseCase) {
       throw new Error("HttpApiServer: paperBetUseCase is required");
@@ -504,7 +508,121 @@ export class HttpApiServer {
       [{ method: "POST",   regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/refund$/ }, (req, res, _u, id) => this.handlePmRecordRefund(req, res, id)],
       [{ method: "GET",    regex: /^\/predictionMarket\/orderbook\/([^/]+)$/ }, (req, res, _u, id) => this.handlePmOrderbook(req, res, id)],
       [{ method: "POST",   regex: /^\/predictionMarket\/order\/cancel\/([^/]+)$/ }, (req, res, _u, id) => this.handlePmCancelOrder(req, res, id)],
+      [{ method: "POST",   regex: /^\/aa\/bundler\/(\d+)$/ }, (req, res, _u, chainIdRaw) => this.handleBundlerProxy(req, res, chainIdRaw)],
     ];
+  }
+
+  /**
+   * AA bundler proxy. Privy-token gated. Forwards the request body byte-for-byte
+   * to the chain's pimlico bundler URL (sourced from `PIMLICO_BUNDLER_URL_<chainId>`)
+   * and passes the upstream status + body back unchanged so viem's JSON-RPC
+   * transport sees the standard error/result shape it expects. We do not check
+   * `userId → SCA` here: the proxy is dumb pass-through, paymaster verifies the
+   * userOp downstream, and parsing the body to extract `sender` would defeat the
+   * byte-exact forward.
+   */
+  private async handleBundlerProxy(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    chainIdRaw: string,
+  ): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+
+    if (!this.pimlicoBundlerProxy) {
+      return this.sendJson(res, 503, { error: "bundler-proxy-unavailable" });
+    }
+
+    const chainId = Number(chainIdRaw);
+    if (!Number.isFinite(chainId)) {
+      return this.sendJson(res, 404, { error: "Not found" });
+    }
+
+    const declaredLen = Number(req.headers["content-length"] ?? 0);
+    if (Number.isFinite(declaredLen) && declaredLen > AA_ENV.bundlerMaxBodyBytes) {
+      log.warn({ reqId, chainId, declaredLen }, "bundler-proxy-too-large");
+      return this.sendJson(res, 413, { error: "Request entity too large" });
+    }
+
+    const userId = await this.extractUserId(req);
+    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
+
+    let body: Buffer;
+    try {
+      body = await this.readRawBody(req, AA_ENV.bundlerMaxBodyBytes);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg === "body-too-large") {
+        log.warn({ reqId, chainId, userId }, "bundler-proxy-too-large");
+        return this.sendJson(res, 413, { error: "Request entity too large" });
+      }
+      log.warn({ reqId, chainId, userId, err: msg }, "bundler-proxy-body-read-failed");
+      return this.sendJson(res, 400, { error: "Invalid body" });
+    }
+    if (body.byteLength === 0) {
+      return this.sendJson(res, 400, { error: "Empty body" });
+    }
+
+    // Best-effort scan for `"method":"..."` in the body head — logging label
+    // only. Avoids JSON.parse of bodies up to the 256 KB cap on a per-request
+    // hot path. 512-byte head fits ~4 method entries comfortably for a
+    // JSON-RPC batch (each entry is ~50–80 bytes of overhead + method name);
+    // beyond 4 the comma-joined string would just bloat logs.
+    const head = body.slice(0, 512).toString("utf8");
+    const methods: string[] = [];
+    const re = /"method"\s*:\s*"([^"]{1,64})"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(head)) !== null && methods.length < 4) {
+      methods.push(m[1]!);
+    }
+    const method = methods.length === 0 ? undefined : methods.join(",");
+
+    const result = await this.pimlicoBundlerProxy.forward({
+      chainId, body, reqId, userId, method,
+    });
+
+    if (result.status === 0) {
+      // 503 = config issue (no env set for this chain), 504 = our 15 s ceiling
+      // tripped, 502 = anything else (connection refused, DNS, TLS, etc.).
+      const status =
+        result.upstreamError === "no-bundler-configured"
+          ? 503
+          : result.upstreamError === "timeout"
+            ? 504
+            : 502;
+      return this.sendJson(res, status, {
+        error: "bundler-upstream-failed",
+        details: result.upstreamError,
+      });
+    }
+
+    res.writeHead(result.status, { "Content-Type": "application/json" });
+    res.end(result.body ?? Buffer.alloc(0));
+  }
+
+  /**
+   * Accumulates the request body into a Buffer, rejecting with `body-too-large`
+   * if the running total crosses `cap` (re-checked during read in case the
+   * declared `Content-Length` header lied). Used by the bundler proxy to
+   * preserve the exact byte sequence — `readJson` would JSON.parse and
+   * potentially reorder keys / coerce big-int userOp fields.
+   */
+  private readRawBody(req: http.IncomingMessage, cap: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      req.on("data", (chunk: Buffer | string) => {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.byteLength;
+        if (total > cap) {
+          req.destroy();
+          reject(new Error("body-too-large"));
+          return;
+        }
+        chunks.push(buf);
+      });
+      req.on("end", () => resolve(Buffer.concat(chunks)));
+      req.on("error", reject);
+    });
   }
 
   private async handlePrivyLogin(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {

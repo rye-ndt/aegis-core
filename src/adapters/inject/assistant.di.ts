@@ -62,6 +62,7 @@ import type {
 } from "../../use-cases/interface/yield/IYieldOptimizerUseCase";
 import type { IYieldRepository } from "../../use-cases/interface/yield/IYieldRepository";
 import { HttpApiServer } from "../implementations/input/http/httpServer";
+import { PimlicoBundlerProxy } from "../implementations/output/aa/pimlicoBundlerProxy";
 import { TokenCrawlerJob } from "../implementations/input/jobs/tokenCrawlerJob";
 import { UserIdleScanJob } from "../implementations/input/jobs/userIdleScanJob";
 import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob";
@@ -1733,6 +1734,7 @@ export class AssistantInject {
       this.getRelayClient(),
       this.getPredictionMarketRepo(),
       this.getPredictionMarketPaperBetUseCase(),
+      new PimlicoBundlerProxy(),
     );
   }
 
