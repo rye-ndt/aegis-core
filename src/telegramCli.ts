@@ -53,6 +53,9 @@ const log = createLogger("telegramCli");
   const polymarketPositionPollerJob = inject.getPolymarketPositionPollerJob();
   polymarketPositionPollerJob?.start();
 
+  const predictionMarketStuckBetSweeperJob = inject.getPredictionMarketStuckBetSweeperJob();
+  predictionMarketStuckBetSweeperJob?.start();
+
   const dispatcher = await inject.getCapabilityDispatcher();
   if (!dispatcher) {
     log.error("Capability dispatcher unavailable — bot cannot start.");

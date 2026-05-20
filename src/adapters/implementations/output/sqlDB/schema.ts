@@ -495,6 +495,9 @@ export const predictionMarketBets = pgTable("prediction_market_bets", {
 }, (t) => ({
   byUserStatus: index("pm_bets_by_user_status").on(t.userId, t.status),
   byClientOrderId: index("pm_bets_by_client_order_id").on(t.clientOrderId),
+  // Stuck-bet sweeper scans by (status, updatedAtEpoch); without this index
+  // the scan degrades to a seq-scan as bets table grows.
+  byStatusUpdatedAt: index("pm_bets_by_status_updated_at").on(t.status, t.updatedAtEpoch),
 }));
 
 export const predictionMarketPositions = pgTable("prediction_market_positions", {

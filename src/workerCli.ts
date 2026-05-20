@@ -55,6 +55,9 @@ const log = createLogger("workerCli");
   const polymarketPositionPollerJob = inject.getPolymarketPositionPollerJob();
   polymarketPositionPollerJob?.start();
 
+  const predictionMarketStuckBetSweeperJob = inject.getPredictionMarketStuckBetSweeperJob();
+  predictionMarketStuckBetSweeperJob?.start();
+
   log.info(
     {
       jobs: {

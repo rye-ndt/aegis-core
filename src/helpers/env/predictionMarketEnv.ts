@@ -25,7 +25,7 @@ export const PREDICTION_MARKETS_ENV = {
   minVolume7dUsd: num("PREDICTION_MARKETS_MIN_7D_VOLUME_USD", 20_000),
   minDaysToResolution: num("PREDICTION_MARKETS_MIN_DAYS", 3),
   maxDaysToResolution: num("PREDICTION_MARKETS_MAX_DAYS", 60),
-  classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-mini"),
+  classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
   maxCriteriaChars: num("PREDICTION_MARKETS_MAX_CRITERIA_CHARS", 4000),
   reclusterDelta: num("PREDICTION_MARKETS_RECLUSTER_DELTA", 10),
   maxReclusterAgeMs: num("PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS", 24 * 60 * 60 * 1000),
@@ -41,7 +41,7 @@ export const PREDICTION_MARKETS_ENV = {
   promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v3"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
-    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-mini"),
+    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
   ),
   detectorConcurrency: num("PREDICTION_MARKETS_DETECTOR_CONCURRENCY", 3),
   detectorCacheTtlSec: num("PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC", 1800),
@@ -57,6 +57,22 @@ export const PREDICTION_MARKETS_ENV = {
   polymarketAffiliateParam: str("PREDICTION_MARKETS_POLYMARKET_AFFILIATE", ""),
   findingsEnabled: bool("PREDICTION_MARKETS_FINDINGS_ENABLED", false),
   betsEnabled: bool("PREDICTION_MARKETS_BETS_ENABLED", false),
+  // Slice B kill switch (2026-05-15 zero-sign bet rewrite). When false, the
+  // new `advance()`-driven state machine is dormant: enqueue helpers no-op,
+  // the /response hook skips its bet-use-case fan-out, and the stuck-bet
+  // sweeper exits early. Flipping this on without the matching FE deploy
+  // (Slice D) is a no-op for live traffic — only sign requests written with
+  // `betId` enter the new flow, and nothing writes that until Slice D.
+  useSignQueue: bool("PREDICTION_MARKETS_USE_SIGN_QUEUE", false),
+  // Sister tick for the stuck-bet sweeper job. Independent of the position
+  // poller cadence: the sweeper re-enqueues lapsed sign-requests for bets
+  // whose mini-app session closed mid-flow.
+  stuckBetSweepIntervalMs: num("PREDICTION_MARKETS_STUCK_BET_SWEEP_INTERVAL_MS", 30_000),
+  // A bet whose updatedAt is older than this and isn't terminal is treated
+  // as "the mini-app went away" and re-advanced. Long enough to not collide
+  // with a slow legal step (~30s for a userop on Polygon), short enough that
+  // a closed-then-reopened mini-app picks up promptly.
+  stuckBetTimeoutMs: num("PREDICTION_MARKETS_STUCK_BET_TIMEOUT_MS", 90_000),
   betChainId: num("PREDICTION_MARKETS_BET_CHAIN_ID", 137),
   minStakeUsdc: num("PREDICTION_MARKETS_MIN_STAKE_USDC", 1),
   maxStakeUsdc: num("PREDICTION_MARKETS_MAX_STAKE_USDC", 100),
@@ -75,7 +91,7 @@ export const PREDICTION_MARKETS_ENV = {
   // Phase 2 (deterministic-detection) — per-market LLM extractor + hourly job.
   // The regex layer is the safety net so a small/cheap model is fine for
   // first-pass structured output.
-  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "openai/gpt-5-mini"),
+  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "openai/gpt-5-nano"),
   extractorConcurrency: num("PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY", 8),
   extractorPromptVersion: str("PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION", "v1"),
   extractFactsIntervalMs: num("PREDICTION_MARKETS_EXTRACT_INTERVAL_MS", 60 * 60 * 1000),

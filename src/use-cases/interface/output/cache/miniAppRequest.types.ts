@@ -1,8 +1,21 @@
 import type { IntentResult } from '../../input/resultCard.types';
+import type {
+  Eip712Purpose,
+  SigningRequestKind,
+  SigningRequestTypedDataDomain,
+} from './signingRequest.cache';
 
 export type RequestType = 'auth' | 'sign' | 'approve' | 'onramp';
 export type ApproveSubtype = 'session_key' | 'aegis_guard';
 export type SignKind = 'yield_deposit' | 'yield_withdraw';
+
+// Re-exported under their FE-payload names so mini-app code reads naturally.
+// The mini-app payload and the BE resolution state describe the same request
+// from two angles — keeping a single source of truth for the discriminator
+// prevents the two sides drifting.
+export type SignPrimitive = SigningRequestKind;
+export type { Eip712Purpose };
+export type SignTypedDataDomain = SigningRequestTypedDataDomain;
 
 export interface YieldDisplayMeta {
   protocolName: string;
@@ -36,6 +49,17 @@ export interface SignRequest extends BaseRequest {
   protocolId?: string;
   tokenAddress?: string;
   displayMeta?: YieldDisplayMeta;
+  // Field is `primitive` (not `kind`) because `kind` is already used above
+  // for the yield_deposit/yield_withdraw classifier. Absent = 'userop'.
+  primitive?: SignPrimitive;
+  purpose?: Eip712Purpose;
+  domain?: SignTypedDataDomain;
+  types?: Record<string, Array<{ name: string; type: string }>>;
+  primaryType?: string;
+  // BigInts must be pre-stringified — JSON serialisation can't carry them.
+  message?: Record<string, unknown>;
+  betId?: string;
+  positionId?: string;
   /**
    * Plain-English preview the mini-app renders inside its existing approve
    * modal in place of raw to/value/calldata. Always `status: "preview"`. When
@@ -94,6 +118,9 @@ export interface SignResponse extends BaseResponse {
   // Raw underlying error text (viem revert reason, etc.) the FE sends purely
   // for BE diagnostic logs. Never persisted, never re-displayed to the user.
   errorRaw?: string;
+  signature?: string;
+  signer?: string;
+  polymarketOrderId?: string;
 }
 
 export interface DelegationRecord {

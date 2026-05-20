@@ -7,6 +7,10 @@ import type {
   UserSetupRow,
 } from "./IPredictionMarketBetRepository";
 import type { PolymarketCreds } from "./IPolymarketAdapter";
+import type {
+  Eip712Purpose,
+  SigningRequestKind,
+} from "../output/cache/signingRequest.cache";
 
 /**
  * BE orchestration for stage-4 prediction-market bets.
@@ -199,6 +203,72 @@ export interface IPredictionMarketBetUseCase {
    * success so the FE state-machine doesn't loop.
    */
   recordRefundTxHash(userId: string, betId: string, txHash: string): Promise<BetRow>;
+
+  // ── 2026-05-15 zero-sign bet rewrite (Slice B) ────────────────────────────
+  // Methods below are dormant unless PREDICTION_MARKETS_USE_SIGN_QUEUE=true,
+  // and even then only fire when a sign-request resolves with a `betId` set
+  // (Slice D is what writes such rows). Existing FE flows are untouched.
+
+  /**
+   * Idempotent driver. Reads the bet's current status and enqueues the next
+   * sign request (or no-ops if the slot is already in-flight, or transitions
+   * to FAILED on drift). Called from:
+   *   - `notifySignResolved` after the previous step's /response landed,
+   *   - the stuck-bet sweeper for bets whose mini-app went away mid-flow.
+   * Safe to call repeatedly: each enqueue helper guards itself with a Redis
+   * NX lock keyed on `(betId, slot)` so duplicate advances produce at most
+   * one open sign request.
+   */
+  advance(betId: string): Promise<void>;
+
+  /**
+   * Called by the /response handler after a sign-request resolved (approved
+   * or rejected) for a row carrying `betId`. The use-case updates the bet
+   * row to reflect the new artifact (tx hash / order id) and then calls
+   * `advance` for the next slot.
+   */
+  notifySignResolved(input: {
+    betId: string;
+    requestId: string;
+    kind: SigningRequestKind;
+    purpose?: Eip712Purpose;
+    txHash?: string;
+    polymarketOrderId?: string;
+    rejected: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+  }): Promise<void>;
+
+  /**
+   * Walks non-terminal bets older than `olderThanEpoch` and calls `advance`
+   * on each. Used by `PredictionMarketStuckBetSweeperJob`. Returns the
+   * number of bets the sweeper attempted to advance (observability only).
+   */
+  sweepStuckBets(olderThanEpoch: number): Promise<number>;
+
+  /**
+   * Drives the first-bet setup chain (Slice C). pending → sca_deployed is
+   * BE-only; the three subsequent transitions enqueue sign requests
+   * (gas-funding userop, three approval eoa_txs, one clob_auth eip712) and
+   * advance on the matching /response resolution. Idempotent like
+   * `advance`; safe to call from `start()` and from `notifySetupSignResolved`.
+   */
+  setupAdvance(userId: string): Promise<void>;
+
+  /**
+   * /response fan-out target for setup-driven rows (setupForUserId set).
+   * Mirrors `notifySignResolved` but acts on the setup state machine.
+   */
+  notifySetupSignResolved(input: {
+    userId: string;
+    requestId: string;
+    kind: SigningRequestKind;
+    purpose?: Eip712Purpose;
+    txHash?: string;
+    rejected: boolean;
+    errorCode?: string;
+    errorMessage?: string;
+  }): Promise<void>;
 }
 
 export interface SetupArtifact {

@@ -1,5 +1,22 @@
 import type { IntentResult } from '../../input/resultCard.types';
 
+// Absent `kind` on a row is treated as `'userop'` — every row written before
+// the zero-sign Polymarket rewrite (2026-05-15) lacks the field. New kinds
+// must not assume legacy back-compat carve-outs.
+export type SigningRequestKind = 'userop' | 'eoa_tx' | 'eip712';
+
+export type Eip712Purpose = 'clob_auth' | 'polymarket_order';
+
+// Mirrors viem's `TypedDataDomain` so the interface layer doesn't import a
+// viem type.
+export interface SigningRequestTypedDataDomain {
+  name?: string;
+  version?: string;
+  chainId?: number;
+  verifyingContract?: string;
+  salt?: string;
+}
+
 export type SigningRequestRecord = {
   id: string;
   userId: string;
@@ -13,6 +30,20 @@ export type SigningRequestRecord = {
   createdAt: number;
   expiresAt: number;
   autoSign?: boolean;
+  kind?: SigningRequestKind;
+  purpose?: Eip712Purpose;
+  domain?: SigningRequestTypedDataDomain;
+  types?: Record<string, Array<{ name: string; type: string }>>;
+  primaryType?: string;
+  // BigInts must be pre-stringified — JSON serialisation can't carry them.
+  message?: Record<string, unknown>;
+  // The /response handler refuses an eip712 row if the address recovered from
+  // (signature, domain, types, message) doesn't equal `expectedSigner`.
+  expectedSigner?: string;
+  betId?: string;
+  positionId?: string;
+  polymarketOrderId?: string;
+  signature?: string;
   recipientTelegramUserId?: string;
   recipientHandle?: string;
   amountFormatted?: string;
@@ -66,6 +97,8 @@ export interface ISigningRequestCache {
     txHash?: string,
     errorCode?: string,
     errorMessage?: string,
+    signature?: string,
+    polymarketOrderId?: string,
   ): Promise<void>;
   /**
    * Flip every still-`pending` request belonging to `userId` to `expired` and

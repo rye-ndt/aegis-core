@@ -12,4 +12,4 @@ export const OPENROUTER_BASE_URL: string =
 export const OPENROUTER_REFERER: string | undefined = process.env.OPENROUTER_REFERER;
 export const OPENROUTER_APP_TITLE: string | undefined = process.env.OPENROUTER_APP_TITLE;
 
-export const OPENAI_MODEL: string = process.env.OPENAI_MODEL ?? "openai/gpt-5-mini";
+export const OPENAI_MODEL: string = process.env.OPENAI_MODEL ?? "openai/gpt-5-nano";

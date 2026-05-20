@@ -73,6 +73,7 @@ import { OpenAIPredictionMarketExtractor } from "../implementations/output/predi
 import { PredictionMarketExtractFactsUseCase } from "../../use-cases/implementations/predictionMarketExtractFacts.usecase";
 import { PredictionMarketReviewHandler } from "../implementations/input/telegram/predictionMarketReviewHandler";
 import { PolymarketPositionPollerJob } from "../implementations/input/jobs/polymarketPositionPollerJob";
+import { PredictionMarketStuckBetSweeperJob } from "../implementations/input/jobs/predictionMarketStuckBetSweeperJob";
 import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
 import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
 import { OpenAIPredictionMarketDetector } from "../implementations/output/predictionMarket/openaiPredictionMarketDetector";
@@ -233,6 +234,7 @@ export class AssistantInject {
   private _predictionMarketBetUseCase: IPredictionMarketBetUseCase | null = null;
   private _predictionMarketReceiptBroadcaster: IPredictionMarketReceiptBroadcaster | null = null;
   private _polymarketPositionPollerJob: PolymarketPositionPollerJob | null = null;
+  private _predictionMarketStuckBetSweeperJob: PredictionMarketStuckBetSweeperJob | null = null;
   private _predictionMarketExtractor: OpenAIPredictionMarketExtractor | null = null;
   private _predictionMarketExtractFactsUseCase: PredictionMarketExtractFactsUseCase | null = null;
   private _predictionMarketExtractFactsJob: PredictionMarketExtractFactsJob | null = null;
@@ -562,9 +564,55 @@ export class AssistantInject {
     const redis = this.getRedis();
     if (!redis) return undefined;
     if (!this._signingRequestUseCase) {
+      // Wrap the caller-supplied chat hook so bet-driven resolutions also
+      // fan out to the bet use case. Order matters: chat notify runs first
+      // so a slow bet-side state update can't delay user-visible UI.
+      const composed = (
+        event: import("../../use-cases/interface/input/signingRequest.interface").SigningResolutionEvent,
+      ): void => {
+        try {
+          onResolved(event);
+        } catch (err) {
+          log.error({ err }, "onResolved (chat) threw");
+        }
+        if (!PREDICTION_MARKETS_ENV.useSignQueue) return;
+        if (!event.betId && !event.setupForUserId) return;
+        const betUseCase = this.getPredictionMarketBetUseCase();
+        if (!betUseCase) return;
+        if (event.setupForUserId) {
+          betUseCase
+            .notifySetupSignResolved({
+              userId: event.setupForUserId,
+              requestId: event.requestId,
+              kind: event.kind ?? "userop",
+              purpose: event.purpose,
+              txHash: event.txHash,
+              rejected: event.rejected,
+              errorCode: event.errorCode,
+              errorMessage: event.errorMessage,
+            })
+            .catch((err) =>
+              log.error({ err, userId: event.setupForUserId }, "notifySetupSignResolved threw"),
+            );
+          return;
+        }
+        betUseCase
+          .notifySignResolved({
+            betId: event.betId!,
+            requestId: event.requestId,
+            kind: event.kind ?? "userop",
+            purpose: event.purpose,
+            txHash: event.txHash,
+            polymarketOrderId: event.polymarketOrderId,
+            rejected: event.rejected,
+            errorCode: event.errorCode,
+            errorMessage: event.errorMessage,
+          })
+          .catch((err) => log.error({ err, betId: event.betId }, "notifySignResolved threw"));
+      };
       this._signingRequestUseCase = new SigningRequestUseCaseImpl(
         new RedisSigningRequestCache(redis),
-        onResolved,
+        composed,
         this.getTokenDelegationRepo(),
       );
     }
@@ -1563,12 +1611,58 @@ export class AssistantInject {
       );
       return undefined;
     }
+    // Optional sign-queue deps. Only wired when the flag is on AND every
+    // dependency is available; otherwise the bet use case constructs in
+    // legacy-only mode and advance()/notifySignResolved no-op.
+    const redis = this.getRedis();
+    const miniAppRequestCache = this.getMiniAppRequestCache();
+    const sqlDB = this.getSqlDB();
+    const signQueueDeps =
+      PREDICTION_MARKETS_ENV.useSignQueue && redis && miniAppRequestCache
+        ? {
+            // Lazy getter breaks the circular dep with signingRequestUseCase
+            // (whose onResolved wrapper resolves the bet use case).
+            getSigningRequestUseCase: () => this._signingRequestUseCase ?? undefined,
+            miniAppRequestCache,
+            redis,
+            useSignQueue: true,
+            chatIdResolver: async (userId: string) => {
+              const session = await sqlDB.telegramSessions.findByUserId(userId);
+              const chatId = session?.telegramChatId;
+              if (!chatId) return null;
+              const n = Number(chatId);
+              return Number.isFinite(n) ? n : null;
+            },
+          }
+        : undefined;
     this._predictionMarketBetUseCase = new PredictionMarketBetUseCase(
       this.getPredictionMarketBetRepo(),
       this.getSqlDB().userProfiles,
       this.getPolymarketAdapter(),
+      signQueueDeps,
     );
     return this._predictionMarketBetUseCase;
+  }
+
+  getPredictionMarketStuckBetSweeperJob(): PredictionMarketStuckBetSweeperJob | undefined {
+    if (this._predictionMarketStuckBetSweeperJob) return this._predictionMarketStuckBetSweeperJob;
+    if (!PREDICTION_MARKETS_ENV.useSignQueue) return undefined;
+    const useCase = this.getPredictionMarketBetUseCase();
+    const redis = this.getRedis();
+    if (!useCase || !redis) {
+      log.warn(
+        { feature: "predictionMarketBets", reason: "deps-missing" },
+        "stuckBetSweeper not started",
+      );
+      return undefined;
+    }
+    this._predictionMarketStuckBetSweeperJob = new PredictionMarketStuckBetSweeperJob({
+      betUseCase: useCase,
+      redis,
+      intervalMs: PREDICTION_MARKETS_ENV.stuckBetSweepIntervalMs,
+      stuckTimeoutMs: PREDICTION_MARKETS_ENV.stuckBetTimeoutMs,
+    });
+    return this._predictionMarketStuckBetSweeperJob;
   }
 
   getPolymarketAdapter(): IPolymarketAdapter {

@@ -80,6 +80,9 @@ const MiniAppResponseSchema = z.discriminatedUnion('requestType', [
     errorCode: z.string().max(64).optional(),
     errorMessage: z.string().max(512).optional(),
     errorRaw: z.string().max(1024).optional(),
+    signature: z.string().regex(/^0x[0-9a-fA-F]+$/).max(1024).optional(),
+    signer: z.string().regex(/^0x[0-9a-fA-F]{40}$/).optional(),
+    polymarketOrderId: z.string().max(128).optional(),
   }),
   z.object({
     requestId: z.string().min(1),
@@ -799,6 +802,9 @@ export class HttpApiServer {
         errorCode: body.errorCode,
         errorMessage: body.errorMessage,
         errorRaw: body.errorRaw,
+        signature: body.signature,
+        signer: body.signer,
+        polymarketOrderId: body.polymarketOrderId,
       });
     } catch (err) {
       const message = toErrorMessage(err);

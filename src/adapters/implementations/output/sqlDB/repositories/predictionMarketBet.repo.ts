@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, notInArray, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, lt, notInArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newCurrentUTCEpoch } from "../../../../../helpers/time/dateTime";
 import {
@@ -329,6 +329,41 @@ export class DrizzlePredictionMarketBetRepo implements IPredictionMarketBetRepos
         ),
       );
     return rows.length;
+  }
+
+  async findActiveBetForUser(userId: string): Promise<BetRow | null> {
+    const rows = await this.db
+      .select()
+      .from(predictionMarketBets)
+      .where(
+        and(
+          eq(predictionMarketBets.userId, userId),
+          notInArray(predictionMarketBets.status, TERMINAL_NON_PENDING_STATUSES),
+        ),
+      )
+      .limit(1);
+    const r = rows[0];
+    return r ? this.betRow(r) : null;
+  }
+
+  async listStuckBets(olderThanEpoch: number, limit: number): Promise<BetRow[]> {
+    // Two cohorts share the same row condition: non-terminal bets that have
+    // gone quiet (mini-app likely closed), AND PARTIAL bets whose refund
+    // hasn't landed. Both want a re-advance.
+    const rows = await this.db
+      .select()
+      .from(predictionMarketBets)
+      .where(
+        and(
+          lt(predictionMarketBets.updatedAtEpoch, olderThanEpoch),
+          sql`(${predictionMarketBets.status} NOT IN ('FILLED', 'UNFILLED', 'FAILED')
+               OR (${predictionMarketBets.status} = 'PARTIAL'
+                   AND ${predictionMarketBets.refundRequired} = true
+                   AND ${predictionMarketBets.refundTxHash} IS NULL))`,
+        ),
+      )
+      .limit(limit);
+    return rows.map((r) => this.betRow(r));
   }
 
   // ── Positions ───────────────────────────────────────────────────────────

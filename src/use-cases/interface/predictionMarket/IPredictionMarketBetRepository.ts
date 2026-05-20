@@ -71,10 +71,18 @@ export type BetTerminalStatus = typeof BET_TERMINAL_STATUSES[number];
  * an artifact field.
  */
 export const BET_STATE_TRANSITIONS: Readonly<Record<BetStatus, readonly BetStatus[]>> = {
-  INITIATED:       ["BRIDGING", "FAILED"],
+  // INITIATED → SCA_TO_EOA is the zero-sign skip-bridge path (2026-05-15):
+  // advance() jumps straight to the SCA→EOA userop when USDC is already on
+  // Polygon. Legacy bridge-driven path (INITIATED → BRIDGING → BRIDGED → SCA_TO_EOA)
+  // is still legal so existing FE flows keep working until Slice F removes them.
+  INITIATED:       ["BRIDGING", "SCA_TO_EOA", "FAILED"],
   BRIDGING:        ["BRIDGED", "FAILED"],
   BRIDGED:         ["SCA_TO_EOA", "FAILED"],
-  SCA_TO_EOA:      ["ORDER_SIGNED", "FAILED"],
+  // SCA_TO_EOA → ORDER_SUBMITTED is the zero-sign skip-intermediate path:
+  // the order signature is verified at /response time, so ORDER_SIGNED is
+  // never a useful intermediate state in the new flow. Keeping the legacy
+  // SCA_TO_EOA → ORDER_SIGNED transition for the FE-driven path.
+  SCA_TO_EOA:      ["ORDER_SIGNED", "ORDER_SUBMITTED", "FAILED"],
   ORDER_SIGNED:    ["ORDER_SUBMITTED", "FAILED"],
   ORDER_SUBMITTED: ["FILLED", "PARTIAL", "UNFILLED", "FAILED"],
   FILLED:          [],
@@ -238,6 +246,18 @@ export interface IPredictionMarketBetRepository {
    * reject concurrent confirms.
    */
   countOpenBetsForUser(userId: string): Promise<number>;
+
+  // Newest non-terminal bet for `userId`, or null. Used by setup-completion
+  // to kick the bet that was waiting on setup. Matches the per-user one-bet
+  // invariant enforced by countOpenBetsForUser at confirm time.
+  findActiveBetForUser(userId: string): Promise<BetRow | null>;
+
+  // Non-terminal bets (status not in {FILLED, UNFILLED, FAILED}) plus PARTIAL
+  // bets whose refund is outstanding, whose `updatedAtEpoch` is older than
+  // `olderThanEpoch`. The stuck-bet sweeper drives this list through
+  // `advance()` so mini-apps that went away mid-flow get re-enqueued.
+  // Capped by `limit` to keep a single sweep tick bounded.
+  listStuckBets(olderThanEpoch: number, limit: number): Promise<BetRow[]>;
 
   // ── Positions ─────────────────────────────────────────────────────────
   insertPosition(row: PositionRow): Promise<void>;

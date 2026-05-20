@@ -63,6 +63,8 @@ export class RedisSigningRequestCache implements ISigningRequestCache {
     txHash?: string,
     errorCode?: string,
     errorMessage?: string,
+    signature?: string,
+    polymarketOrderId?: string,
   ): Promise<void> {
     const record = await this.findById(id);
     if (!record) return;
@@ -72,6 +74,8 @@ export class RedisSigningRequestCache implements ISigningRequestCache {
       txHash,
       errorCode,
       errorMessage,
+      signature: signature ?? record.signature,
+      polymarketOrderId: polymarketOrderId ?? record.polymarketOrderId,
     };
     const multi = this.redis.multi();
     multi.set(this.key(id), JSON.stringify(next), 'KEEPTTL');

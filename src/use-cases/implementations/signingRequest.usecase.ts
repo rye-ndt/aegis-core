@@ -1,3 +1,4 @@
+import { recoverTypedDataAddress } from "viem";
 import { createLogger } from "../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import type {
@@ -107,6 +108,9 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     errorCode?: string;
     errorMessage?: string;
     errorRaw?: string;
+    signature?: string;
+    signer?: string;
+    polymarketOrderId?: string;
   }): Promise<void> {
     const record = await this.cache.findById(params.requestId);
     if (!record) throw new Error("SIGNING_REQUEST_NOT_FOUND");
@@ -115,6 +119,8 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
 
     const now = newCurrentUTCEpoch();
     if (record.expiresAt <= now) throw new Error("SIGNING_REQUEST_EXPIRED");
+    // Legacy rows (pre 2026-05-15) have no `kind` — treat as 'userop'.
+    const kind = record.kind ?? "userop";
     // A record can be flipped to `expired` *before* its `expiresAt` by
     // `cancelPendingForUser` when a newer user input supersedes the dispatch
     // that created it. Without this guard a late /response would still flip
@@ -158,12 +164,28 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       }
     }
 
+    if (!rejected) {
+      if (kind === "eoa_tx") {
+        if (!params.txHash || !/^0x[0-9a-fA-F]{64}$/.test(params.txHash)) {
+          log.warn(
+            { step: "bad-txhash", requestId: params.requestId, kind, userId: record.userId },
+            "missing or malformed txHash on non-rejected eoa_tx /response",
+          );
+          throw new Error("SIGNING_REQUEST_BAD_TXHASH");
+        }
+      } else if (kind === "eip712") {
+        await this.verifyEip712(record, params);
+      }
+    }
+
     await this.cache.resolve(
       params.requestId,
       rejected ? "rejected" : "approved",
       params.txHash,
       params.errorCode,
       params.errorMessage,
+      params.signature,
+      params.polymarketOrderId,
     );
     log.info(
       {
@@ -390,6 +412,55 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
     }
     bucket.set(hashKey, { requestId, ts: now });
     return { ok: true };
+  }
+
+  // `recoverTypedDataAddress` re-hashes the typed data with EIP-712 domain
+  // separation and ecrecovers the signer locally — no network, no privkey.
+  private async verifyEip712(
+    record: SigningRequestRecord,
+    params: { requestId: string; signature?: string; polymarketOrderId?: string },
+  ): Promise<void> {
+    if (!params.signature || !/^0x[0-9a-fA-F]+$/.test(params.signature)) {
+      throw new Error("SIGNING_REQUEST_BAD_SIGNATURE");
+    }
+    if (!record.domain || !record.types || !record.primaryType || !record.message) {
+      throw new Error("SIGNING_REQUEST_MISSING_TYPED_DATA");
+    }
+    if (!record.expectedSigner) {
+      throw new Error("SIGNING_REQUEST_MISSING_EXPECTED_SIGNER");
+    }
+    let recovered: string;
+    try {
+      recovered = await recoverTypedDataAddress({
+        domain: record.domain,
+        types: record.types,
+        primaryType: record.primaryType,
+        message: record.message,
+        signature: params.signature as `0x${string}`,
+      } as Parameters<typeof recoverTypedDataAddress>[0]);
+    } catch (err) {
+      log.error(
+        { err, requestId: params.requestId, userId: record.userId },
+        "eip712 signature recovery threw",
+      );
+      throw new Error("SIGNING_REQUEST_SIGNATURE_RECOVERY_FAILED");
+    }
+    if (recovered.toLowerCase() !== record.expectedSigner.toLowerCase()) {
+      log.warn(
+        {
+          step: "eip712-signer-mismatch",
+          requestId: params.requestId,
+          userId: record.userId,
+          recovered,
+          expected: record.expectedSigner,
+        },
+        "recovered signer does not match expected signer",
+      );
+      throw new Error("SIGNING_REQUEST_SIGNER_MISMATCH");
+    }
+    if (record.purpose === "polymarket_order" && !params.polymarketOrderId) {
+      throw new Error("SIGNING_REQUEST_MISSING_POLYMARKET_ORDER_ID");
+    }
   }
 
   async cancelPendingForUser(userId: string): Promise<number> {

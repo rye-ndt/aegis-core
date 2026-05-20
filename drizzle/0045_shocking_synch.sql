@@ -1,0 +1,1 @@
+CREATE INDEX "pm_bets_by_status_updated_at" ON "prediction_market_bets" USING btree ("status","updated_at_epoch");

@@ -48,6 +48,9 @@ export interface ISigningRequestUseCase {
      * shown to the user. Used to surface on-chain revert reasons that the FE
      * interpreter mapped to `errorCode: 'unknown'`. */
     errorRaw?: string;
+    signature?: string;
+    signer?: string;
+    polymarketOrderId?: string;
   }): Promise<void>;
 
   /**
