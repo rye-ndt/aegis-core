@@ -124,8 +124,10 @@ class FakeRepo implements IPredictionMarketBetRepository {
   async findActiveBetForUser(): Promise<BetRow | null> { return null; }
   async insertPosition(): Promise<void> {}
   async listOpenPositionsForUser(): Promise<PositionRow[]> { return []; }
+  async listPositionsForUser(): Promise<PositionRow[]> { return []; }
   async getPosition(): Promise<null> { return null; }
   async updatePositionStatus(): Promise<void> {}
+  async tryTransitionPositionStatus(): Promise<boolean> { return true; }
   async decrementPositionShares(): Promise<void> {}
   async findPositionByOpeningBetId(): Promise<null> { return null; }
   async findPositionByClosingBetId(): Promise<null> { return null; }
@@ -176,11 +178,15 @@ const fakeProfileDB: IUserProfileDB = {
   async findByUserId() { return { eoaAddress: EOA } as never; },
 } as unknown as IUserProfileDB;
 
+const fakePmRepo = {
+  async getMarketsByIds() { return []; },
+} as unknown as import("../../interface/predictionMarket/IPredictionMarketRepository").IPredictionMarketRepository;
+
 function makeUseCase(repo: FakeRepo) {
   const signing = new FakeSigningRequestUseCase();
   const miniApp = new FakeMiniAppCache();
   const redis = new FakeRedis();
-  const uc = new PredictionMarketBetUseCase(repo, fakeProfileDB, fakeAdapter, {
+  const uc = new PredictionMarketBetUseCase(repo, fakeProfileDB, fakeAdapter, fakePmRepo, {
     getSigningRequestUseCase: () => signing as unknown as ISigningRequestUseCase,
     miniAppRequestCache: miniApp,
     redis: redis as unknown as Redis,
@@ -399,7 +405,7 @@ test("close-drift: live mid drifts beyond tolerance → bet FAILED, position rol
   const signing = new FakeSigningRequestUseCase();
   const miniApp = new FakeMiniAppCache();
   const redis = new FakeRedis();
-  const uc = new PredictionMarketBetUseCase(repo, fakeProfileDB, fakeAdapter, {
+  const uc = new PredictionMarketBetUseCase(repo, fakeProfileDB, fakeAdapter, fakePmRepo, {
     getSigningRequestUseCase: () => signing as unknown as ISigningRequestUseCase,
     miniAppRequestCache: miniApp,
     redis: redis as unknown as Redis,

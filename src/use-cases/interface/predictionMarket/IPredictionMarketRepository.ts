@@ -38,6 +38,16 @@ export interface IPredictionMarketRepository {
     clusterSetHash?: string,
   ): Promise<void>;
   getMarketsByRun(runId: string): Promise<RawMarket[]>;
+  /**
+   * Resolve a set of `marketId`s to their latest known snapshot row, regardless
+   * of whether the markets are still in the most recent run. Used by FE-facing
+   * endpoints that render market metadata (e.g. `marketQuestion`) for stored
+   * objects like positions, which may outlive a market's appearance in the
+   * universe. Dedups the input, picks the row from the newest run per
+   * `marketId`. Empty input returns `[]` without touching the DB. Markets
+   * fully absent from the snapshots table are simply omitted from the result.
+   */
+  getMarketsByIds(ids: string[]): Promise<RawMarket[]>;
   getClustersByRun(runId: string): Promise<StoredCluster[]>;
   /**
    * Single-cluster lookup. Added for the paper-bet placement use-case

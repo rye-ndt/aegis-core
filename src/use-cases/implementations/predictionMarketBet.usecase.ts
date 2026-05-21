@@ -41,12 +41,14 @@ import type {
   IPredictionMarketBetUseCase,
   InitiateBetIntentInput,
   InitiateBetIntentResult,
+  PositionListItem,
   ReconcileResult,
   SubmitAmountInput,
   SubmitAmountResult,
 } from "../interface/predictionMarket/IPredictionMarketBetUseCase";
 import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
 import type { IPredictionMarketReceiptBroadcaster } from "../interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
+import type { IPredictionMarketRepository } from "../interface/predictionMarket/IPredictionMarketRepository";
 
 const log = createLogger("predictionMarketBetUseCase");
 
@@ -102,6 +104,8 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     private readonly repo: IPredictionMarketBetRepository,
     private readonly userProfileDB: IUserProfileDB,
     private readonly polymarketAdapter: IPolymarketReadAdapter,
+    // Read-only: bet/position writes never touch this port.
+    private readonly predictionMarketRepo: IPredictionMarketRepository,
     signQueueDeps?: {
       getSigningRequestUseCase: () => ISigningRequestUseCase | undefined;
       miniAppRequestCache: IMiniAppRequestCache;
@@ -337,6 +341,31 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     return this.repo.listOpenPositionsForUser(userId);
   }
 
+  async listOpenPositionsForDisplay(userId: string): Promise<PositionListItem[]> {
+    const positions = await this.repo.listPositionsForUser(userId, ["open", "closing"]);
+    if (positions.length === 0) return [];
+    const uniqueMarketIds = Array.from(new Set(positions.map((p) => p.marketId)));
+    const markets = await this.predictionMarketRepo.getMarketsByIds(uniqueMarketIds);
+    const questionByMarketId = new Map<string, string>();
+    for (const m of markets) questionByMarketId.set(m.marketId, m.question);
+    return positions.map((p) => {
+      const question = questionByMarketId.get(p.marketId);
+      if (!question) {
+        log.warn(
+          { positionId: p.id, marketId: p.marketId, userId },
+          "pm-position-missing-market",
+        );
+      }
+      const fallback = `Market #${p.marketId.slice(0, 8)}`;
+      const outcomeLabel = p.side.toLowerCase() === "yes" ? "YES" : "NO";
+      return {
+        ...p,
+        marketQuestion: question ?? fallback,
+        outcomeLabel,
+      };
+    });
+  }
+
   async finalizeBet(
     input: FinalizeBetInput,
   ): Promise<{ bet: BetRow; position: PositionRow | null; closedPosition: PositionRow | null }> {
@@ -529,7 +558,23 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       betKind: "close",
       parentBetId: position.openingBetId,
     });
-    await this.repo.updatePositionStatus(position.id, "closing", { closingBetId: bet.id });
+    // Atomic claim: only one concurrent caller wins the open→closing flip.
+    // The losers' freshly inserted close-bets are immediately FAILED so they
+    // don't drift into the sign queue via the stuck-bet sweeper.
+    const claimed = await this.repo.tryTransitionPositionStatus(
+      position.id,
+      "open",
+      "closing",
+      { closingBetId: bet.id },
+    );
+    if (!claimed) {
+      await this.repo.setBetFailure(bet.id, "close-lost-race");
+      log.warn(
+        { userId: input.userId, positionId: position.id, betId: bet.id, step: "close-race-lost" },
+        "close-position",
+      );
+      throw new Error("POSITION_WRONG_STATUS:closing");
+    }
     log.info(
       { userId: input.userId, positionId: position.id, betId: bet.id, step: "close-confirmed" },
       "close-position",

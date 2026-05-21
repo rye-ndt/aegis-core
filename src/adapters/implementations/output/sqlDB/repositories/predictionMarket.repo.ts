@@ -1,4 +1,4 @@
-import { desc, eq, gte, inArray } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { newUuid } from "../../../../../helpers/uuid";
 import type {
@@ -53,6 +53,29 @@ function toBp(price: number): number {
 
 function fromBp(bp: number): number {
   return bp / PRICE_TO_BP;
+}
+
+type SnapshotRow = typeof predictionMarketSnapshots.$inferSelect;
+
+function toRawMarket(r: SnapshotRow): RawMarket {
+  return {
+    marketId: r.marketId,
+    slug: r.slug,
+    question: r.question,
+    resolutionCriteria: r.resolutionCriteria,
+    category: r.category,
+    resolutionEpochSec: r.resolutionEpochSec,
+    yesPrice: fromBp(r.yesPriceBp),
+    noPrice: fromBp(r.noPriceBp),
+    openInterestUsd: fromCents(r.openInterestUsdCents),
+    volume7dUsd: fromCents(r.volume7dUsdCents),
+    liquidityUsd: fromCents(r.liquidityUsdCents),
+    isActive: true,
+    isDisputed: false,
+    outcomesCount: 2,
+    url: r.url,
+    polymarketEventId: r.polymarketEventId,
+  };
 }
 
 export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository {
@@ -194,24 +217,35 @@ export class DrizzlePredictionMarketRepo implements IPredictionMarketRepository 
       .select()
       .from(predictionMarketSnapshots)
       .where(eq(predictionMarketSnapshots.runId, runId));
-    return rows.map((r) => ({
-      marketId: r.marketId,
-      slug: r.slug,
-      question: r.question,
-      resolutionCriteria: r.resolutionCriteria,
-      category: r.category,
-      resolutionEpochSec: r.resolutionEpochSec,
-      yesPrice: fromBp(r.yesPriceBp),
-      noPrice: fromBp(r.noPriceBp),
-      openInterestUsd: fromCents(r.openInterestUsdCents),
-      volume7dUsd: fromCents(r.volume7dUsdCents),
-      liquidityUsd: fromCents(r.liquidityUsdCents),
-      isActive: true,
-      isDisputed: false,
-      outcomesCount: 2,
-      url: r.url,
-      polymarketEventId: r.polymarketEventId,
-    }));
+    return rows.map((r) => toRawMarket(r));
+  }
+
+  async getMarketsByIds(ids: string[]): Promise<RawMarket[]> {
+    if (ids.length === 0) return [];
+    const unique = Array.from(new Set(ids));
+    // Correlated subquery: for each requested marketId pick the row whose run
+    // has the highest created_at_epoch. Positions on markets dropped from the
+    // latest run still resolve to their last-seen question text.
+    const rows = await this.db
+      .select()
+      .from(predictionMarketSnapshots)
+      .where(
+        and(
+          inArray(predictionMarketSnapshots.marketId, unique),
+          eq(
+            predictionMarketSnapshots.runId,
+            sql`(
+              SELECT s2.run_id
+              FROM ${predictionMarketSnapshots} s2
+              JOIN ${predictionMarketRuns} r2 ON r2.run_id = s2.run_id
+              WHERE s2.market_id = ${predictionMarketSnapshots.marketId}
+              ORDER BY r2.created_at_epoch DESC
+              LIMIT 1
+            )`,
+          ),
+        ),
+      );
+    return rows.map((r) => toRawMarket(r));
   }
 
   async getClustersByRun(runId: string): Promise<StoredCluster[]> {

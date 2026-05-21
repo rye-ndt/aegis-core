@@ -18,6 +18,19 @@ import type {
  * the artifacts the FE produces.
  */
 
+/**
+ * HTTP-shape extension of `PositionRow` for the FE positions list. The DB row
+ * stays unchanged; this DTO carries the cross-aggregate fields (market
+ * metadata) the FE renders. Computed in the use-case so the join lives on
+ * one side of the port boundary, not in the HTTP handler.
+ */
+export interface PositionListItem extends PositionRow {
+  /** Human question text for the position's market, or a truncated-id fallback. */
+  marketQuestion: string;
+  /** `"YES"` or `"NO"` for binary markets (the only universe today). */
+  outcomeLabel: string;
+}
+
 export interface InitiateBetIntentInput {
   userId: string;
   findingId: string | null;
@@ -124,6 +137,16 @@ export interface IPredictionMarketBetUseCase {
   getBetIntent(userId: string, intentId: string): Promise<BetIntentRow | null>;
   getActiveIntent(userId: string): Promise<BetIntentRow | null>;
   listOpenPositions(userId: string): Promise<PositionRow[]>;
+
+  /**
+   * FE-facing variant of `listOpenPositions`: returns the same set of rows
+   * (status in `'open'` or `'closing'`) but enriches each with the human
+   * `marketQuestion` and binary `outcomeLabel` so the mini-app positions list
+   * can render without doing a second join. Markets that have aged out of the
+   * snapshots table fall back to a truncated id label and emit a warn log —
+   * the position still renders so the user can close it.
+   */
+  listOpenPositionsForDisplay(userId: string): Promise<PositionListItem[]>;
 
   /**
    * FE has reported a terminal Polymarket outcome. Writes filled shares,

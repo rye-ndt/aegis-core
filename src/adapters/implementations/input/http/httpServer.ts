@@ -2,6 +2,7 @@ import http from "node:http";
 import { URL } from "node:url";
 import { z } from "zod";
 import { CHAIN_CONFIG, getNativeTokenInfo, getUsdcAddress } from "../../../../helpers/chainConfig";
+import { humanizeCloseError } from "../../../../helpers/errors/predictionMarketCloseErrors";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
 import type { IAuthUseCase } from "../../../../use-cases/interface/input/auth.interface";
@@ -291,6 +292,8 @@ export class HttpApiServer {
       [{ method: "POST",   regex: /^\/predictionMarket\/intent\/([0-9a-f-]+)\/cancel$/ }, (req, res, _u, id) => this.handlePmCancelIntent(req, res, id)],
       [{ method: "GET",    regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)$/ }, (req, res, _u, id) => this.handlePmGetBet(req, res, id)],
       [{ method: "GET",    regex: /^\/predictionMarket\/orderbook\/([^/]+)$/ }, (req, res, _u, id) => this.handlePmOrderbook(req, res, id)],
+      [{ method: "GET",    regex: /^\/predictionMarket\/positions\/([0-9a-f-]+)\/previewClose$/ }, (req, res, _u, id) => this.handlePmPositionPreviewClose(req, res, id)],
+      [{ method: "POST",   regex: /^\/predictionMarket\/positions\/([0-9a-f-]+)\/close$/ }, (req, res, _u, id) => this.handlePmPositionClose(req, res, id)],
       [{ method: "POST",   regex: /^\/aa\/bundler\/(\d+)$/ }, (req, res, _u, chainIdRaw) => this.handleBundlerProxy(req, res, chainIdRaw)],
     ];
   }
@@ -1467,7 +1470,7 @@ export class HttpApiServer {
     const [setup, intent, positions] = await Promise.all([
       this.predictionMarketBetUseCase.ensureUserSetup(userId).catch(() => null),
       this.predictionMarketBetUseCase.getActiveIntent(userId),
-      this.predictionMarketBetUseCase.listOpenPositions(userId),
+      this.predictionMarketBetUseCase.listOpenPositionsForDisplay(userId),
     ]);
     return this.sendJson(res, 200, { setup, activeIntent: intent, openPositions: positions });
   }
@@ -1521,11 +1524,100 @@ export class HttpApiServer {
   }
 
   private async handlePmListPositions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const reqId = this.reqLogIds.get(req) ?? "?";
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    const positions = await this.predictionMarketBetUseCase.listOpenPositions(userId);
-    return this.sendJson(res, 200, positions);
+    const positions = await this.predictionMarketBetUseCase.listOpenPositionsForDisplay(userId);
+    log.info(
+      { reqId, userId, step: "succeeded", count: positions.length },
+      "pm-list-positions",
+    );
+    return this.sendJson(res, 200, { positions });
+  }
+
+  /**
+   * Shared prelude for the mini-app close endpoints. Authenticates, checks the
+   * use-case is wired, then calls `previewClose` and dispatches:
+   *   - returns `{ userId, preview }` on the happy path — caller continues.
+   *   - returns `null` when the response has already been written (auth fail,
+   *     service unavailable, position not open, domain error from previewClose).
+   * Keeps `handlePmPositionPreviewClose` and `handlePmPositionClose` in lockstep.
+   */
+  private async resolvePmCloseContext(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    positionId: string,
+    logName: string,
+  ): Promise<
+    | {
+        userId: string;
+        useCase: IPredictionMarketBetUseCase;
+        preview: NonNullable<Awaited<ReturnType<IPredictionMarketBetUseCase["previewClose"]>>>;
+      }
+    | null
+  > {
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    const userId = await this.extractUserId(req);
+    if (!userId) { this.sendJson(res, 401, { error: "Unauthorized" }); return null; }
+    const useCase = this.predictionMarketBetUseCase;
+    if (!useCase) { this.sendJson(res, 503, { error: "Not available" }); return null; }
+    log.info({ reqId, userId, positionId, step: "started" }, logName);
+    try {
+      // Live re-quote: preview→POST drift can be material on thin books, so
+      // every close-path entry refreshes the bid before recording refPriceBps.
+      const preview = await useCase.previewClose(userId, positionId);
+      if (!preview) {
+        log.info({ reqId, userId, positionId, step: "failed", outcome: "not-open" }, logName);
+        this.sendJson(res, 404, { code: "POSITION_NOT_OPEN", error: "That position is no longer open." });
+        return null;
+      }
+      return { userId, useCase, preview };
+    } catch (err) {
+      log.error({ err, reqId, userId, positionId, step: "failed" }, logName);
+      const { httpStatus, code, message } = humanizeCloseError(err);
+      this.sendJson(res, httpStatus, { code, error: message });
+      return null;
+    }
+  }
+
+  private async handlePmPositionPreviewClose(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    positionId: string,
+  ): Promise<void> {
+    const ctx = await this.resolvePmCloseContext(req, res, positionId, "pm-position-preview-close");
+    if (!ctx) return;
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    log.info({ reqId, userId: ctx.userId, positionId, step: "succeeded" }, "pm-position-preview-close");
+    return this.sendJson(res, 200, ctx.preview);
+  }
+
+  private async handlePmPositionClose(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    positionId: string,
+  ): Promise<void> {
+    const ctx = await this.resolvePmCloseContext(req, res, positionId, "pm-position-close");
+    if (!ctx) return;
+    const reqId = this.reqLogIds.get(req) ?? "?";
+    try {
+      const { enqueuedRequestId } = await ctx.useCase.initiateClose({
+        userId: ctx.userId,
+        positionId,
+        clientOrderId: newUuid(),
+        refPriceBps: ctx.preview.bestBidPriceBps,
+      });
+      log.info(
+        { reqId, userId: ctx.userId, positionId, step: "succeeded", enqueuedRequestId },
+        "pm-position-close",
+      );
+      return this.sendJson(res, 200, { enqueuedRequestId });
+    } catch (err) {
+      log.error({ err, reqId, userId: ctx.userId, positionId, step: "failed" }, "pm-position-close");
+      const { httpStatus, code, message } = humanizeCloseError(err);
+      return this.sendJson(res, httpStatus, { code, error: message });
+    }
   }
 
   private async extractUserId(req: http.IncomingMessage): Promise<string | null> {

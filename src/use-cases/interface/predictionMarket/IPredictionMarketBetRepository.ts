@@ -261,7 +261,33 @@ export interface IPredictionMarketBetRepository {
 
   // ── Positions ─────────────────────────────────────────────────────────
   insertPosition(row: PositionRow): Promise<void>;
+  /**
+   * Atomic `from → to` status transition. Issues a single `UPDATE ... WHERE id=?
+   * AND status=?` and returns whether a row was actually updated. Use for races
+   * (multiple `initiateClose` calls on the same position): only the writer that
+   * observes `status=from` wins; everyone else gets `false` and must back out.
+   * `patch` columns are applied in the same statement.
+   */
+  tryTransitionPositionStatus(
+    id: string,
+    from: PositionStatus,
+    to: PositionStatus,
+    patch?: Partial<PositionRow>,
+  ): Promise<boolean>;
+  /**
+   * Default convenience for callers that want "what the user can see / act on
+   * right now": positions in `'open'` or `'closing'`. Equivalent to
+   * `listPositionsForUser(userId, ['open', 'closing'])`.
+   */
   listOpenPositionsForUser(userId: string): Promise<PositionRow[]>;
+  /**
+   * Status-parameterised position read. Used by callers that need a different
+   * status filter than the open/closing default — e.g. the FE-facing
+   * positions list (open + closing for the "Closing…" disabled state) or an
+   * internal sweeper that wants only `'open'`. Empty `statuses` returns `[]`
+   * without hitting the DB.
+   */
+  listPositionsForUser(userId: string, statuses: PositionStatus[]): Promise<PositionRow[]>;
   getPosition(id: string): Promise<PositionRow | null>;
   updatePositionStatus(id: string, status: PositionStatus, patch?: Partial<PositionRow>): Promise<void>;
   /** Decrement a position's `sizeShares` by `delta` (decimal-string subtract). */

@@ -1,5 +1,11 @@
 # Capabilities Status
 
+## closePosition: mini-app close peer + shared error mapping — 2026-05-21
+
+- `ClosePositionCapability` is no longer the only entry point for closing a prediction-market position. `POST /predictionMarket/positions/:id/close` (mini-app surface) is a peer of the chat `confirm_close:<id>` callback. Both go through `previewClose` (re-quote) → `initiateClose` on `IPredictionMarketBetUseCase` — one state machine, two front doors.
+- Error-message mapping for the close path moved out of `ClosePositionCapability` into `be/src/helpers/errors/predictionMarketCloseErrors.ts`. The capability now calls `humanizeCloseError(err).message`; the HTTP handler additionally reads `httpStatus` + `code` from the same mapping. Future error codes are added in one place.
+- The "second close" race (chat preview card open, mini-app closes first) returns "That position is no longer open." on the late tap — same copy from both surfaces because both share the helper.
+
 ## placeBet/closePosition: Slice F cutover — 2026-05-21
 
 - `PREDICTION_MARKETS_USE_SIGN_QUEUE` default flipped to `true`. The capabilities and use-case no longer accept the flag — the queue is the only path.

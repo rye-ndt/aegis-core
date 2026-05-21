@@ -4,6 +4,7 @@ import {
   formatPriceBps,
   formatUsdcCents,
 } from "../../../../helpers/format/humanFormat";
+import { humanizeCloseError } from "../../../../helpers/errors/predictionMarketCloseErrors";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newUuid } from "../../../../helpers/uuid";
 import { openMiniAppArtifact } from "./miniAppLaunch";
@@ -95,7 +96,7 @@ export class ClosePositionCapability implements Capability<ClosePositionParams> 
           { err, userId: ctx.userId, positionId: params.positionId },
           "close-confirm-failed",
         );
-        return chat(`Couldn't start the close: ${humanizeError(err)}`);
+        return chat(humanizeCloseError(err).message);
       }
     }
 
@@ -157,14 +158,3 @@ function terminal(text: string): CollectResult<ClosePositionParams> {
   return { kind: "terminal", artifact: { kind: "chat", text } };
 }
 
-function humanizeError(err: unknown): string {
-  if (!(err instanceof Error)) return "Something went wrong.";
-  const code = err.message.split(":")[0] ?? "";
-  switch (code) {
-    case "POSITION_NOT_FOUND":     return "That position no longer exists.";
-    case "POSITION_WRONG_STATUS":  return "This position isn't open for closing right now.";
-    case "BET_IN_FLIGHT":          return "You already have a bet being placed. Wait for it to settle, then try again.";
-    default:
-      return "Couldn't start the close. Please try again.";
-  }
-}

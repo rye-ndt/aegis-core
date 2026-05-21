@@ -1648,6 +1648,7 @@ export class AssistantInject {
       this.getPredictionMarketBetRepo(),
       this.getSqlDB().userProfiles,
       this.getPolymarketAdapter(),
+      this.getPredictionMarketRepo(),
       signQueueDeps,
     );
     return this._predictionMarketBetUseCase;

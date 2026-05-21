@@ -373,13 +373,18 @@ export class DrizzlePredictionMarketBetRepo implements IPredictionMarketBetRepos
   }
 
   async listOpenPositionsForUser(userId: string): Promise<PositionRow[]> {
+    return this.listPositionsForUser(userId, ["open", "closing"]);
+  }
+
+  async listPositionsForUser(userId: string, statuses: PositionStatus[]): Promise<PositionRow[]> {
+    if (statuses.length === 0) return [];
     const rows = await this.db
       .select()
       .from(predictionMarketPositions)
       .where(
         and(
           eq(predictionMarketPositions.userId, userId),
-          inArray(predictionMarketPositions.status, ["open", "closing"]),
+          inArray(predictionMarketPositions.status, statuses),
         ),
       );
     return rows.map((r) => this.positionRow(r));
@@ -393,6 +398,35 @@ export class DrizzlePredictionMarketBetRepo implements IPredictionMarketBetRepos
       .limit(1);
     const r = rows[0];
     return r ? this.positionRow(r) : null;
+  }
+
+  async tryTransitionPositionStatus(
+    id: string,
+    from: PositionStatus,
+    to: PositionStatus,
+    patch: Partial<PositionRow> = {},
+  ): Promise<boolean> {
+    const set: Record<string, unknown> = { status: to };
+    for (const k of [
+      "currentValueUsdcCents",
+      "resolvedOutcome",
+      "realizedPnlUsdcCents",
+      "closingBetId",
+      "closedAtEpoch",
+    ] as const) {
+      if (patch[k] !== undefined) set[k] = patch[k];
+    }
+    const updated = await this.db
+      .update(predictionMarketPositions)
+      .set(set)
+      .where(
+        and(
+          eq(predictionMarketPositions.id, id),
+          eq(predictionMarketPositions.status, from),
+        ),
+      )
+      .returning({ id: predictionMarketPositions.id });
+    return updated.length > 0;
   }
 
   async updatePositionStatus(
