@@ -24,12 +24,28 @@ const WINDOW_TOL_SEC = 24 * 60 * 60;
 // effectively turned the `eq`/`in` keyword check into a no-op. The remaining
 // keywords are anchored to operator semantics; if none match the criteria,
 // the proposal goes to review.
+//
+// `eq` 2026-05-20 expansion: original `equal|exactly|==` was too narrow.
+// The LLM correctly emits `op: eq` for both "stays at value X" framings
+// (e.g. "no change in Fed rates") and "X wins the championship" framings.
+// `becomes`/`named` were considered but would fire on too much unrelated
+// English — added only the patterns observed in the failing review queue.
 const OPERATOR_KEYWORDS: Record<Operator, RegExp[]> = {
   gte: [/\breach(?:es|ed)?\b/, /\bhit(?:s|ting)?\b/, /\babove\b/, /\bat least\b/, /≥/, />=/],
   gt: [/(?<![<>=])>(?![=])/, /\bmore than\b/, /\bexceed(?:s|ed)?\b/, /\bover\b/],
   lte: [/\bbelow\b/, /\bunder\b/, /\bat most\b/, /≤/, /<=/, /\bno (?:more|higher) than\b/],
   lt: [/(?<![<>=])<(?![=])/, /\bless than\b/, /\bbelow\b/],
-  eq: [/\bequal(?:s|ed)?\b/, /\bexactly\b/, /==/],
+  eq: [
+    /\bequal(?:s|ed)?\b/,
+    /\bexactly\b/,
+    /==/,
+    /\bno change\b/,
+    /\bunchanged\b/,
+    /\bstays?\b/,
+    /\bremains?\b/,
+    /\bholds? at\b/,
+    /\bwin(?:s|ning)?\b/,
+  ],
   in: [/\bone of\b/, /\bany of\b/, /\bbetween\b/, /\bamong\b/, /\bfrom the (?:set|list)\b/],
 };
 
@@ -40,7 +56,35 @@ const RESOLUTION_SOURCE_ALIASES: Partial<Record<string, RegExp[]>> = {
   BLS_OFFICIAL: [/\bbls\b/i, /bureau of labor/i],
   FOMC_OFFICIAL: [/\bfomc\b/i, /federal open market/i, /federal reserve/i],
   AP_CALL: [/\bap\b/, /associated press/i],
-  OFFICIAL_LEAGUE_SCORE: [/official.*score/i, /league.*office/i],
+  // Intentionally a soft check: this alias list is the LAST line of defence
+  // for `resolutionSource = OFFICIAL_LEAGUE_SCORE`, and broad patterns
+  // (`\bfinals?\b`, `championship`) subsume most of the league-specific
+  // anchors below. That's by design — the LLM only picks
+  // OFFICIAL_LEAGUE_SCORE for sports markets, so the discriminating signal
+  // is the source pick itself, not this alias check. The narrow anchors
+  // stay as readability hints for future maintainers expanding the list.
+  // Pre-2026-05-20 baseline was `/official.*score/i, /league.*office/i`
+  // which matched almost no real criteria — the failure was being too
+  // strict, not too permissive.
+  OFFICIAL_LEAGUE_SCORE: [
+    /\bnba\b/i,
+    /\bnfl\b/i,
+    /\bnhl\b/i,
+    /\bmlb\b/i,
+    /\bipl\b/i,
+    /\bepl\b/i,
+    /\buefa\b/i,
+    /\bfifa\b/i,
+    /premier.league/i,
+    /champions.league/i,
+    /super.bowl/i,
+    /stanley.cup/i,
+    /\bfinals?\b/i,
+    /world.cup/i,
+    /championship/i,
+    /official.*score/i,
+    /league.*office/i,
+  ],
   UMA_PROSE_JUDGMENT: [/\buma\b/i, /optimistic oracle/i],
   BLOOMBERG_TERMINAL: [/bloomberg/i],
 };

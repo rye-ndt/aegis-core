@@ -16,7 +16,8 @@
     "db:generate": "drizzle-kit generate && ts-node scripts/fix-journal.ts",
     "db:migrate": "ts-node src/migrate.ts",
     "db:push": "drizzle-kit push",
-    "db:studio": "drizzle-kit studio"
+    "db:studio": "drizzle-kit studio",
+    "check:no-clob-secrets": "bash scripts/check-no-clob-secrets.sh"
   },
   "keywords": [
     "hexagonal",

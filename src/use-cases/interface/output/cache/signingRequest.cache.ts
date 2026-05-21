@@ -41,6 +41,11 @@ export type SigningRequestRecord = {
   // (signature, domain, types, message) doesn't equal `expectedSigner`.
   expectedSigner?: string;
   betId?: string;
+  // Set on rows enqueued by the prediction-market setup state machine
+  // (gas funding, approvals, clob_auth). `resolveRequest` forwards it on
+  // `SigningResolutionEvent` so the BE wrapper can fan out to
+  // `notifySetupSignResolved`.
+  setupForUserId?: string;
   positionId?: string;
   polymarketOrderId?: string;
   signature?: string;

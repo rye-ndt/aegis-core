@@ -1,5 +1,32 @@
 # Capabilities Status
 
+## placeBet/closePosition: Slice F cutover — 2026-05-21
+
+- `PREDICTION_MARKETS_USE_SIGN_QUEUE` default flipped to `true`. The capabilities and use-case no longer accept the flag — the queue is the only path.
+- `PlaceBetCapability` / `ClosePositionCapability` constructors no longer take a `useSignQueue` arg. `openMiniAppArtifact` emits `${MINI_APP_URL}?requestId=<id>` when an id is present; falls back to bare `MINI_APP_URL` when the use-case is still waiting on setup (sweeper kicks the first request shortly after).
+- The legacy `?startapp=place_bet:` / `?startapp=close_position:` deep-link verbs are gone from the BE. The matching FE handlers were removed in FE Slice 3.
+- Use-case interface lost `recordSetupStep`, `transitionBet`, `reportPriceDrift`, `recordRefundTxHash`. `IPredictionMarketBetUseCase` is now setup-by-advance + intent + reconcile + finalize only.
+- The placeBet re-tap "executing" card opens the mini-app with no params (the sweeper or use-case's idempotent `advance()` is responsible for refreshing the queue entry).
+
+## placeBet/closePosition: Slice E (route deletion + adapter trim) — 2026-05-21
+
+Capabilities themselves were untouched; the changes were structural in `httpServer.ts` + `polymarketAdapter.ts` + the bet use-case interface.
+
+## placeBet/closePosition: one-click mini-app URL via `?requestId=` — 2026-05-20 (Slice D)
+
+**What was done:**
+- `PlaceBetCapability` and `ClosePositionCapability` constructors now take a `useSignQueue: boolean` (DI-injected from `PREDICTION_MARKETS_ENV.useSignQueue`, default `false`).
+- When the flag is on AND the use-case enqueued the first sign request inline, `openMiniAppArtifact` emits `${MINI_APP_URL}?requestId=<enqueuedRequestId>` instead of `${MINI_APP_URL}?startapp=place_bet:<intentId>` / `?startapp=close_position:<positionId>`. The mini-app's `useRequest` hook then bootstraps from `window.location.search.get('requestId')` and chains via `fetchNextRequest` — the same convention `/send` + `/swap` use through `sign_calldata` artifacts.
+- `confirmBetIntent` / `initiateClose` widened return types to `{ bet, enqueuedRequestId: string | null }`. `null` covers: legacy mode (flag off), setup-incomplete (the bet sits in `INITIATED` until setup completes — `kickPendingBetsForUser` picks it up later), and slot already locked by a prior advance.
+
+**Why this shape (not a new endpoint):**
+- The plan's "open the mini app with no start_param" idea required the FE to introduce a "find next pending request for user" entry path. Re-using `?requestId=` keeps zero FE surface area changes — the FE already bootstraps from that param for `/send` + `/swap`.
+- Two options were considered: (a) widen `confirmBetIntent` return to include the id, or (b) add `peekFirstPendingRequestId(userId)` to the signing-request cache. (a) won — fewer round-trips, no new cache surface.
+
+**New conventions:**
+- New capabilities that orchestrate multi-step signing on the prediction-market sign queue MUST take a `useSignQueue` constructor arg and dual-ship: emit `?requestId=<id>` when on, fall back to the legacy `?startapp=` URL when off. The default fallback URL keeps working under the legacy FE handler until the cutover slice.
+- `IPredictionMarketBetUseCase.confirmBetIntent` / `initiateClose` / `advance` / `setupAdvance` all return `{ enqueuedRequestId: string | null }`. Callers that don't need the id (poller, sweeper, /response notifies) discard it; chat-side capability paths thread it into the open-mini-app artifact.
+
 ## telegram: switch to @grammyjs/runner + suppress mid-flow notify cards — 2026-05-08
 
 **What was done:**

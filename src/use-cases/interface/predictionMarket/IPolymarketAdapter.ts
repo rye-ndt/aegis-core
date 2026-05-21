@@ -1,23 +1,27 @@
 /**
- * Stage-4 Polymarket adapter port.
+ * Stage-4 Polymarket adapter port. **Read-only as of Slice E (2026-05-21).**
  *
- * Wraps the Polymarket CLOB integration so the place-bet capability never
- * touches HTTP/SDK details directly. The adapter owns:
- *   - L1 → L2 auth (one-time per user; secrets returned + stored encrypted)
- *   - signed-order construction (BE-side helper for orders the FE pre-signed)
- *   - order POST/cancel + fill polling
- *   - orderbook top-of-book reads
+ * The pre-Slice-E adapter owned three FE-facing write paths: L1→L2 auth
+ * (`/auth/api-key` returning `apiKey` / `secret` / `passphrase`), `POST /order`,
+ * and `DELETE /order`. Those moved off the BE entirely: orders are signed in
+ * the mini-app from the queued EIP-712 sign request and submitted directly to
+ * `clob.polymarket.com` by the FE, which holds the HMAC creds in
+ * Telegram CloudStorage. The BE never sees signatures, never sees creds, never
+ * POSTs to Polymarket — only reads.
  *
- * Polymarket-specific knowledge (EIP-712 domain, sigType enum, HMAC header
- * shape) lives entirely behind this interface so the capability layer stays
- * adapter-agnostic.
+ * Non-custodial invariant: nothing in this port returns or carries a
+ * signature, EIP-712 message, or unsealed credential. CI grep gate
+ * (`npm run check:no-clob-secrets`) fails if a new caller reintroduces
+ * `apiKey` / `passphrase` / `placeOrder` / `cancelOrder` / `deriveApiKey`
+ * outside the existing HMAC-bearing read paths.
+ *
+ * Surviving read methods (`getOrderStatus`, `getPositions`) still use the
+ * Polymarket L2 HMAC headers because the `/data/order/:id` and
+ * `/data/positions?user=…` endpoints are L2-protected. The HMAC payload is
+ * built from creds previously written via the (now-removed) `storePolymarketCreds`
+ * write path — existing rows remain valid; the `polymarket_creds_enc` column
+ * drops in a follow-up migration after the 30-day deprecation window.
  */
-
-export interface PolymarketCreds {
-  apiKey: string;
-  secret: string;
-  passphrase: string;
-}
 
 export interface OrderbookTopOfBook {
   /** Best bid price as a 0..1 decimal (probability of YES). */
@@ -26,47 +30,6 @@ export interface OrderbookTopOfBook {
   bestAskPrice: number;
   /** Mid price = (bid + ask) / 2. Convenience for drift checks. */
   midPrice: number;
-}
-
-export interface PlaceOrderInput {
-  /** EIP-712 EOA-maker signature already produced by the FE/session-key. */
-  signature: `0x${string}`;
-  /** Polymarket order tuple — adapter forwards verbatim to /order. */
-  order: SignedPolymarketOrder;
-  /** Idempotency key on the BE side; Polymarket uses `clientOrderId` too. */
-  clientOrderId: string;
-  /** AES-encrypted cred envelope for L2 HMAC. Adapter decrypts internally. */
-  polymarketCredsEnc: string;
-  /** Maker EOA address; populates the `POLY_ADDRESS` L2 HMAC header. */
-  makerAddress: `0x${string}`;
-  userId: string;
-}
-
-/**
- * Shape of an EOA-signed Polymarket order. Field names match the on-chain
- * struct verified by the CTFExchange. Mirrors `SignedOrder` from
- * `@polymarket/clob-client`.
- */
-export interface SignedPolymarketOrder {
-  salt: string;
-  maker: `0x${string}`;
-  signer: `0x${string}`;
-  taker: `0x${string}`;
-  tokenId: string;
-  makerAmount: string;
-  takerAmount: string;
-  expiration: string;
-  nonce: string;
-  feeRateBps: string;
-  side: "BUY" | "SELL";
-  /** Polymarket signature type enum: 0 = EOA (plain ECDSA). */
-  signatureType: 0 | 1 | 2;
-}
-
-export interface PlaceOrderResult {
-  polymarketOrderId: string;
-  /** Provider response status (`matched` / `live` / `delayed`). */
-  status: string;
 }
 
 export interface OrderFillStatus {
@@ -83,24 +46,7 @@ export interface OrderFillStatus {
   isTerminal: boolean;
 }
 
-export interface DeriveCredsInput {
-  userId: string;
-  /** EOA signature over Polymarket's L1 EIP-712 "Generate API key" payload. */
-  l1Signature: `0x${string}`;
-  /** Nonce used in the L1 payload — echoed back to /auth/api-key. */
-  nonce: string;
-  /** Address that produced the L1 signature (= maker EOA). */
-  address: `0x${string}`;
-}
-
-export interface IPolymarketAdapter {
-  /**
-   * Derives L2 HMAC creds via Polymarket's `/auth/api-key`. Returns the raw
-   * creds; the caller is responsible for AES-encrypting them and persisting
-   * via `IPredictionMarketBetRepository.setPolymarketCredsEnc`.
-   */
-  deriveApiKey(input: DeriveCredsInput): Promise<PolymarketCreds>;
-
+export interface IPolymarketReadAdapter {
   /** Live top-of-book for a YES/NO outcome token. Cached ~2s by impl. */
   getOrderbookTopOfBook(tokenId: string): Promise<OrderbookTopOfBook>;
 
@@ -116,12 +62,6 @@ export interface IPolymarketAdapter {
     side: "BUY" | "SELL";
     depthLevels: number;
   }): Promise<Array<{ priceFraction: number; shares: number }>>;
-
-  /** POST /order with HMAC L2 headers. */
-  placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult>;
-
-  /** Cancel a live or partially-filled order. */
-  cancelOrder(polymarketOrderId: string, polymarketCredsEnc: string, makerAddress: `0x${string}`): Promise<void>;
 
   /** Single-shot fill status. Caller polls; this method is stateless. */
   getOrderStatus(polymarketOrderId: string, polymarketCredsEnc: string, makerAddress: `0x${string}`): Promise<OrderFillStatus>;

@@ -109,3 +109,255 @@ without a new FE build.
   upstream failures; the route maps it to 504 (vs 502 for other throws,
   503 for `no-bundler-configured`). `declaredLen` is the inbound
   `Content-Length` header used for the 413 pre-check.
+
+## Prediction-market LLM cost reduction — Phase A (2026-05-20)
+
+Plan: `be/constructions/2026-05-20-prediction-markets-llm-cost-reduction.md`.
+Goal of Phase A is a quota cut without behaviour change: drop reasoning
+effort, raise cache hit rate, all env-flippable.
+
+### What changed
+
+- **Per-call cost knobs are now env-driven** (`predictionMarketEnv.ts`):
+  - `PREDICTION_MARKETS_CLASSIFIER_REASONING_EFFORT` (default `"low"`,
+    accepts `minimal|low|medium|high`)
+  - `PREDICTION_MARKETS_CLASSIFIER_MAX_TOKENS` (default `8000`)
+  - `PREDICTION_MARKETS_DETECTOR_REASONING_EFFORT` (default `"low"`)
+  - `PREDICTION_MARKETS_DETECTOR_MAX_TOKENS` (default `8000`)
+  Adapter configs (`OpenAIPredictionMarketClassifierConfig`,
+  `OpenAIPredictionMarketDetectorConfig`) require both fields — wired through
+  `assistant.di.ts`. Prior baselines were inlined `(12000, medium)`; restore
+  knob for missed findings is `(12000, medium)`, emergency-restore for the
+  detector is `(16000, high)` (requires OpenRouter per-request credit cap
+  uplift — default cap is ~13k and anything above 402s).
+- **Detector cache widened.** `PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS`
+  default 50 → 200 (2¢ buckets — still inside the 4¢ finding-threshold
+  pipeline), `PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC` default 1800 → 3600
+  (so the 30-min scan tick lands at least one hit between drifts).
+- **Classifier cache key tightened.** Dropped `resolutionEpochSec` from the
+  key; key is now `(promptVersion, model, sha256(sortedMarketIds))`. Worst
+  case (a moved resolution date) we serve a stale cluster up to
+  `clusterCacheTtlSec` (24h); upstream `reclusterDelta` /
+  `maxReclusterAgeMs` still trigger refresh on universe drift.
+- **`PREDICTION_MARKETS_RECLUSTER_DELTA`** default 10 → 25. At `topN=100`,
+  10% churn between ticks is normal and was forcing a full re-cluster
+  every tick.
+- **Prompt version bumped v3 → v4** to invalidate pre-change cached drafts
+  on first deploy (reasoned under the old budget). The version is part of
+  both the classifier and detector cache keys.
+
+### New interface convention — detector returns `DetectorResult`
+
+`IPredictionMarketDetector.detect()` now returns
+`{ drafts: DraftFinding[]; cacheHit: boolean }` instead of bare
+`DraftFinding[]`. The scan use case rolls `cacheHit` up over LLM-served
+clusters only and emits `detectorCacheHits` / `detectorCacheMisses` in the
+`step: "stage3-end"` log line — the Grafana signal that proves the A2
+widened bucket + TTL bump are actually paying off. The deterministic
+detector always returns `cacheHit: false` (no LLM cache to hit), so the
+ratio reflects the LLM cache only. Callers must destructure
+`{ drafts, cacheHit }` from `detector.detect(...)`.
+
+### New scan-job startup banner field
+
+`llmCost` block on the worker startup log records the effective
+classifier/detector reasoning effort, maxTokens, price bucket bps, cache
+TTL, and reclusterDelta — so operators can confirm a worker is on the
+cheaper defaults without grepping multiple files.
+
+### Verification gate (manual, before merge)
+
+Per the plan, run the worker locally with `PREDICTION_MARKETS_ENABLED=true`
+for ≥3 consecutive ticks against prod Polymarket data and confirm:
+
+1. Tick 2/3 show ≥50% `detectorCacheHits / (hits + misses)` over
+   LLM-served clusters.
+2. No new `finish_reason=length` warnings (the 8000-token budget is plenty
+   at `effort: low`; if it fires, raise `…_MAX_TOKENS`).
+3. Findings count within ±30% of the pre-change rolling baseline.
+
+Phase B (deterministic detector cut-over by subject) and Phase C
+(event-id-first clustering) are not in this change — they remain proposed.
+
+## Prediction-market LLM cost reduction — Phase B audit (2026-05-20)
+
+B1 audit ran against the live DB (latest scan = run
+`a00e0dcc-2a5c-445f-9067-bbd32e28e236`, 35 markets). **Phase B cut-over is
+blocked**; recording so the next agent doesn't redo the audit.
+
+| Check | Result | Bar |
+|---|---|---|
+| `measure-subject-distribution.ts` coverage | 22.9% (8/35 matched, 27 OTHER) | ≥85% |
+| `prediction_market_facts` populated rows | 4 / 35 markets (all regex_verified) | ~all of topN |
+| `prediction_market_findings_shadow` rows in last 7d | 0 | needs population |
+| `diff-findings-vs-shadow.ts` per-subject agreement | `BTC_USD_SPOT` 0% (8 LLM-only), `UNKNOWN` 0% (17 LLM-only) | ≥85% per subject |
+
+`PREDICTION_MARKETS_SHADOW_MODE=true` is set — shadow mode is on but
+producing zero findings because the deterministic detector short-circuits
+with `mode: "facts-missing-or-unverified"` whenever a cluster has any
+member without a verified fact. With 4/35 facts, almost every cluster
+short-circuits.
+
+OTHER-bucket samples that the seed vocabulary doesn't cover (worth
+extending `SUBJECTS` in `marketFactVocabularies.ts`): Iran/Hormuz
+geopolitical, MicroStrategy treasury sales, AI-model rankings, Taiwan
+invasion, Korean elections, NBA MVP, UK PM tenure.
+
+### Preconditions before Phase B can resume
+
+1. **Vocabulary expansion** — add subject codes for the recurring OTHER
+   themes (this is "Part 2" of the deterministic-detection construction
+   series, not part of the LLM-cost reduction plan). Re-run
+   `measure-subject-distribution.ts`; gate it on the ≥85% floor.
+2. **Backfill / accelerate extraction** — currently 11% of the universe has
+   facts. The hourly `extractFactsIntervalMs` extractor should converge
+   the rest; investigate why it hasn't and whether a one-shot backfill
+   over historical snapshots is warranted.
+3. **Accumulate shadow data** — once 1 + 2 are in place, leave shadow
+   mode running for ≥7 days so `prediction_market_findings_shadow`
+   populates and `diff-findings-vs-shadow.ts` can compute meaningful
+   per-subject agreement.
+
+Until all three preconditions clear, no subject can be added to
+`PREDICTION_MARKETS_DETERMINISTIC_SUBJECTS`, and B3 (further
+`detectorMaxTokens` reduction, gated on ≥80% deterministic cut-over)
+stays parked.
+
+### Phase B precondition work — partial (2026-05-20)
+
+Acted on (1) and (2) above:
+
+**Vocabulary expansion — `marketFactVocabularies.ts`.** Added six
+high-confidence partitions covering the largest OTHER recurring themes
+found in the B1 audit: `FIFA_WORLD_CUP_2026_WINNER`,
+`EUROVISION_2026_WINNER`, `NHL_STANLEY_CUP_2026_WINNER`,
+`IPL_2026_WINNER`, `WTI_CRUDE_USD_SPOT`, `LARGEST_COMPANY_MARKET_CAP`.
+`measure-subject-distribution.ts` got matching heuristic classifiers so
+the coverage gate re-runs against the expanded list. Out of scope and
+intentionally not added: foreign-election variants, MicroStrategy
+treasury moves, Elon-tweet counts, one-off geopolitical events — these
+have <3 markets each (below the cluster floor) or no clean partition
+semantics.
+
+**Verifier vocabulary — `marketFactRegexVerifier.ts`.** Two gaps were
+making the LLM's correct outputs fail regex:
+
+- `eq` operator keywords were `equal|exactly|==` only. Both
+  "no change in Fed rates" (FED_FUNDS_RATE) and "X wins championship"
+  (sports winners) emit `op: eq` legitimately; added
+  `no change|unchanged|stays|remains|holds at|win(s|ning)?|becomes?|named`.
+- `OFFICIAL_LEAGUE_SCORE` alias was `/official.*score/i, /league.*office/i`
+  which matched almost nothing. Broadened to cover the league /
+  tournament names that real championship-market criteria reference
+  (`nba|nfl|nhl|mlb|ipl|epl|uefa|fifa|premier league|champions league|
+  super bowl|stanley cup|finals|world cup|championship`).
+
+Sanity-checked on observed failure cases: "Will there be no change in
+Fed interest rates…" (FED_FUNDS_RATE, op=eq, src=FOMC_OFFICIAL) and
+"Will the Cleveland Cavaliers win the 2026 NBA Finals?"
+(NBA_FINALS_2026_WINNER, op=eq, src=OFFICIAL_LEAGUE_SCORE) both now
+verify `ok: true`. All 22 existing `node --test`
+`marketFactRegexVerifier.test.ts` assertions still pass.
+
+**Extractor prompt version v1 → v2.** Mostly bookkeeping — the
+extractor doesn't cache LLM calls and the usecase re-extracts whenever
+no verified fact exists, so the next hourly tick will re-attempt every
+review-queued market under the expanded SUBJECTS + loosened verifier.
+v2 is the version stamp on facts written from this point.
+
+### Investigation note — extractor review-queue duplication
+
+`predictionMarketExtractFacts.usecase.ts:48` filters by
+`!existing.has(m.marketId)` against `prediction_market_facts` only — it
+does NOT consult the review queue. Markets stuck in review are
+re-extracted on every hourly tick; each failure appends another row to
+`prediction_market_extraction_reviews`. The current 478 pending rows
+include heavy per-market duplication ("Will the Cleveland Cavaliers
+win the 2026 NBA Finals?" appears 25 times). Once vocabulary + verifier
+land, the next hourly tick should promote the bulk to verified facts
+and the duplication stops naturally. The pre-existing duplicate review
+rows are stale data, not a blocker — a separate cleanup pass can
+purge them when convenient.
+
+### Remaining Phase B preconditions
+
+(3) above still applies: shadow mode needs ≥7 days post-(1)+(2) to
+accumulate enough `prediction_market_findings_shadow` rows for
+`diff-findings-vs-shadow.ts` to compute meaningful per-subject
+agreement. Re-run the B1 audit then; cut-over only the subjects that
+clear the ≥85% bar.
+
+## Prediction-market LLM cost reduction — Phase C (2026-05-20)
+
+Phase C removes the Stage-2 LLM classifier from the hot path by trusting
+Polymarket's native `event_id` grouping. Independent of Phase B (which
+targets the Stage-3 detector); they touch different pipeline stages.
+
+### C1 audit (latest 35-market scan run)
+
+| Metric | Value |
+|---|---|
+| `polymarket_event_id` coverage | 35/35 = **100%** |
+| Markets in event_id groups ≥ `MIN_CLUSTER_MEMBERS` (3) | 6 (17.1%) |
+| Markets in event_id pairs (2) | 14 |
+| Singletons | 15 |
+| Existing LLM clusters in the run | 3 |
+| LLM clusters subsumed by a single event_id | **2/3 (66.7%)** |
+
+Two of three LLM clusters in the latest run are perfectly redundant with
+Polymarket's own grouping ("2026 NBA Finals winner", "2026 Peruvian
+presidential election"). The third spans 2 event_ids (Binance BTC/USDT
+price moves) and is where the LLM contributes genuine cross-event causal
+reasoning. Conclusion: event-id-first clustering is a clean win for the
+~66% of LLM clusters that just re-discover Polymarket's grouping; the LLM
+stays as fallback for cross-event groupings and for markets in singleton
+or 2-market event_id buckets.
+
+Audit script: `be/scripts/measure-event-id-coverage.ts`.
+
+### C2 — event_id-first clustering
+
+`predictionMarketDeterministicCluster.usecase.ts` now accepts an
+`eventIdFirst: boolean` arg. When true:
+
+1. Group `universe` markets by `polymarketEventId`.
+2. Any group with ≥`MIN_CLUSTER_MEMBERS` (3) members and a non-null
+   event_id emits a `DraftCluster` with
+   `expectedRelationships: [{ kind: 'mutually_exclusive', ... }]` and
+   `confidence: 'high'`. No fact lookup; no LLM call.
+3. Markets consumed by this pass do NOT enter the existing fact-based
+   pass or the LLM classifier — they're added to `usedMarketIds` and
+   filtered out of `llmEligible`.
+
+`derivedSubject` is intentionally left null on event_id clusters — they
+bypass the fact pipeline, so `pickDetector` still routes them to the LLM
+detector (subject-based deterministic detection requires a
+`MarketFact.subject` match, which event_id clusters don't have).
+
+### Gating
+
+New env: `PREDICTION_MARKETS_EVENT_ID_CLUSTERING_ENABLED` (default
+`false`). Threaded through `predictionMarketScan.usecase.ts` →
+`deterministicCluster.cluster({ eventIdFirst })`.
+
+The scan use case now invokes the deterministic clusterer when ANY of
+`cutOverSubjects.size > 0 || env.shadowMode || env.eventIdClusteringEnabled`
+holds — previously it gated on `cutOverSubjects.size > 0` only. The
+clusterer's fact-based pass (and the `factRepo.getByMarketIds` fetch) is
+now short-circuited when `!shadowMode && cutOverSubjects.size === 0` so
+event_id-only mode doesn't pay for facts it won't use.
+
+### C3 (parked)
+
+The plan's C3 step — drop classifier `reasoningEffort` to `minimal` and
+`maxTokens` to 4000 — is gated on C2 being measurably effective in
+production. Flip after one full day of `eventIdClusteringEnabled=true`
+shows the LLM classifier is mostly serving the long tail; do not flip
+preemptively. The Phase A env knobs
+(`PREDICTION_MARKETS_CLASSIFIER_REASONING_EFFORT` / `_MAX_TOKENS`)
+already make this a one-line env change.
+
+### New scan-job startup banner field
+
+`eventIdClusteringEnabled` is now part of the `flags` block at worker
+startup.

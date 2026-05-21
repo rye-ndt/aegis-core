@@ -8,6 +8,7 @@ import {
 } from "../../../../use-cases/interface/predictionMarket/relationshipPrimitives";
 import type {
   DetectorInput,
+  DetectorResult,
   IPredictionMarketDetector,
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketDetector";
 import type { IPredictionMarketFactRepository } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketFactRepository";
@@ -43,7 +44,10 @@ export class DeterministicPredictionMarketDetector implements IPredictionMarketD
     private readonly cfg: DeterministicDetectorConfig,
   ) {}
 
-  async detect(input: DetectorInput): Promise<DraftFinding[]> {
+  // Deterministic detector has no LLM call to cache; `cacheHit` is always
+  // false in the returned `DetectorResult` so the scan rollup attributes
+  // all hits to the LLM path.
+  async detect(input: DetectorInput): Promise<DetectorResult> {
     const { cluster, members, reqId } = input;
     const start = Date.now();
 
@@ -57,7 +61,7 @@ export class DeterministicPredictionMarketDetector implements IPredictionMarketD
         { step: "detect-deterministic-end", reqId, clusterId: cluster.clusterId, drafts: 0, mode: "too-few-members", durationMs: Date.now() - start },
         "detect",
       );
-      return [];
+      return { drafts: [], cacheHit: false };
     }
 
     const factById = await this.factRepo.getByMarketIds(members.map((m) => m.marketId));
@@ -70,7 +74,7 @@ export class DeterministicPredictionMarketDetector implements IPredictionMarketD
         { reqId, clusterId: cluster.clusterId, mode: "facts-missing-or-unverified" },
         "deterministic detect skipped — cluster will be re-served by LLM next tick",
       );
-      return [];
+      return { drafts: [], cacheHit: false };
     }
 
     const kind: ExpectedRelationshipKind =
@@ -111,7 +115,7 @@ export class DeterministicPredictionMarketDetector implements IPredictionMarketD
       "detect",
     );
 
-    return drafts;
+    return { drafts, cacheHit: false };
   }
 
   // Only adjacent pairs after sort — sufficient for transitive relations

@@ -27,18 +27,24 @@ const MIN_CLUSTER_MEMBERS = 3;
 export interface DeterministicClusterArgs {
   runId: string;
   universe: RawMarket[];
-  /** When empty, no real clusters are emitted (production-safe default).
-   *  Shadow mode bypasses this filter via `shadowMode`. */
+  /** When empty, no fact-based clusters are emitted (production-safe default).
+   *  Shadow mode bypasses this filter via `shadowMode`. Independent of
+   *  `eventIdFirst` — the event_id pass runs without facts. */
   cutOverSubjects: Set<SubjectCode>;
   reqId: string;
-  /** Shadow mode runs the algorithm over the entire universe regardless of
-   *  cut-over subject membership. Output is meant for `prediction_market_
-   *  clusters_shadow`, never the live clusters table. */
+  /** Shadow mode runs the fact-based algorithm over the entire universe
+   *  regardless of cut-over subject membership. Output is meant for
+   *  `prediction_market_clusters_shadow`, never the live clusters table. */
   shadowMode?: boolean;
   /** Optional pre-fetched facts — supplied by the scan to avoid a second
    *  `getByMarketIds` round-trip when both the production and shadow calls
    *  cover the same universe. */
   factsByMarketId?: Map<string, MarketFact>;
+  /** Phase C: when true, group markets sharing a Polymarket `event_id`
+   *  into `mutually_exclusive` clusters BEFORE the fact-based pass.
+   *  Markets consumed by the event_id pass do not enter the fact-based
+   *  pass or the LLM classifier. Off by default. */
+  eventIdFirst?: boolean;
 }
 
 export interface DeterministicClusterResult {
@@ -51,7 +57,7 @@ export class PredictionMarketDeterministicClusterUseCase {
   constructor(private readonly factRepo: IPredictionMarketFactRepository) {}
 
   async cluster(args: DeterministicClusterArgs): Promise<DeterministicClusterResult> {
-    const { runId, universe, cutOverSubjects, reqId, shadowMode = false, factsByMarketId } = args;
+    const { runId, universe, cutOverSubjects, reqId, shadowMode = false, factsByMarketId, eventIdFirst = false } = args;
     log.info(
       {
         step: "cluster-deterministic-start",
@@ -60,6 +66,7 @@ export class PredictionMarketDeterministicClusterUseCase {
         universeSize: universe.length,
         cutOverSubjects: Array.from(cutOverSubjects),
         shadowMode,
+        eventIdFirst,
       },
       "cluster",
     );
@@ -72,11 +79,49 @@ export class PredictionMarketDeterministicClusterUseCase {
       return { deterministic: [], llmEligible: [] };
     }
 
+    const deterministic: DraftCluster[] = [];
+    const usedMarketIds = new Set<string>();
+    let eventIdClusters = 0;
+
+    if (eventIdFirst) {
+      // Phase C: trust Polymarket's `event_id` grouping as a structural
+      // partition. ≥3-market events are emitted as `mutually_exclusive`
+      // without consulting facts; 2-market events fall through so the LLM
+      // can still cluster them with cross-event siblings if warranted.
+      const byEventId = new Map<string, RawMarket[]>();
+      for (const m of universe) {
+        const id = m.polymarketEventId;
+        if (!id) continue;
+        const bucket = byEventId.get(id) ?? [];
+        bucket.push(m);
+        byEventId.set(id, bucket);
+      }
+      for (const [eventId, members] of byEventId) {
+        if (members.length < MIN_CLUSTER_MEMBERS) continue;
+        deterministic.push(buildEventIdCluster(eventId, members));
+        for (const m of members) usedMarketIds.add(m.marketId);
+        eventIdClusters += 1;
+      }
+    }
+
+    // Skip the fact-based pass (and the DB fetch for facts) when we know it
+    // will emit nothing: no cut-over subjects active AND not in shadow.
+    const factBasedActive = shadowMode || cutOverSubjects.size > 0;
+    if (!factBasedActive) {
+      const llmEligible = universe.filter((m) => !usedMarketIds.has(m.marketId));
+      log.info(
+        { step: "cluster-deterministic-end", reqId, runId, deterministic: deterministic.length, eventIdClusters, factBasedClusters: 0, llmEligible: llmEligible.length, shadowMode, eventIdFirst },
+        "cluster",
+      );
+      return { deterministic, llmEligible };
+    }
+
+    const factUniverse = universe.filter((m) => !usedMarketIds.has(m.marketId));
     const factById = factsByMarketId
-      ?? (await this.factRepo.getByMarketIds(universe.map((m) => m.marketId)));
+      ?? (await this.factRepo.getByMarketIds(factUniverse.map((m) => m.marketId)));
 
     const byEvent = new Map<string, Map<string, Member[]>>();
-    for (const m of universe) {
+    for (const m of factUniverse) {
       const fact = factById.get(m.marketId);
       if (!fact || !fact.regexVerified) continue;
       if (fact.subject === "OTHER") continue;
@@ -92,9 +137,6 @@ export class PredictionMarketDeterministicClusterUseCase {
       bucket.push({ market: m, fact });
       families.set(familyKey, bucket);
     }
-
-    const deterministic: DraftCluster[] = [];
-    const usedMarketIds = new Set<string>();
 
     for (const [, families] of byEvent) {
       for (const [familyKey, members] of families) {
@@ -140,14 +182,43 @@ export class PredictionMarketDeterministicClusterUseCase {
         reqId,
         runId,
         deterministic: deterministic.length,
+        eventIdClusters,
+        factBasedClusters: deterministic.length - eventIdClusters,
         llmEligible: llmEligible.length,
         shadowMode,
+        eventIdFirst,
       },
       "cluster",
     );
 
     return { deterministic, llmEligible };
   }
+}
+
+function buildEventIdCluster(eventId: string, members: RawMarket[]): DraftCluster {
+  const marketIds = members.map((m) => m.marketId).sort();
+  return {
+    // Human-readable theme for broadcaster UI; causalDriver keeps the
+    // structural identifier so downstream code can map back to the event.
+    theme: `Polymarket event ${eventId}`,
+    causalDriver: `polymarket-event:${eventId}`,
+    marketIds,
+    expectedRelationships: [
+      {
+        kind: "mutually_exclusive",
+        description: `Σ P(market ∈ polymarket-event:${eventId}) ≤ 1`,
+      },
+    ],
+    rationale:
+      "Deterministic cluster from Polymarket event_id grouping (same event = mutually-exclusive partition).",
+    // Polymarket's structural grouping is a stronger signal than the LLM's
+    // inferred causal driver; we trust it as `high`.
+    confidence: "high",
+    // No `derivedSubject` — event_id clusters bypass the fact pipeline, so
+    // `pickDetector` routes them to the LLM detector (subject-based
+    // deterministic detection requires a `MarketFact.subject` match).
+    derivedSubject: null,
+  };
 }
 
 function sourcesPairwiseCompatible(members: { fact: MarketFact }[]): boolean {

@@ -87,7 +87,7 @@ async function runFixture(f: Fixture): Promise<VerifiedFinding[]> {
     findingMinLiquidityUsd: 0,
   });
 
-  const drafts = await detector.detect({ cluster: f.cluster, members: f.members, reqId: "replay" });
+  const { drafts } = await detector.detect({ cluster: f.cluster, members: f.members, reqId: "replay" });
   const verified = await verifier.verify({
     reqId: "replay",
     runId: f.runId,

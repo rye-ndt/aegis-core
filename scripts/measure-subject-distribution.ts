@@ -117,6 +117,30 @@ const CLASSIFIERS: Classifier[] = [
     subject: "UEFA_CHAMPIONS_LEAGUE_2025_26",
     match: (t) => /champions.league|uefa/.test(t),
   },
+  {
+    subject: "FIFA_WORLD_CUP_2026_WINNER",
+    match: (t) => /(fifa|world.cup).*2026|2026.*(fifa|world.cup)/.test(t),
+  },
+  {
+    subject: "EUROVISION_2026_WINNER",
+    match: (t) => /eurovision/.test(t),
+  },
+  {
+    subject: "NHL_STANLEY_CUP_2026_WINNER",
+    match: (t) => /stanley.cup|nhl.champion/.test(t),
+  },
+  {
+    subject: "IPL_2026_WINNER",
+    match: (t) => /indian.premier.league|\bipl\b/.test(t),
+  },
+  {
+    subject: "WTI_CRUDE_USD_SPOT",
+    match: (t) => /(wti|crude.oil|\bcl\b).*\$|\$.*(wti|crude)/.test(t),
+  },
+  {
+    subject: "LARGEST_COMPANY_MARKET_CAP",
+    match: (t) => /largest.company.*market.cap|biggest.company.*market.cap/.test(t),
+  },
 ];
 
 function classify(question: string, slug: string, category: string | null): SubjectCode {

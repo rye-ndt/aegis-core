@@ -1,5 +1,7 @@
 import type {
+  Eip712Purpose,
   ResolvedSigningRequest,
+  SigningRequestKind,
   SigningRequestRecord,
 } from '../output/cache/signingRequest.cache';
 
@@ -34,6 +36,22 @@ export type SigningResolutionEvent = {
    * intermediate steps of multi-step capability flows. Failure-with-errorCode
    * branches still fire (those are recoverable user-facing prompts). */
   silentResolution?: boolean;
+  /** Forwarded from `SigningRequestRecord` so the BE-side wrapper can fan
+   * resolutions out to the prediction-market bet driver
+   * (`notifySignResolved` / `notifySetupSignResolved`). Non-PM resolutions
+   * leave both unset. */
+  betId?: string;
+  setupForUserId?: string;
+  /** Forwarded from `SigningRequestRecord.kind` so the bet driver can route
+   * the resolution to the right slot (`userop` / `eoa_tx` / `eip712`). */
+  kind?: SigningRequestKind;
+  /** Forwarded from `SigningRequestRecord.purpose` for eip712 rows so the
+   * bet driver can distinguish `clob_auth` from `polymarket_order`. */
+  purpose?: Eip712Purpose;
+  /** FE-reported Polymarket order id, attached on a successful eip712
+   * `polymarket_order` resolution. Threaded so the bet driver can record
+   * it on the bet row before the position poller takes over. */
+  polymarketOrderId?: string;
 };
 
 export interface ISigningRequestUseCase {

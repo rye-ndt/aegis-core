@@ -1,12 +1,9 @@
 import type {
   BetIntentRow,
   BetRow,
-  BetStatus,
   PositionRow,
-  SetupStep,
   UserSetupRow,
 } from "./IPredictionMarketBetRepository";
-import type { PolymarketCreds } from "./IPolymarketAdapter";
 import type {
   Eip712Purpose,
   SigningRequestKind,
@@ -92,23 +89,23 @@ export interface IPredictionMarketBetUseCase {
    */
   ensureUserSetup(userId: string): Promise<UserSetupRow>;
 
-  /** Persist a setup-state transition driven by the FE mini-app. */
-  recordSetupStep(userId: string, step: SetupStep, artifact?: SetupArtifact): Promise<UserSetupRow>;
-
-  /**
-   * AES-encrypts the L2 creds returned from `polymarket.deriveApiKey` and
-   * stores them under `polymarket_creds_enc`. Atomic with `setupStep=authed`.
-   */
-  storePolymarketCreds(userId: string, creds: PolymarketCreds): Promise<void>;
-
   /** Step 1 of chat flow — `place_bet:findingId:side` callback. */
   initiateBetIntent(input: InitiateBetIntentInput): Promise<InitiateBetIntentResult>;
 
   /** Step 2 — user replies with amount. */
   submitAmount(input: SubmitAmountInput): Promise<SubmitAmountResult>;
 
-  /** Step 3 — user taps Confirm; writes the executable bet row. */
-  confirmBetIntent(input: ConfirmBetIntentInput): Promise<BetRow>;
+  /**
+   * Step 3 — user taps Confirm; writes the executable bet row.
+   *
+   * Returns the new bet row and, when the first sign-request was enqueued
+   * during this call, the `enqueuedRequestId` so the capability can emit
+   * `${MINI_APP_URL}?requestId=<id>`. `null` when the bet is still waiting
+   * on setup completion (setupAdvance kicks the first request later via
+   * notifySetupSignResolved → kickPendingBetsForUser), or when the slot
+   * was already locked by a prior advance().
+   */
+  confirmBetIntent(input: ConfirmBetIntentInput): Promise<{ bet: BetRow; enqueuedRequestId: string | null }>;
 
   /** Cancel intent before it executes. */
   cancelBetIntent(userId: string, intentId: string): Promise<void>;
@@ -121,18 +118,6 @@ export interface IPredictionMarketBetUseCase {
    * deeplink was broken or the FE flow was interrupted).
    */
   cancelExecutingIntent(userId: string, intentId: string): Promise<void>;
-
-  /**
-   * Generic FE-driven state transition during execution. Caller validates the
-   * bet belongs to the user (via `getBet`) before calling. Logs the transition
-   * with `step` matching the new status (e.g. `bridge-submitted`, `sca-to-eoa`).
-   */
-  transitionBet(
-    userId: string,
-    betId: string,
-    status: BetStatus,
-    patch?: { bridgeIntentId?: string; scaToEoaTxHash?: string; polymarketOrderId?: string },
-  ): Promise<BetRow>;
 
   /** Read methods used by FE polling endpoints. */
   getBet(userId: string, betId: string): Promise<BetRow | null>;
@@ -170,7 +155,7 @@ export interface IPredictionMarketBetUseCase {
    * `betKind='close'`, mark the position `closing`, return the bet so the
    * mini-app deep-link can be emitted.
    */
-  initiateClose(input: InitiateCloseInput): Promise<BetRow>;
+  initiateClose(input: InitiateCloseInput): Promise<{ bet: BetRow; enqueuedRequestId: string | null }>;
 
   /**
    * Reconcile a single user's local positions against Polymarket's view.
@@ -182,32 +167,7 @@ export interface IPredictionMarketBetUseCase {
     polymarketCredsEnc: string;
   }): Promise<ReconcileResult>;
 
-  /**
-   * FE-reported drift between the live top-of-book and the bet's recorded
-   * `refPriceBps`. Returns an `ok` decision when within tolerance (FE may
-   * proceed to sign), or `reconfirm` with an updated reference price when the
-   * caller should re-prompt the user in chat.
-   */
-  reportPriceDrift(input: {
-    userId: string;
-    betId: string;
-    livePriceBps: number;
-  }): Promise<
-    | { decision: "ok" }
-    | { decision: "reconfirm"; previousRefPriceBps: number; newRefPriceBps: number; driftBps: number }
-  >;
-
-  /**
-   * Records the on-chain hash of the residual-funds refund UserOp the
-   * mini-app submitted (EOA → user's Polygon SCA). Clears `refundRequired` on
-   * success so the FE state-machine doesn't loop.
-   */
-  recordRefundTxHash(userId: string, betId: string, txHash: string): Promise<BetRow>;
-
-  // ── 2026-05-15 zero-sign bet rewrite (Slice B) ────────────────────────────
-  // Methods below are dormant unless PREDICTION_MARKETS_USE_SIGN_QUEUE=true,
-  // and even then only fire when a sign-request resolves with a `betId` set
-  // (Slice D is what writes such rows). Existing FE flows are untouched.
+  // ── Sign-queue driver ───────────────────────────────────────────────────
 
   /**
    * Idempotent driver. Reads the bet's current status and enqueues the next
@@ -219,7 +179,7 @@ export interface IPredictionMarketBetUseCase {
    * NX lock keyed on `(betId, slot)` so duplicate advances produce at most
    * one open sign request.
    */
-  advance(betId: string): Promise<void>;
+  advance(betId: string): Promise<{ enqueuedRequestId: string | null }>;
 
   /**
    * Called by the /response handler after a sign-request resolved (approved
@@ -253,7 +213,7 @@ export interface IPredictionMarketBetUseCase {
    * advance on the matching /response resolution. Idempotent like
    * `advance`; safe to call from `start()` and from `notifySetupSignResolved`.
    */
-  setupAdvance(userId: string): Promise<void>;
+  setupAdvance(userId: string): Promise<{ enqueuedRequestId: string | null }>;
 
   /**
    * /response fan-out target for setup-driven rows (setupForUserId set).
@@ -271,7 +231,3 @@ export interface IPredictionMarketBetUseCase {
   }): Promise<void>;
 }
 
-export interface SetupArtifact {
-  bridgeIntentId?: string;
-  approvalsTxHashes?: string[];
-}

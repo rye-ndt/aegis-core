@@ -24,17 +24,9 @@ import type { IYieldOptimizerUseCase } from "../../../../use-cases/interface/yie
 import type { ILoyaltyUseCase } from "../../../../use-cases/interface/input/loyalty.interface";
 import type { ITransferHistoryUseCase } from "../../../../use-cases/interface/input/transferHistory.interface";
 import type { IPredictionMarketBetUseCase } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketBetUseCase";
-import type { IPolymarketAdapter } from "../../../../use-cases/interface/predictionMarket/IPolymarketAdapter";
-import type { IPredictionMarketReceiptBroadcaster } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
-import type { IRelayClient } from "../../../../use-cases/interface/output/relay.interface";
+import type { IPolymarketReadAdapter } from "../../../../use-cases/interface/predictionMarket/IPolymarketAdapter";
 import type { IPredictionMarketRepository } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketRepository";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
-import {
-  BET_TRANSITION_STATUSES,
-  BET_TERMINAL_STATUSES,
-  IllegalBetTransitionError,
-  SETUP_STEPS,
-} from "../../../../use-cases/interface/predictionMarket/IPredictionMarketBetRepository";
 import type { SubgraphPrincipalProvider } from "../../output/yield/subgraphPrincipalProvider";
 import { isRateLimitedError } from "../../../../helpers/errors/rateLimitedError";
 import { isUnsupportedChainError } from "../../../../helpers/errors/unsupportedChainError";
@@ -148,12 +140,8 @@ export class HttpApiServer {
     private readonly getCapabilityDispatcher?: () => Promise<ICapabilityDispatcher | undefined>,
     /** Stage 4: prediction-market bet orchestration. Optional — endpoints 503 when absent. */
     private readonly predictionMarketBetUseCase?: IPredictionMarketBetUseCase,
-    /** Stage 4: Polymarket CLOB adapter (orderbook + signed-order forwarding). */
-    private readonly polymarketAdapter?: IPolymarketAdapter,
-    /** Stage 4: pushes receipt cards to chat after terminal bet/close events. */
-    private readonly predictionMarketReceiptBroadcaster?: IPredictionMarketReceiptBroadcaster,
-    /** Stage 4: Relay status passthrough for the FE bridge poller. */
-    private readonly relayClient?: IRelayClient,
+    /** Stage 4: Polymarket CLOB read-only adapter (orderbook reads). */
+    private readonly polymarketAdapter?: IPolymarketReadAdapter,
     /** Phase 4 (Part 5): admin route reads `getShadowAgreement` from here. */
     private readonly predictionMarketRepo?: IPredictionMarketRepository,
     /** AA bundler proxy (`POST /aa/bundler/:chainId`). Optional — route 503s when absent. */
@@ -233,14 +221,8 @@ export class HttpApiServer {
       "GET /loyalty/leaderboard":       (req, res, url) => this.handleGetLoyaltyLeaderboard(req, res, url),
       "GET /metrics":                   (req, res) => this.handleGetMetrics(req, res),
       "POST /health":                   (req, res) => this.handleHealth(req, res),
-      "POST /predictionMarket/setup/init":  (req, res) => this.handlePmSetupInit(req, res),
-      "POST /predictionMarket/setup/creds": (req, res) => this.handlePmSetupCreds(req, res),
       "GET /predictionMarket/state":        (req, res) => this.handlePmState(req, res),
       "GET /predictionMarket/intent/active":(req, res) => this.handlePmActiveIntent(req, res),
-      "POST /predictionMarket/order/place": (req, res) => this.handlePmPlaceOrder(req, res),
-      // Sell-side closes use the same place-order body shape (`order.side: "SELL"`).
-      // We expose the alias so the construction-doc URL surface is honest.
-      "POST /predictionMarket/order/sell":  (req, res) => this.handlePmPlaceOrder(req, res),
       "GET /predictionMarket/positions":    (req, res) => this.handlePmListPositions(req, res),
       "GET /admin/prediction-markets/shadow-agreement": (req, res, url) => this.handleShadowAgreement(req, res, url),
     };
@@ -305,17 +287,10 @@ export class HttpApiServer {
     return [
       [{ method: "POST",   regex: /^\/delegation\/([^/]+)\/signed$/ }, (req, res, _u, id) => this.handlePostDelegationSigned(req, res, id)],
       [{ method: "GET",    regex: /^\/request\/([^/]+)$/ },           (req, res, url, requestId) => this.handleGetMiniAppRequest(req, res, url, requestId)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/setup\/([a-z_]+)$/ }, (req, res, _u, step) => this.handlePmSetupStep(req, res, step)],
       [{ method: "GET",    regex: /^\/predictionMarket\/intent\/([0-9a-f-]+)$/ }, (req, res, _u, id) => this.handlePmGetIntent(req, res, id)],
       [{ method: "POST",   regex: /^\/predictionMarket\/intent\/([0-9a-f-]+)\/cancel$/ }, (req, res, _u, id) => this.handlePmCancelIntent(req, res, id)],
       [{ method: "GET",    regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)$/ }, (req, res, _u, id) => this.handlePmGetBet(req, res, id)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/transition$/ }, (req, res, _u, id) => this.handlePmTransitionBet(req, res, id)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/finalize$/ }, (req, res, _u, id) => this.handlePmFinalizeBet(req, res, id)],
-      [{ method: "GET",    regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/bridge-status$/ }, (req, res, _u, id) => this.handlePmBridgeStatus(req, res, id)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/drift-detected$/ }, (req, res, _u, id) => this.handlePmDriftDetected(req, res, id)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/bet\/([0-9a-f-]+)\/refund$/ }, (req, res, _u, id) => this.handlePmRecordRefund(req, res, id)],
       [{ method: "GET",    regex: /^\/predictionMarket\/orderbook\/([^/]+)$/ }, (req, res, _u, id) => this.handlePmOrderbook(req, res, id)],
-      [{ method: "POST",   regex: /^\/predictionMarket\/order\/cancel\/([^/]+)$/ }, (req, res, _u, id) => this.handlePmCancelOrder(req, res, id)],
       [{ method: "POST",   regex: /^\/aa\/bundler\/(\d+)$/ }, (req, res, _u, chainIdRaw) => this.handleBundlerProxy(req, res, chainIdRaw)],
     ];
   }
@@ -1485,67 +1460,6 @@ export class HttpApiServer {
     return userId;
   }
 
-  private async handlePmSetupInit(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    try {
-      const setup = await this.predictionMarketBetUseCase.ensureUserSetup(userId);
-      return this.sendJson(res, 200, setup);
-    } catch (err) {
-      log.error({ err, userId }, "pm-setup-init-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmSetupStep(req: http.IncomingMessage, res: http.ServerResponse, step: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    if (!(SETUP_STEPS as readonly string[]).includes(step)) {
-      return this.sendJson(res, 400, { error: "Invalid step" });
-    }
-    let body: unknown = {};
-    try { body = await this.readJson(req); } catch { /* empty body acceptable */ }
-    const parsed = z.object({
-      bridgeIntentId: z.string().min(1).optional(),
-      approvalsTxHashes: z.array(z.string().regex(/^0x[0-9a-fA-F]{64}$/)).optional(),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
-    try {
-      const setup = await this.predictionMarketBetUseCase.recordSetupStep(
-        userId,
-        step as (typeof SETUP_STEPS)[number],
-        parsed.data,
-      );
-      return this.sendJson(res, 200, setup);
-    } catch (err) {
-      log.error({ err, userId, step }, "pm-setup-step-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmSetupCreds(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      apiKey: z.string().min(1),
-      secret: z.string().min(1),
-      passphrase: z.string().min(1),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid creds" });
-    try {
-      await this.predictionMarketBetUseCase.storePolymarketCreds(userId, parsed.data);
-      return this.sendJson(res, 204, {});
-    } catch (err) {
-      log.error({ err, userId }, "pm-setup-creds-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
   private async handlePmState(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
@@ -1593,76 +1507,6 @@ export class HttpApiServer {
     return this.sendJson(res, 200, bet);
   }
 
-  private async handlePmTransitionBet(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      // Only non-terminal transitions go through this endpoint; FILLED/PARTIAL/
-      // UNFILLED/FAILED route through `/finalize` so the use-case can write
-      // positions and refunds atomically with the status flip.
-      status: z.enum(BET_TRANSITION_STATUSES),
-      bridgeIntentId: z.string().optional(),
-      scaToEoaTxHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/).optional(),
-      polymarketOrderId: z.string().optional(),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
-    try {
-      const { status, ...patch } = parsed.data;
-      const fresh = await this.predictionMarketBetUseCase.transitionBet(userId, id, status, patch);
-      return this.sendJson(res, 200, fresh);
-    } catch (err) {
-      if (err instanceof IllegalBetTransitionError) {
-        // 409 Conflict — the FE state machine drifted from the canonical one.
-        // Surfacing this distinctly lets the FE show "this bet has moved on,
-        // refresh" rather than treating it as a generic 5xx.
-        log.warn({ userId, betId: id, from: err.from, to: err.to }, "pm-bet-illegal-transition");
-        return this.sendJson(res, 409, { error: err.message, from: err.from, to: err.to });
-      }
-      log.error({ err, userId, betId: id }, "pm-bet-transition-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmFinalizeBet(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      outcome: z.enum(BET_TERMINAL_STATUSES),
-      filledShares: z.string().optional(),
-      filledAvgPriceBps: z.number().int().min(0).max(10_000).optional(),
-      failureReason: z.string().max(256).optional(),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
-    try {
-      const result = await this.predictionMarketBetUseCase.finalizeBet({
-        userId,
-        betId: id,
-        ...parsed.data,
-      });
-      // Receipt push is fire-and-forget — failures here mustn't fail the
-      // request, since the FE already has canonical state from the response.
-      this.predictionMarketReceiptBroadcaster
-        ?.broadcastFinalizeOutcome({
-          userId,
-          outcome: parsed.data.outcome,
-          bet: result.bet,
-          position: result.position,
-          closedPosition: result.closedPosition,
-        })
-        .catch((err) => log.warn({ err, userId, betId: id }, "pm-receipt-push-failed"));
-      return this.sendJson(res, 200, result);
-    } catch (err) {
-      log.error({ err, userId, betId: id }, "pm-bet-finalize-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
   private async handlePmOrderbook(req: http.IncomingMessage, res: http.ServerResponse, tokenId: string): Promise<void> {
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
@@ -1676,147 +1520,12 @@ export class HttpApiServer {
     }
   }
 
-  private async handlePmPlaceOrder(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.polymarketAdapter || !this.predictionMarketBetUseCase) {
-      return this.sendJson(res, 503, { error: "Not available" });
-    }
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      betId: z.string().uuid(),
-      clientOrderId: z.string().min(1),
-      signature: z.string().regex(/^0x[0-9a-fA-F]+$/),
-      order: z.object({
-        salt: z.string(), maker: z.string(), signer: z.string(), taker: z.string(),
-        tokenId: z.string(), makerAmount: z.string(), takerAmount: z.string(),
-        expiration: z.string(), nonce: z.string(), feeRateBps: z.string(),
-        side: z.enum(["BUY", "SELL"]),
-        signatureType: z.union([z.literal(0), z.literal(1), z.literal(2)]),
-      }),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid order", details: parsed.error.issues });
-
-    const [bet, setup] = await Promise.all([
-      this.predictionMarketBetUseCase.getBet(userId, parsed.data.betId),
-      this.predictionMarketBetUseCase.ensureUserSetup(userId),
-    ]);
-    if (!bet) return this.sendJson(res, 404, { error: "Bet not found" });
-    if (!setup.polymarketCredsEnc) return this.sendJson(res, 412, { error: "Polymarket auth missing" });
-
-    try {
-      const result = await this.polymarketAdapter.placeOrder({
-        signature: parsed.data.signature as `0x${string}`,
-        order: {
-          ...parsed.data.order,
-          maker: parsed.data.order.maker as `0x${string}`,
-          signer: parsed.data.order.signer as `0x${string}`,
-          taker: parsed.data.order.taker as `0x${string}`,
-        },
-        clientOrderId: parsed.data.clientOrderId,
-        polymarketCredsEnc: setup.polymarketCredsEnc,
-        makerAddress: setup.polygonEoaAddress as `0x${string}`,
-        userId,
-      });
-      return this.sendJson(res, 200, result);
-    } catch (err) {
-      log.error({ err, userId, betId: parsed.data.betId }, "pm-place-order-failed");
-      return this.sendJson(res, 502, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmCancelOrder(req: http.IncomingMessage, res: http.ServerResponse, polymarketOrderId: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.polymarketAdapter || !this.predictionMarketBetUseCase) {
-      return this.sendJson(res, 503, { error: "Not available" });
-    }
-    const setup = await this.predictionMarketBetUseCase.ensureUserSetup(userId);
-    if (!setup.polymarketCredsEnc) return this.sendJson(res, 412, { error: "Polymarket auth missing" });
-    try {
-      await this.polymarketAdapter.cancelOrder(
-        polymarketOrderId,
-        setup.polymarketCredsEnc,
-        setup.polygonEoaAddress as `0x${string}`,
-      );
-      return this.sendJson(res, 204, {});
-    } catch (err) {
-      log.warn({ err, userId, polymarketOrderId }, "pm-cancel-order-failed");
-      return this.sendJson(res, 502, { error: toErrorMessage(err) });
-    }
-  }
-
   private async handlePmListPositions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const userId = await this.extractUserId(req);
     if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
     if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
     const positions = await this.predictionMarketBetUseCase.listOpenPositions(userId);
     return this.sendJson(res, 200, positions);
-  }
-
-  private async handlePmBridgeStatus(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase || !this.relayClient) {
-      return this.sendJson(res, 503, { error: "Not available" });
-    }
-    const bet = await this.predictionMarketBetUseCase.getBet(userId, id);
-    if (!bet) return this.sendJson(res, 404, { error: "Bet not found" });
-    if (!bet.bridgeIntentId) {
-      // No bridge in flight — the FE shouldn't be polling yet. Surface a
-      // distinct shape so the FE can short-circuit instead of looping.
-      return this.sendJson(res, 200, { status: "no-intent" });
-    }
-    try {
-      const result = await this.relayClient.getIntentStatus(bet.bridgeIntentId);
-      return this.sendJson(res, 200, result);
-    } catch (err) {
-      log.warn({ err, userId, betId: id, bridgeIntentId: bet.bridgeIntentId }, "pm-bridge-status-failed");
-      return this.sendJson(res, 502, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmDriftDetected(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      livePriceBps: z.number().int().min(0).max(10_000),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
-    try {
-      const result = await this.predictionMarketBetUseCase.reportPriceDrift({
-        userId,
-        betId: id,
-        livePriceBps: parsed.data.livePriceBps,
-      });
-      return this.sendJson(res, 200, result);
-    } catch (err) {
-      log.warn({ err, userId, betId: id }, "pm-drift-detected-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
-  }
-
-  private async handlePmRecordRefund(req: http.IncomingMessage, res: http.ServerResponse, id: string): Promise<void> {
-    const userId = await this.extractUserId(req);
-    if (!userId) return this.sendJson(res, 401, { error: "Unauthorized" });
-    if (!this.predictionMarketBetUseCase) return this.sendJson(res, 503, { error: "Not available" });
-    let body: unknown;
-    try { body = await this.readJson(req); } catch { return this.sendJson(res, 400, { error: "Invalid JSON" }); }
-    const parsed = z.object({
-      txHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
-    }).safeParse(body);
-    if (!parsed.success) return this.sendJson(res, 400, { error: "Invalid payload", details: parsed.error.issues });
-    try {
-      const fresh = await this.predictionMarketBetUseCase.recordRefundTxHash(userId, id, parsed.data.txHash);
-      return this.sendJson(res, 200, fresh);
-    } catch (err) {
-      log.error({ err, userId, betId: id }, "pm-refund-record-failed");
-      return this.sendJson(res, 500, { error: toErrorMessage(err) });
-    }
   }
 
   private async extractUserId(req: http.IncomingMessage): Promise<string | null> {

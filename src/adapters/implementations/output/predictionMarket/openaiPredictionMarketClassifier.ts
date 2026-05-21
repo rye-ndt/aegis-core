@@ -3,6 +3,7 @@ import OpenAI from "openai";
 import {
   callJsonSchemaWithRetry,
   createOpenRouterClient,
+  type ReasoningEffort,
 } from "../../../../helpers/llm/openrouterClient";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
 import { createLogger } from "../../../../helpers/observability/logger";
@@ -124,14 +125,16 @@ const CLUSTER_SCHEMA = {
 
 function cacheKey(args: {
   marketIds: string[];
-  resolutionEpochs: number[];
   promptVersion: string;
   model: string;
 }): string {
-  const sorted = args.marketIds
-    .map((id, i) => `${id}@${args.resolutionEpochs[i]}`)
-    .sort()
-    .join("|");
+  // 2026-05-20 LLM-cost reduction (Phase A3): resolution epoch dropped from
+  // the key. Polymarket resolution dates almost never shift, and including
+  // them forced a miss on every expiry. Worst case (a moved resolution
+  // date) we serve a stale cluster for up to clusterCacheTtlSec (24h);
+  // upstream reclusterDelta / maxReclusterAgeMs still trigger refresh on
+  // universe drift.
+  const sorted = [...args.marketIds].sort().join("|");
   const h = createHash("sha256").update(sorted).digest("hex");
   return `${args.promptVersion}:${args.model}:${h}`;
 }
@@ -161,6 +164,8 @@ export interface OpenAIPredictionMarketClassifierConfig {
   maxCriteriaChars: number;
   promptVersion: string;
   cacheTtlSec: number;
+  reasoningEffort: ReasoningEffort;
+  maxTokens: number;
 }
 
 export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassifier {
@@ -182,7 +187,6 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
 
     const key = cacheKey({
       marketIds: markets.map((m) => m.marketId),
-      resolutionEpochs: markets.map((m) => m.resolutionEpochSec),
       promptVersion: this.cfg.promptVersion,
       model: this.cfg.model,
     });
@@ -230,13 +234,11 @@ export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassi
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: CLUSTER_SCHEMA },
-      // Sized to stay under the OpenRouter key's per-request credit cap
-      // (~13k tokens). Clustering benefits from reasoning, so we keep
-      // `effort: medium` — but at this budget, watch for `finish_reason=
-      // length` warnings; if they fire, drop to `low` rather than raising
-      // maxTokens (which OpenRouter will 402 on).
-      maxTokens: 12000,
-      reasoningEffort: "medium",
+      // Defaults + restore knobs documented at the env source
+      // (PREDICTION_MARKETS_CLASSIFIER_REASONING_EFFORT / _MAX_TOKENS in
+      // predictionMarketEnv.ts).
+      maxTokens: this.cfg.maxTokens,
+      reasoningEffort: this.cfg.reasoningEffort,
       logCtx: { reqId, op: "classify" },
     });
 

@@ -1,7 +1,6 @@
 import type Redis from "ioredis";
 import pLimit from "p-limit";
 import { encodeFunctionData, erc20Abi } from "viem";
-import { aesEncrypt } from "../../helpers/crypto/aesGcm";
 import { PREDICTION_MARKETS_ENV } from "../../helpers/env/predictionMarketEnv";
 import { deriveScaAddress } from "../../helpers/deriveScaAddress";
 import { getPolymarketConfig, getUsdcAddress } from "../../helpers/chainConfig";
@@ -9,19 +8,15 @@ import { createLogger } from "../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../helpers/time/dateTime";
 import { newUuid } from "../../helpers/uuid";
 import type {
-  IPolymarketAdapter,
-  PolymarketCreds,
+  IPolymarketReadAdapter,
   PolymarketPositionView,
 } from "../interface/predictionMarket/IPolymarketAdapter";
-import {
-  SETUP_STEPS,
-  type BetIntentRow,
-  type BetRow,
-  type BetStatus,
-  type IPredictionMarketBetRepository,
-  type PositionRow,
-  type SetupStep,
-  type UserSetupRow,
+import type {
+  BetIntentRow,
+  BetRow,
+  IPredictionMarketBetRepository,
+  PositionRow,
+  UserSetupRow,
 } from "../interface/predictionMarket/IPredictionMarketBetRepository";
 import type { ISigningRequestUseCase } from "../interface/input/signingRequest.interface";
 import type { IMiniAppRequestCache } from "../interface/output/cache/miniAppRequest.cache";
@@ -47,22 +42,16 @@ import type {
   InitiateBetIntentInput,
   InitiateBetIntentResult,
   ReconcileResult,
-  SetupArtifact,
   SubmitAmountInput,
   SubmitAmountResult,
 } from "../interface/predictionMarket/IPredictionMarketBetUseCase";
 import type { IUserProfileDB } from "../interface/output/repository/userProfile.repo";
+import type { IPredictionMarketReceiptBroadcaster } from "../interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
 
 const log = createLogger("predictionMarketBetUseCase");
 
 const CENTS_PER_USDC = 100;
 const BPS_PER_UNIT = 10_000;
-
-const SETUP_STEP_ORDER: Readonly<Record<SetupStep, number>> = (() => {
-  const map = {} as Record<SetupStep, number>;
-  SETUP_STEPS.forEach((s, i) => { map[s] = i; });
-  return map;
-})();
 
 /** Decimal-string subtraction without intermediate float collapse. */
 function subtractShares(total: string, delta: string): string {
@@ -90,11 +79,10 @@ const SWEEPER_CONCURRENCY = 10;
 const ENQUEUE_LOCK_TTL_SEC = 11 * 60;
 
 export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
-  // Deps for the 2026-05-15 advance() driver. Optional so the legacy chat
-  // flow (and tests that don't exercise advance()) can construct the use
-  // case without the sign-queue surface wired. When `useSignQueue` is true
-  // but a dep is missing, advance() logs and exits — it never throws into
-  // callers that are merely on the legacy path.
+  // Deps for the advance() driver. Optional so unit tests that don't
+  // exercise advance()/setupAdvance() can construct the use case without
+  // the sign-queue surface wired; when any are missing, advance() logs
+  // and exits rather than throwing.
   //
   // signingRequestUseCase is fetched via a getter to break the circular
   // dep between it and this use case (signingRequest needs to fan
@@ -103,30 +91,41 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
   private readonly getSigningRequestUseCase?: () => ISigningRequestUseCase | undefined;
   private readonly miniAppRequestCache?: IMiniAppRequestCache;
   private readonly redis?: Redis;
-  private readonly useSignQueue: boolean;
   private readonly chatIdResolver?: (userId: string) => Promise<number | null>;
+  // Optional — broadcaster wires the drift-on-close path that pushes a chat
+  // card when `enqueueOrderSign` rejects a bet for price drift. The legacy
+  // FE-driven flow surfaced drift via `pmApi.driftDetected`; the queue-driven
+  // flow has no FE-side surface, so a chat receipt is the only signal.
+  private readonly receiptBroadcaster?: IPredictionMarketReceiptBroadcaster;
 
   constructor(
     private readonly repo: IPredictionMarketBetRepository,
     private readonly userProfileDB: IUserProfileDB,
-    private readonly polymarketAdapter: IPolymarketAdapter,
+    private readonly polymarketAdapter: IPolymarketReadAdapter,
     signQueueDeps?: {
       getSigningRequestUseCase: () => ISigningRequestUseCase | undefined;
       miniAppRequestCache: IMiniAppRequestCache;
       redis: Redis;
-      useSignQueue: boolean;
-      // Resolves a user's telegramChatId for the SigningRequestRecord. The
-      // legacy chat flow gets this from a telegram-session lookup; we hand
-      // the same lookup in via a closure to avoid pulling another sql repo
-      // dep into this use case.
+      // Resolves a user's telegramChatId for the SigningRequestRecord. We
+      // hand this in via a closure to avoid pulling another sql repo dep
+      // into this use case.
       chatIdResolver: (userId: string) => Promise<number | null>;
+      receiptBroadcaster?: IPredictionMarketReceiptBroadcaster;
     },
   ) {
     this.getSigningRequestUseCase = signQueueDeps?.getSigningRequestUseCase;
     this.miniAppRequestCache = signQueueDeps?.miniAppRequestCache;
     this.redis = signQueueDeps?.redis;
-    this.useSignQueue = signQueueDeps?.useSignQueue ?? false;
     this.chatIdResolver = signQueueDeps?.chatIdResolver;
+    this.receiptBroadcaster = signQueueDeps?.receiptBroadcaster;
+  }
+
+  private get signQueueWired(): boolean {
+    return (
+      this.miniAppRequestCache != null &&
+      this.redis != null &&
+      this.getSigningRequestUseCase != null
+    );
   }
 
   // ── Setup ──────────────────────────────────────────────────────────────
@@ -158,53 +157,6 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     await this.repo.upsertUserSetup(row);
     log.info({ userId, polygonScaAddress, step: "setup-initialized" }, "ensure-user-setup");
     return row;
-  }
-
-  async recordSetupStep(
-    userId: string,
-    step: SetupStep,
-    artifact?: SetupArtifact,
-  ): Promise<UserSetupRow> {
-    const setup = await this.ensureUserSetup(userId);
-    // Setup is monotonically forward — we never go backwards (a re-confirm is
-    // a no-op). Skipping ahead is also rejected: each step's artifact is a
-    // precondition for the next one, so a FE call that jumps `pending →
-    // approved` would leave us with no `bootstrapBridgeIntentId`. Re-running
-    // the same step is allowed (idempotency) so we can reapply artifacts.
-    const curIdx = SETUP_STEP_ORDER[setup.setupStep];
-    const nextIdx = SETUP_STEP_ORDER[step];
-    if (nextIdx < curIdx) {
-      log.warn({ userId, step, prevStep: setup.setupStep }, "setup-step-backwards-rejected");
-      throw new Error(`SETUP_STEP_BACKWARDS:${setup.setupStep}->${step}`);
-    }
-    if (nextIdx > curIdx + 1) {
-      log.warn({ userId, step, prevStep: setup.setupStep }, "setup-step-skip-rejected");
-      throw new Error(`SETUP_STEP_SKIP:${setup.setupStep}->${step}`);
-    }
-    if (artifact?.bridgeIntentId) {
-      await this.repo.setBootstrapBridgeIntentId(userId, artifact.bridgeIntentId);
-    }
-    if (artifact?.approvalsTxHashes && artifact.approvalsTxHashes.length > 0) {
-      await this.repo.setApprovalsTxHashes(userId, artifact.approvalsTxHashes);
-    }
-    if (step !== setup.setupStep) {
-      await this.repo.updateSetupStep(userId, step);
-      log.info({ userId, step, prevStep: setup.setupStep }, "setup-step-recorded");
-    }
-    const fresh = await this.repo.getUserSetup(userId);
-    return fresh!;
-  }
-
-  async storePolymarketCreds(userId: string, creds: PolymarketCreds): Promise<void> {
-    const keyHex = PREDICTION_MARKETS_ENV.credsKeyHex;
-    if (!keyHex) {
-      log.error({ userId }, "store-creds-missing-key");
-      throw new Error("POLYMARKET_CREDS_KEY_MISSING");
-    }
-    const envelope = aesEncrypt(JSON.stringify(creds), keyHex);
-    await this.repo.setPolymarketCredsEnc(userId, envelope);
-    await this.repo.updateSetupStep(userId, "authed");
-    log.info({ userId, step: "creds-stored" }, "polymarket-auth");
   }
 
   // ── Intent lifecycle ───────────────────────────────────────────────────
@@ -282,7 +234,9 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     return { kind: "ok", intent: fresh! };
   }
 
-  async confirmBetIntent(input: ConfirmBetIntentInput): Promise<BetRow> {
+  async confirmBetIntent(
+    input: ConfirmBetIntentInput,
+  ): Promise<{ bet: BetRow; enqueuedRequestId: string | null }> {
     const intent = await this.repo.getBetIntent(input.intentId);
     if (!intent || intent.userId !== input.userId) {
       throw new Error("INTENT_NOT_FOUND");
@@ -320,19 +274,16 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       { userId: input.userId, intentId: intent.id, betId: bet.id, step: "confirmed" },
       "place-bet",
     );
-    // Slice D cutover: drive setup-then-bet via the sign queue. Single
-    // fetch — if setup is already complete, kick the bet directly;
-    // otherwise let setupAdvance enqueue the first setup step and rely
-    // on the authed→complete bridge in setupAdvance to kick the bet.
-    if (this.useSignQueue) {
-      const setup = await this.repo.getUserSetup(input.userId);
-      if (setup?.setupStep === "complete") {
-        await this.advance(bet.id);
-      } else {
-        await this.setupAdvance(input.userId);
-      }
-    }
-    return bet;
+    // Drive setup-then-bet via the sign queue. Single fetch — if setup is
+    // already complete, kick the bet directly; otherwise let setupAdvance
+    // enqueue the first setup step and rely on the authed→complete bridge
+    // in setupAdvance to kick the bet.
+    const setup = await this.repo.getUserSetup(input.userId);
+    const { enqueuedRequestId } =
+      setup?.setupStep === "complete"
+        ? await this.advanceForBet(bet, setup)
+        : await this.setupAdvanceFor(input.userId, setup);
+    return { bet, enqueuedRequestId };
   }
 
   async cancelBetIntent(userId: string, intentId: string): Promise<void> {
@@ -364,30 +315,6 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       { userId, intentId, betId: intent.betId, step: "manual-cancel" },
       "place-bet",
     );
-  }
-
-  async transitionBet(
-    userId: string,
-    betId: string,
-    status: BetStatus,
-    patch: { bridgeIntentId?: string; scaToEoaTxHash?: string; polymarketOrderId?: string } = {},
-  ): Promise<BetRow> {
-    const bet = await this.repo.getBet(betId);
-    if (!bet || bet.userId !== userId) throw new Error("BET_NOT_FOUND");
-    await this.repo.updateBetStatus(betId, status, patch);
-    const fresh = await this.repo.getBet(betId);
-    log.info(
-      {
-        userId,
-        betId,
-        step: status.toLowerCase().replace(/_/g, "-"),
-        ...(patch.bridgeIntentId ? { bridgeIntentId: patch.bridgeIntentId } : {}),
-        ...(patch.scaToEoaTxHash ? { txHash: patch.scaToEoaTxHash } : {}),
-        ...(patch.polymarketOrderId ? { polymarketOrderId: patch.polymarketOrderId } : {}),
-      },
-      "place-bet",
-    );
-    return fresh!;
   }
 
   async getBet(userId: string, betId: string): Promise<BetRow | null> {
@@ -571,7 +498,9 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     return { position, bestBidPriceBps, estProceedsUsdcCents, estPnlUsdcCents };
   }
 
-  async initiateClose(input: InitiateCloseInput): Promise<BetRow> {
+  async initiateClose(
+    input: InitiateCloseInput,
+  ): Promise<{ bet: BetRow; enqueuedRequestId: string | null }> {
     const position = await this.repo.getPosition(input.positionId);
     if (!position || position.userId !== input.userId) {
       throw new Error("POSITION_NOT_FOUND");
@@ -609,15 +538,15 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     // For closes the SCA→EOA transfer is unnecessary — the shares are already
     // on the SCA, and the order-sign step is where the sell happens. Skip
     // straight to ORDER_SUBMITTED enqueue by bumping past SCA_TO_EOA.
-    if (this.useSignQueue) {
-      try {
-        await this.repo.updateBetStatus(bet.id, "SCA_TO_EOA", {});
-      } catch (err) {
-        log.warn({ err, betId: bet.id, step: "close-presubmit-bump-failed" }, "close-position");
-      }
-      await this.advance(bet.id);
+    let advanceBet: BetRow = bet;
+    try {
+      await this.repo.updateBetStatus(bet.id, "SCA_TO_EOA", {});
+      advanceBet = { ...bet, status: "SCA_TO_EOA" };
+    } catch (err) {
+      log.warn({ err, betId: bet.id, step: "close-presubmit-bump-failed" }, "close-position");
     }
-    return bet;
+    const { enqueuedRequestId } = await this.advanceForBet(advanceBet);
+    return { bet, enqueuedRequestId };
   }
 
   // ── Position reconciliation (called by poller) ──────────────────────────
@@ -701,108 +630,75 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     return { resolved, marked, closedFromPolymarket };
   }
 
-  async reportPriceDrift(input: {
-    userId: string;
-    betId: string;
-    livePriceBps: number;
-  }): Promise<
-    | { decision: "ok" }
-    | { decision: "reconfirm"; previousRefPriceBps: number; newRefPriceBps: number; driftBps: number }
-  > {
-    const bet = await this.repo.getBet(input.betId);
-    if (!bet || bet.userId !== input.userId) throw new Error("BET_NOT_FOUND");
-    const ref = bet.refPriceBps;
-    if (ref == null) {
-      // No prior reference; whatever the FE sees is the new ref. Accept silently.
-      return { decision: "ok" };
-    }
-    const drift = Math.abs(input.livePriceBps - ref);
-    if (drift <= PREDICTION_MARKETS_ENV.maxOrderDriftBps) {
-      log.debug(
-        { userId: input.userId, betId: input.betId, ref, livePriceBps: input.livePriceBps, drift },
-        "drift-within-tolerance",
-      );
-      return { decision: "ok" };
-    }
-    log.warn(
-      {
-        userId: input.userId,
-        betId: input.betId,
-        previousRefPriceBps: ref,
-        newRefPriceBps: input.livePriceBps,
-        driftBps: drift,
-        step: "drift-detected",
-      },
-      "place-bet",
-    );
-    return {
-      decision: "reconfirm",
-      previousRefPriceBps: ref,
-      newRefPriceBps: input.livePriceBps,
-      driftBps: drift,
-    };
-  }
+  // ── Sign-queue driver ────────────────────────────────────────────────────
 
-  async recordRefundTxHash(userId: string, betId: string, txHash: string): Promise<BetRow> {
-    const bet = await this.repo.getBet(betId);
-    if (!bet || bet.userId !== userId) throw new Error("BET_NOT_FOUND");
-    if (!bet.refundRequired) {
-      log.warn({ userId, betId }, "refund-tx-recorded-without-flag");
-    }
-    await this.repo.setBetRefundTxHash(betId, txHash);
-    log.info({ userId, betId, txHash, step: "refund-recorded" }, "place-bet");
-    const fresh = await this.repo.getBet(betId);
-    return fresh!;
-  }
-
-  // ── 2026-05-15 zero-sign bet rewrite (Slice B) ────────────────────────────
-
-  async advance(betId: string): Promise<void> {
-    if (!this.useSignQueue) return;
-    if (!this.miniAppRequestCache || !this.redis || !this.getSigningRequestUseCase) {
+  async advance(betId: string): Promise<{ enqueuedRequestId: string | null }> {
+    const noop = { enqueuedRequestId: null as string | null };
+    if (!this.signQueueWired) {
       log.warn({ betId, step: "advance-skipped-deps-missing" }, "place-bet");
-      return;
+      return noop;
     }
     const bet = await this.repo.getBet(betId);
     if (!bet) {
       log.warn({ betId, step: "advance-bet-not-found" }, "place-bet");
-      return;
+      return noop;
     }
-    if (bet.status === "FILLED" || bet.status === "FAILED") return;
+    return this.advanceForBet(bet);
+  }
+
+  /**
+   * Inner driver shared between `advance()` and callers (`confirmBetIntent`,
+   * `initiateClose`) that already hold a fresh bet row — saves a redundant
+   * `getBet` round-trip on the hot confirm path.
+   */
+  private async advanceForBet(
+    bet: BetRow,
+    prefetchedSetup?: UserSetupRow | null,
+  ): Promise<{ enqueuedRequestId: string | null }> {
+    const betId = bet.id;
+    const noop = { enqueuedRequestId: null as string | null };
+    if (bet.status === "FILLED" || bet.status === "FAILED") return noop;
     if (
       (bet.status === "UNFILLED" || bet.status === "PARTIAL") &&
       (!bet.refundRequired || bet.refundTxHash)
     ) {
-      return;
+      return noop;
     }
 
-    // Slice C will rewrite setup to advance through here too; until then we
-    // refuse to drive a bet whose setup didn't finish on the legacy path.
-    const setup = await this.repo.getUserSetup(bet.userId);
+    const setup = prefetchedSetup ?? (await this.repo.getUserSetup(bet.userId));
     if (!setup || setup.setupStep !== "complete" || !setup.polymarketCredsEnc) {
       log.info(
         { betId, userId: bet.userId, setupStep: setup?.setupStep, step: "advance-setup-incomplete" },
         "place-bet",
       );
-      return;
+      return noop;
     }
 
     switch (bet.status) {
       case "INITIATED":
       case "BRIDGING":
-      case "BRIDGED":
-        return this.enqueueScaToEoa(bet, setup);
-      case "SCA_TO_EOA":
-        return this.enqueueOrderSign(bet, setup);
+      case "BRIDGED": {
+        const id = await this.enqueueScaToEoa(bet, setup);
+        if (id) log.info({ betId, requestId: id, slot: "sca_to_eoa", step: "advance-enqueued-sca_to_eoa" }, "place-bet");
+        return { enqueuedRequestId: id };
+      }
+      case "SCA_TO_EOA": {
+        const id = await this.enqueueOrderSign(bet, setup);
+        if (id) log.info({ betId, requestId: id, slot: "order_sign", step: "advance-enqueued-order_sign" }, "place-bet");
+        return { enqueuedRequestId: id };
+      }
       case "ORDER_SIGNED":
       case "ORDER_SUBMITTED":
         // Position poller is the next mover; no-op so the sweeper doesn't churn.
-        return;
+        return noop;
       case "PARTIAL":
-      case "UNFILLED":
-        return this.enqueueResidualSweep(bet, setup);
+      case "UNFILLED": {
+        const id = await this.enqueueResidualSweep(bet, setup);
+        if (id) log.info({ betId, requestId: id, slot: "residual_sweep", step: "advance-enqueued-residual_sweep" }, "place-bet");
+        return { enqueuedRequestId: id };
+      }
       default:
-        return;
+        return noop;
     }
   }
 
@@ -817,13 +713,24 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     errorCode?: string;
     errorMessage?: string;
   }): Promise<void> {
-    if (!this.useSignQueue) return;
     const bet = await this.repo.getBet(input.betId);
     if (!bet) {
       log.warn({ betId: input.betId, step: "notify-bet-not-found" }, "place-bet");
       return;
     }
     const slot = slotForKind(input.kind, input.purpose);
+    log.info(
+      {
+        betId: input.betId,
+        requestId: input.requestId,
+        kind: input.kind,
+        purpose: input.purpose,
+        slot,
+        rejected: input.rejected,
+        step: "sign-resolved",
+      },
+      "place-bet",
+    );
     // Release the (bet, slot) lock so the sweeper can re-enqueue promptly if
     // this resolution turns out to need a retry — without explicit release
     // the lock sits for ENQUEUE_LOCK_TTL_SEC (≥ sign-request TTL).
@@ -899,31 +806,45 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
   }
 
   async sweepStuckBets(olderThanEpoch: number): Promise<number> {
-    if (!this.useSignQueue) return 0;
     // Bound a single sweep tick; 50/tick is well above realistic concurrent
     // in-flight volume on a 30s cadence.
     const stuck = await this.repo.listStuckBets(olderThanEpoch, 50);
     const limit = pLimit(SWEEPER_CONCURRENCY);
+    let advancedOk = 0;
+    let errors = 0;
     await Promise.all(
       stuck.map((bet) =>
         limit(async () => {
           try {
             await this.advance(bet.id);
+            advancedOk++;
           } catch (err) {
+            errors++;
             log.error({ err, betId: bet.id, step: "sweeper-advance-failed" }, "place-bet");
           }
         }),
       ),
     );
+    log.info(
+      { attempted: stuck.length, advancedOk, errors, step: "sweep-summary" },
+      "place-bet",
+    );
     return stuck.length;
   }
 
-  // ── setup state machine (Slice C) ────────────────────────────────────────
+  // ── setup state machine ──────────────────────────────────────────────────
 
-  async setupAdvance(userId: string): Promise<void> {
-    if (!this.useSignQueue) return;
-    if (!this.miniAppRequestCache || !this.redis || !this.getSigningRequestUseCase) return;
-    let setup = await this.repo.getUserSetup(userId);
+  async setupAdvance(userId: string): Promise<{ enqueuedRequestId: string | null }> {
+    return this.setupAdvanceFor(userId, undefined);
+  }
+
+  private async setupAdvanceFor(
+    userId: string,
+    prefetched: UserSetupRow | null | undefined,
+  ): Promise<{ enqueuedRequestId: string | null }> {
+    const noop = { enqueuedRequestId: null as string | null };
+    if (!this.signQueueWired) return noop;
+    let setup = prefetched ?? (await this.repo.getUserSetup(userId));
     if (!setup) {
       setup = await this.ensureUserSetup(userId);
     }
@@ -934,26 +855,40 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
         // deploy-on-first-tx, which happens in the gas-funding userop).
         await this.repo.updateSetupStep(userId, "sca_deployed");
         return this.setupAdvance(userId);
-      case "sca_deployed":
-        return this.enqueueSetupGasFunding(setup);
-      case "gas_funded":
-        return this.enqueueSetupApprovals(setup);
-      case "approved":
-        return this.enqueueSetupClobAuth(setup);
+      case "sca_deployed": {
+        const id = await this.enqueueSetupGasFunding(setup);
+        if (id) log.info({ userId, requestId: id, slot: "setup_gas_funding", step: "advance-enqueued-setup_gas_funding" }, "setup");
+        return { enqueuedRequestId: id };
+      }
+      case "gas_funded": {
+        const id = await this.enqueueSetupApprovals(setup);
+        if (id) log.info({ userId, requestId: id, step: "advance-enqueued-setup_approve" }, "setup");
+        return { enqueuedRequestId: id };
+      }
+      case "approved": {
+        const id = await this.enqueueSetupClobAuth(setup);
+        if (id) log.info({ userId, requestId: id, slot: "setup_clob_auth", step: "advance-enqueued-setup_clob_auth" }, "setup");
+        return { enqueuedRequestId: id };
+      }
       case "authed":
         await this.repo.updateSetupStep(userId, "complete");
         // Setup just landed; if the user has a non-terminal bet that was
         // created mid-setup, kick its first enqueue immediately rather than
-        // making them wait for the next stuck-bet sweep tick.
+        // making them wait for the next stuck-bet sweep tick. The id of any
+        // request enqueued by that kick is discarded — the chat-side path
+        // that cares about the id is the original confirm tap, which has
+        // already returned. The mini-app picks the new request up via
+        // `fetchNextRequest` polling.
         await this.kickPendingBetsForUser(userId);
-        return;
+        return noop;
       case "complete":
-        return;
+        return noop;
     }
   }
 
   private async kickPendingBetsForUser(userId: string): Promise<void> {
     const bet = await this.repo.findActiveBetForUser(userId);
+    log.info({ userId, betId: bet?.id ?? null, kicked: !!bet, step: "kick-after-setup" }, "place-bet");
     if (!bet) return;
     await this.advance(bet.id).catch((err) =>
       log.error({ err, betId: bet.id, step: "kick-after-setup-failed" }, "place-bet"),
@@ -970,7 +905,6 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     errorCode?: string;
     errorMessage?: string;
   }): Promise<void> {
-    if (!this.useSignQueue) return;
     const setup = await this.repo.getUserSetup(input.userId);
     if (!setup) return;
     if (input.rejected) {
@@ -1034,12 +968,12 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
 
   // ── enqueue helpers ──────────────────────────────────────────────────────
 
-  private async enqueueScaToEoa(bet: BetRow, setup: UserSetupRow): Promise<void> {
+  private async enqueueScaToEoa(bet: BetRow, setup: UserSetupRow): Promise<string | null> {
     const chainId = PREDICTION_MARKETS_ENV.betChainId;
     const usdc = getUsdcAddress(chainId);
     if (!usdc) {
       log.error({ betId: bet.id, chainId, step: "enqueue-sca-to-eoa-no-usdc" }, "place-bet");
-      return;
+      return null;
     }
     const stakeRaw = BigInt(bet.stakeUsdcCents) * 10_000n;
     const data = encodeFunctionData({
@@ -1047,7 +981,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       functionName: "transfer",
       args: [setup.polygonEoaAddress as `0x${string}`, stakeRaw],
     });
-    await this.enqueue(bet, "sca_to_eoa", {
+    return this.enqueue(bet, "sca_to_eoa", {
       kind: "userop",
       to: usdc,
       value: "0",
@@ -1056,11 +990,11 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     });
   }
 
-  private async enqueueOrderSign(bet: BetRow, setup: UserSetupRow): Promise<void> {
+  private async enqueueOrderSign(bet: BetRow, setup: UserSetupRow): Promise<string | null> {
     if (!bet.outcomeTokenId) {
       log.warn({ betId: bet.id, step: "order-sign-no-token" }, "place-bet");
       await this.repo.setBetFailure(bet.id, "missing-outcome-token");
-      return;
+      return null;
     }
     const ob = await this.polymarketAdapter.getOrderbookTopOfBook(bet.outcomeTokenId);
     const liveBps = Math.round(ob.midPrice * BPS_PER_UNIT);
@@ -1068,11 +1002,47 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     const driftBps = Math.abs(liveBps - refBps);
     if (driftBps > PREDICTION_MARKETS_ENV.maxOrderDriftBps) {
       log.warn(
-        { betId: bet.id, refBps, liveBps, driftBps, step: "order-sign-drift" },
+        {
+          betId: bet.id,
+          refBps,
+          liveBps,
+          driftBps,
+          betKind: bet.betKind,
+          step: bet.betKind === "close" ? "close-drift" : "order-sign-drift",
+        },
         "place-bet",
       );
       await this.repo.setBetFailure(bet.id, "drift");
-      return;
+      // Close path: roll the parent position back to `open` so the user can
+      // try again on a fresh quote. Without this the position stays `closing`
+      // and `previewClose` rejects with `POSITION_WRONG_STATUS`.
+      if (bet.betKind === "close") {
+        const parent = await this.repo.findPositionByClosingBetId(bet.id);
+        if (parent) {
+          try {
+            await this.repo.updatePositionStatus(parent.id, "open", {
+              closingBetId: null,
+            });
+          } catch (err) {
+            log.error(
+              { err, betId: bet.id, positionId: parent.id, step: "close-drift-rollback-failed" },
+              "place-bet",
+            );
+          }
+        }
+      }
+      // Drift notification (queue flow): the FE-driven reconfirm path no
+      // longer exists, so push a chat card directly. Best-effort — log and
+      // continue if the broadcaster isn't wired (tests, off-path startup).
+      if (this.receiptBroadcaster) {
+        try {
+          const fresh = await this.repo.getBet(bet.id);
+          await this.receiptBroadcaster.emitDriftCard(fresh ?? bet);
+        } catch (err) {
+          log.error({ err, betId: bet.id, step: "close-drift-broadcast-failed" }, "place-bet");
+        }
+      }
+      return null;
     }
 
     const slip = PREDICTION_MARKETS_ENV.orderSlippageBps;
@@ -1084,7 +1054,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     if (limitBps <= 0 || limitBps >= BPS_PER_UNIT) {
       log.warn({ betId: bet.id, limitBps, isClose, step: "order-sign-bad-limit" }, "place-bet");
       await this.repo.setBetFailure(bet.id, "bad-limit");
-      return;
+      return null;
     }
 
     let makerAmount: string;
@@ -1095,7 +1065,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       if (!position) {
         log.warn({ betId: bet.id, step: "order-sign-close-no-position" }, "place-bet");
         await this.repo.setBetFailure(bet.id, "close-position-missing");
-        return;
+        return null;
       }
       // sizeShares is a decimal string with up to 6dp; convert to raw (1e6).
       const sharesRawBig = decimalToRaw(position.sizeShares, 6);
@@ -1122,7 +1092,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       salt: BigInt("0x" + newUuid().replace(/-/g, "")).toString(),
     });
 
-    await this.enqueue(bet, "order_sign", {
+    return this.enqueue(bet, "order_sign", {
       kind: "eip712",
       purpose: "polymarket_order",
       domain: polymarketOrderDomain(PREDICTION_MARKETS_ENV.betChainId),
@@ -1137,17 +1107,17 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     });
   }
 
-  private async enqueueResidualSweep(bet: BetRow, setup: UserSetupRow): Promise<void> {
-    if (!bet.refundRequired || bet.refundTxHash) return;
+  private async enqueueResidualSweep(bet: BetRow, setup: UserSetupRow): Promise<string | null> {
+    if (!bet.refundRequired || bet.refundTxHash) return null;
     if (!bet.scaToEoaTxHash) {
       await this.repo.setBetRefundRequired(bet.id, false);
-      return;
+      return null;
     }
     const chainId = PREDICTION_MARKETS_ENV.betChainId;
     const usdc = getUsdcAddress(chainId);
     if (!usdc) {
       log.error({ betId: bet.id, chainId, step: "sweep-no-usdc" }, "place-bet");
-      return;
+      return null;
     }
     // FE clamps the transfer amount to the EOA's actual USDC balance at
     // sign time — we just pre-fill calldata with the stake as an upper bound.
@@ -1157,7 +1127,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
       functionName: "transfer",
       args: [setup.polygonScaAddress as `0x${string}`, stakeRaw],
     });
-    await this.enqueue(bet, "residual_sweep", {
+    return this.enqueue(bet, "residual_sweep", {
       kind: "eoa_tx",
       to: usdc,
       value: "0",
@@ -1166,12 +1136,12 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     });
   }
 
-  private async enqueueSetupGasFunding(setup: UserSetupRow): Promise<void> {
+  private async enqueueSetupGasFunding(setup: UserSetupRow): Promise<string | null> {
     const chainId = PREDICTION_MARKETS_ENV.betChainId;
     const wei = PREDICTION_MARKETS_ENV.maticBootstrapWei;
     // Userop: SCA sends MATIC to EOA so the EOA can later pay gas for its
     // own approvals + sell orders.
-    await this.enqueueSetup(setup.userId, "setup_gas_funding", {
+    return this.enqueueSetup(setup.userId, "setup_gas_funding", {
       kind: "userop",
       to: setup.polygonEoaAddress,
       value: wei,
@@ -1181,13 +1151,13 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     });
   }
 
-  private async enqueueSetupApprovals(setup: UserSetupRow): Promise<void> {
+  private async enqueueSetupApprovals(setup: UserSetupRow): Promise<string | null> {
     const chainId = PREDICTION_MARKETS_ENV.betChainId;
     const usdc = getUsdcAddress(chainId);
     const cfg = getPolymarketConfig(chainId);
     if (!usdc || !cfg) {
       log.error({ userId: setup.userId, step: "setup-approvals-no-config" }, "setup");
-      return;
+      return null;
     }
     // Already-completed approvals are skipped — `setApprovalsTxHashes` is
     // append-only on /response, so the length tells us how many landed.
@@ -1222,9 +1192,12 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
         description: "Authorize CTF Exchange to move outcome tokens",
       },
     ];
+    // Enqueue approvals one-by-one but only surface the first id — the FE
+    // mini-app picks the remaining ones up via `fetchNextRequest`.
+    let firstId: string | null = null;
     for (let i = done; i < approvals.length; i++) {
       const a = approvals[i];
-      await this.enqueueSetup(setup.userId, `setup_approve_${i}` as SetupSlot, {
+      const id = await this.enqueueSetup(setup.userId, `setup_approve_${i}` as SetupSlot, {
         kind: "eoa_tx",
         to: a.to,
         value: "0",
@@ -1232,13 +1205,15 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
         description: a.description,
         chainId,
       });
+      if (!firstId) firstId = id;
     }
+    return firstId;
   }
 
-  private async enqueueSetupClobAuth(setup: UserSetupRow): Promise<void> {
+  private async enqueueSetupClobAuth(setup: UserSetupRow): Promise<string | null> {
     const chainId = PREDICTION_MARKETS_ENV.betChainId;
     const now = newCurrentUTCEpoch();
-    await this.enqueueSetup(setup.userId, "setup_clob_auth", {
+    return this.enqueueSetup(setup.userId, "setup_clob_auth", {
       kind: "eip712",
       purpose: "clob_auth",
       domain: polymarketClobAuthDomain(chainId),
@@ -1263,7 +1238,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     userId: string,
     slot: SetupSlot,
     payload: EnqueuePayload & { chainId: number },
-  ): Promise<void> {
+  ): Promise<string | null> {
     return this.commitEnqueue({
       userId,
       slot,
@@ -1283,7 +1258,7 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
   // Holds a (betId, slot) NX lock so duplicate advances produce at most one
   // open sign-request — the plan-mandated invariant for safe re-entry from
   // the stuck-bet sweeper and the mini-app re-open path.
-  private enqueue(bet: BetRow, slot: EnqueueSlot, payload: EnqueuePayload): Promise<void> {
+  private enqueue(bet: BetRow, slot: EnqueueSlot, payload: EnqueuePayload): Promise<string | null> {
     return this.commitEnqueue({
       userId: bet.userId,
       slot,
@@ -1306,13 +1281,13 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
     link: { betId: string } | { setupForUserId: string };
     logScope: "place-bet" | "setup";
     payload: EnqueuePayload;
-  }): Promise<void> {
+  }): Promise<string | null> {
     const signingRequestUseCase = this.getSigningRequestUseCase?.();
-    if (!signingRequestUseCase || !this.miniAppRequestCache || !this.redis) return;
+    if (!signingRequestUseCase || !this.miniAppRequestCache || !this.redis) return null;
     const acquired = await this.redis.set(args.lockKey, "1", "EX", ENQUEUE_LOCK_TTL_SEC, "NX");
     if (acquired !== "OK") {
       log.debug({ slot: args.slot, step: "enqueue-locked", ...args.link }, args.logScope);
-      return;
+      return null;
     }
     const chatId = await this.getChatId(args.userId);
     const now = newCurrentUTCEpoch();
@@ -1378,12 +1353,14 @@ export class PredictionMarketBetUseCase implements IPredictionMarketBetUseCase {
         },
         args.logScope,
       );
+      return requestId;
     } catch (err) {
       await this.redis.del(args.lockKey).catch(() => undefined);
       log.error(
         { err, slot: args.slot, step: "enqueue-failed", ...args.link },
         args.logScope,
       );
+      return null;
     }
   }
 

@@ -1,6 +1,5 @@
 import type Redis from "ioredis";
 import { isWorker } from "../../../../helpers/env/role";
-import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newCurrentUTCEpoch } from "../../../../helpers/time/dateTime";
 import { newUuid } from "../../../../helpers/uuid";
@@ -28,10 +27,6 @@ export class PredictionMarketStuckBetSweeperJob {
   start(): void {
     if (!isWorker()) {
       log.info("not a worker role — not starting.");
-      return;
-    }
-    if (!PREDICTION_MARKETS_ENV.useSignQueue) {
-      log.info("PREDICTION_MARKETS_USE_SIGN_QUEUE=false — not starting.");
       return;
     }
     log.info({ intervalMs: this.deps.intervalMs }, "stuck-bet sweeper starting");

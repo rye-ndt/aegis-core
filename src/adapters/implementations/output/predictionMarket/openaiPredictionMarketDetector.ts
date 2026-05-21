@@ -3,11 +3,13 @@ import OpenAI from "openai";
 import {
   callJsonSchemaWithRetry,
   createOpenRouterClient,
+  type ReasoningEffort,
 } from "../../../../helpers/llm/openrouterClient";
 import type { RedisResponseCache } from "../../../../helpers/cache/redisResponseCache";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type {
   DetectorInput,
+  DetectorResult,
   IPredictionMarketDetector,
 } from "../../../../use-cases/interface/predictionMarket/IPredictionMarketDetector";
 import type {
@@ -190,6 +192,8 @@ export interface OpenAIPredictionMarketDetectorConfig {
   cacheTtlSec: number;
   /** Round member YES prices to this bp bucket when keying the cache. */
   priceBucketBps: number;
+  reasoningEffort: ReasoningEffort;
+  maxTokens: number;
 }
 
 function bucketPriceBp(priceFraction: number, bucketBps: number): number {
@@ -215,7 +219,7 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
     return createHash("sha256").update(raw).digest("hex");
   }
 
-  async detect(input: DetectorInput): Promise<DraftFinding[]> {
+  async detect(input: DetectorInput): Promise<DetectorResult> {
     const { reqId, cluster, members } = input;
     const start = Date.now();
     log.info(
@@ -228,7 +232,7 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
         { step: "succeeded", reqId, clusterId: cluster.clusterId, drafts: 0, durationMs: Date.now() - start, mode: "too-few-members" },
         "detect",
       );
-      return [];
+      return { drafts: [], cacheHit: false };
     }
 
     const key = this.cacheKey(input);
@@ -240,7 +244,7 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
           { step: "succeeded", reqId, clusterId: cluster.clusterId, drafts: hit.length, durationMs: Date.now() - start, mode: "cache" },
           "detect",
         );
-        return hit;
+        return { drafts: hit, cacheHit: true };
       }
     }
 
@@ -272,20 +276,18 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: FINDING_SCHEMA },
-      // Sized to stay under the OpenRouter key's per-request credit cap
-      // (~13k tokens). `effort: high` would burn most of this 12k budget
-      // on reasoning and truncate the visible findings JSON — so we step
-      // down to `medium`. This is the highest-stakes LLM step in the
-      // pipeline; top up OpenRouter credits and raise both knobs back to
-      // `(16000, high)` if false negatives become noticeable.
-      maxTokens: 12000,
-      reasoningEffort: "medium",
+      // Defaults + restore knobs documented at the env source
+      // (PREDICTION_MARKETS_DETECTOR_REASONING_EFFORT / _MAX_TOKENS in
+      // predictionMarketEnv.ts). This is the highest-stakes LLM step in
+      // the pipeline — raise effort before maxTokens if findings regress.
+      maxTokens: this.cfg.maxTokens,
+      reasoningEffort: this.cfg.reasoningEffort,
       logCtx: { reqId, clusterId: cluster.clusterId, op: "detect" },
     });
 
     if (!parsed) {
       log.error({ reqId, clusterId: cluster.clusterId, raw: raw.slice(0, 200) }, "detect failed");
-      return [];
+      return { drafts: [], cacheHit: false };
     }
 
     const knownIds = new Set(cluster.marketIds);
@@ -376,6 +378,6 @@ export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector
       { step: "succeeded", reqId, clusterId: cluster.clusterId, drafts: drafts.length, durationMs: Date.now() - start, mode: "fresh" },
       "detect",
     );
-    return drafts;
+    return { drafts, cacheHit: false };
   }
 }

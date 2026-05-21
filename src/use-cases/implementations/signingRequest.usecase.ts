@@ -261,6 +261,11 @@ export class SigningRequestUseCaseImpl implements ISigningRequestUseCase {
       tokenSymbol: record.tokenSymbol,
       planKind: record.planKind,
       silentResolution: record.silentResolution,
+      betId: record.betId,
+      setupForUserId: record.setupForUserId,
+      kind: record.kind,
+      purpose: record.purpose,
+      polymarketOrderId: params.polymarketOrderId,
     });
   }
 

@@ -35,6 +35,7 @@ export class PredictionMarketScanJob {
           findingsEnabled: PREDICTION_MARKETS_ENV.findingsEnabled,
           betsEnabled: PREDICTION_MARKETS_ENV.betsEnabled,
           shadowMode: PREDICTION_MARKETS_ENV.shadowMode,
+          eventIdClusteringEnabled: PREDICTION_MARKETS_ENV.eventIdClusteringEnabled,
           sizingEnabled: PREDICTION_MARKETS_ENV.sizingEnabled,
           adminHttpTokenSet: !!PREDICTION_MARKETS_ENV.adminHttpToken,
           reviewAdminChatIdSet: !!PREDICTION_MARKETS_ENV.reviewAdminChatId,
@@ -45,6 +46,18 @@ export class PredictionMarketScanJob {
           detector: PREDICTION_MARKETS_ENV.detectorModel,
           extractor: PREDICTION_MARKETS_ENV.extractorModel,
           promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
+        },
+        // Phase A (2026-05-20 LLM-cost reduction) effective knobs — surfaced
+        // at startup so operators can confirm the worker is running on the
+        // cheaper defaults without grepping multiple files.
+        llmCost: {
+          classifierReasoningEffort: PREDICTION_MARKETS_ENV.classifierReasoningEffort,
+          classifierMaxTokens: PREDICTION_MARKETS_ENV.classifierMaxTokens,
+          detectorReasoningEffort: PREDICTION_MARKETS_ENV.detectorReasoningEffort,
+          detectorMaxTokens: PREDICTION_MARKETS_ENV.detectorMaxTokens,
+          detectorPriceBucketBps: PREDICTION_MARKETS_ENV.detectorPriceBucketBps,
+          detectorCacheTtlSec: PREDICTION_MARKETS_ENV.detectorCacheTtlSec,
+          reclusterDelta: PREDICTION_MARKETS_ENV.reclusterDelta,
         },
         sizer: PREDICTION_MARKETS_ENV.sizingEnabled
           ? {

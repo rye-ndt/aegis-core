@@ -4,75 +4,48 @@ import { aesDecrypt } from "../../../../helpers/crypto/aesGcm";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import { createLogger } from "../../../../helpers/observability/logger";
 import type {
-  DeriveCredsInput,
-  IPolymarketAdapter,
+  IPolymarketReadAdapter,
   OrderbookTopOfBook,
   OrderFillStatus,
-  PlaceOrderInput,
-  PlaceOrderResult,
-  PolymarketCreds,
   PolymarketPositionView,
 } from "../../../../use-cases/interface/predictionMarket/IPolymarketAdapter";
+
+/** L2 HMAC creds for Polymarket — never leaves this file. */
+interface PolymarketCreds {
+  apiKey: string;
+  secret: string;
+  passphrase: string;
+}
 
 const log = createLogger("polymarketAdapter");
 
 const TOB_CACHE_MS = 2_000;
 const PRICE_TO_BPS = 10_000;
 
-/**
- * Polymarket CLOB adapter. Talks to the public HTTP API directly: pulling in
- * `@polymarket/clob-client` would drag ethers v5 into a viem-only stack. The
- * EIP-712 order signing happens FE-side using the session key; this adapter
- * forwards the pre-signed tuple (with the signature included on the inner
- * order object per CLOB convention) and attaches L2 HMAC headers.
- *
- * Header set (`POLY_ADDRESS` / `POLY_SIGNATURE` / `POLY_TIMESTAMP` /
- * `POLY_API_KEY` / `POLY_PASSPHRASE`) and HMAC payload (`timestamp + method +
- * path + body` keyed with the base64-decoded L2 secret, base64url-encoded
- * digest) match `@polymarket/clob-client@^4` exactly.
- */
-export class PolymarketAdapter implements IPolymarketAdapter {
-  private readonly tobCache = new LRUCache<string, OrderbookTopOfBook>({
+type BookLevel = { price: string; size?: string };
+type BookEntry = {
+  tob: OrderbookTopOfBook;
+  bids: BookLevel[];
+  asks: BookLevel[];
+};
+
+/** Polymarket CLOB read-only adapter — see {@link IPolymarketReadAdapter}. */
+export class PolymarketAdapter implements IPolymarketReadAdapter {
+  // Single cache holding both the parsed top-of-book and the raw rungs the
+  // sizer needs. Written together on miss; expired together.
+  private readonly bookCache = new LRUCache<string, BookEntry>({
     max: 500,
     ttl: TOB_CACHE_MS,
   });
-  // Same TTL as the TOB cache — keeps depth fetches and TOB fetches in sync
-  // and lets the sizer re-use the book parsed by `getOrderbookTopOfBook`.
-  private readonly bookCache = new LRUCache<
-    string,
-    { bids: Array<{ price: string; size?: string }>; asks: Array<{ price: string; size?: string }>; fetchedAt: number }
-  >({ max: 500, ttl: TOB_CACHE_MS });
 
   constructor(private readonly baseUrl: string = PREDICTION_MARKETS_ENV.clobApiBase) {}
 
-  async deriveApiKey(input: DeriveCredsInput): Promise<PolymarketCreds> {
-    log.info({ userId: input.userId, step: "derive-api-key" }, "polymarket-auth");
-    const url = `${this.baseUrl}/auth/api-key`;
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      POLY_ADDRESS: input.address,
-      POLY_SIGNATURE: input.l1Signature,
-      POLY_TIMESTAMP: String(Math.floor(Date.now() / 1000)),
-      POLY_NONCE: input.nonce,
-    };
-    const response = await fetch(url, { method: "POST", headers, body: "{}" });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      log.error(
-        { status: response.status, userId: input.userId, body: text.slice(0, 200) },
-        "derive-api-key-failed",
-      );
-      throw new Error(`POLYMARKET_AUTH_FAILED: HTTP ${response.status}`);
-    }
-    const json = (await response.json()) as PolymarketCreds;
-    if (!json.apiKey || !json.secret || !json.passphrase) {
-      throw new Error("POLYMARKET_AUTH_INVALID_RESPONSE");
-    }
-    return json;
+  async getOrderbookTopOfBook(tokenId: string): Promise<OrderbookTopOfBook> {
+    return (await this.fetchBook(tokenId)).tob;
   }
 
-  async getOrderbookTopOfBook(tokenId: string): Promise<OrderbookTopOfBook> {
-    const cached = this.tobCache.get(tokenId);
+  private async fetchBook(tokenId: string): Promise<BookEntry> {
+    const cached = this.bookCache.get(tokenId);
     if (cached) {
       log.debug({ choice: "hit", tokenId }, "tob-cache");
       return cached;
@@ -87,20 +60,22 @@ export class PolymarketAdapter implements IPolymarketAdapter {
       throw new Error(`POLYMARKET_BOOK_FAILED: HTTP ${response.status}`);
     }
     const json = (await response.json()) as {
-      bids?: Array<{ price: string; size?: string }>;
-      asks?: Array<{ price: string; size?: string }>;
+      bids?: BookLevel[];
+      asks?: BookLevel[];
     };
     const bestBidPrice = parseTopLevel(json.bids);
     const bestAskPrice = parseTopLevel(json.asks);
-    const result: OrderbookTopOfBook = {
-      bestBidPrice,
-      bestAskPrice,
-      midPrice: (bestBidPrice + bestAskPrice) / 2,
+    const entry: BookEntry = {
+      tob: {
+        bestBidPrice,
+        bestAskPrice,
+        midPrice: (bestBidPrice + bestAskPrice) / 2,
+      },
+      bids: json.bids ?? [],
+      asks: json.asks ?? [],
     };
-    // store full book on cache miss for getOrderbookDepth re-use
-    this.bookCache.set(tokenId, { bids: json.bids ?? [], asks: json.asks ?? [], fetchedAt: Date.now() });
-    this.tobCache.set(tokenId, result);
-    return result;
+    this.bookCache.set(tokenId, entry);
+    return entry;
   }
 
   async getOrderbookDepth(args: {
@@ -108,10 +83,7 @@ export class PolymarketAdapter implements IPolymarketAdapter {
     side: "BUY" | "SELL";
     depthLevels: number;
   }): Promise<Array<{ priceFraction: number; shares: number }>> {
-    // Prime caches via the same `/book` call used for TOB.
-    await this.getOrderbookTopOfBook(args.outcomeTokenId);
-    const book = this.bookCache.get(args.outcomeTokenId);
-    if (!book) return [];
+    const book = await this.fetchBook(args.outcomeTokenId);
     // BUY consumes asks (best ask first, ascending price); SELL consumes
     // bids (best bid first, descending price).
     const rawLevels = args.side === "BUY" ? book.asks : book.bids;
@@ -122,68 +94,6 @@ export class PolymarketAdapter implements IPolymarketAdapter {
     return sorted
       .slice(0, args.depthLevels)
       .map(({ price, size }) => ({ priceFraction: price, shares: size }));
-  }
-
-  async placeOrder(input: PlaceOrderInput): Promise<PlaceOrderResult> {
-    const creds = this.unsealCreds(input.polymarketCredsEnc);
-    const body = JSON.stringify({
-      // Polymarket's `/order` endpoint expects the EIP-712 signature as a
-      // field on the order tuple itself, not a sibling. Without it the CLOB
-      // can't verify the EOA-maker authority and 4xx's the request.
-      order: { ...input.order, signature: input.signature },
-      owner: input.order.maker,
-      orderType: "GTC",
-      clientOrderId: input.clientOrderId,
-    });
-    const path = "/order";
-    const headers = this.l2Headers(creds, input.makerAddress, "POST", path, body);
-    log.debug({ userId: input.userId, clientOrderId: input.clientOrderId }, "post-order");
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers,
-      body,
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      const level = response.status >= 500 ? "error" : "warn";
-      log[level](
-        { status: response.status, userId: input.userId, body: text.slice(0, 200) },
-        "post-order-failed",
-      );
-      throw new Error(`POLYMARKET_ORDER_FAILED: HTTP ${response.status}`);
-    }
-    const json = (await response.json()) as { orderId?: string; status?: string };
-    if (!json.orderId) throw new Error("POLYMARKET_ORDER_INVALID_RESPONSE");
-    log.info(
-      { userId: input.userId, polymarketOrderId: json.orderId, status: json.status },
-      "post-order-ok",
-    );
-    return { polymarketOrderId: json.orderId, status: json.status ?? "live" };
-  }
-
-  async cancelOrder(
-    polymarketOrderId: string,
-    polymarketCredsEnc: string,
-    makerAddress: `0x${string}`,
-  ): Promise<void> {
-    const creds = this.unsealCreds(polymarketCredsEnc);
-    const body = JSON.stringify({ orderId: polymarketOrderId });
-    const path = "/order";
-    const headers = this.l2Headers(creds, makerAddress, "DELETE", path, body);
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: "DELETE",
-      headers,
-      body,
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      log.warn(
-        { status: response.status, polymarketOrderId, body: text.slice(0, 200) },
-        "cancel-order-failed",
-      );
-      throw new Error(`POLYMARKET_CANCEL_FAILED: HTTP ${response.status}`);
-    }
-    log.info({ polymarketOrderId }, "cancel-order-ok");
   }
 
   async getOrderStatus(
@@ -297,7 +207,7 @@ export class PolymarketAdapter implements IPolymarketAdapter {
   /**
    * Polymarket L2 HMAC headers. Signature payload is `timestamp + method +
    * path + body`, HMAC-SHA-256 over the base64-decoded secret, base64url
-   * encoded.
+   * encoded. Read-only after Slice E — body is always `""` (no writes).
    */
   private l2Headers(
     creds: PolymarketCreds,

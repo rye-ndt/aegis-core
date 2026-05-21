@@ -60,6 +60,28 @@ export class PredictionMarketReceiptBroadcaster
     log.debug({ userId, outcome, betKind: bet.betKind }, "no-receipt-mapped");
   }
 
+  async emitDriftCard(bet: BetRow): Promise<void> {
+    const fields: ResultField[] = [
+      { label: "Side", value: bet.side },
+      { label: "Stake", value: formatUsdcCents(bet.stakeUsdcCents) },
+      { label: "Reference price", value: formatPriceBps(bet.refPriceBps) },
+      {
+        label: "Reason",
+        value: "Market price moved beyond the drift tolerance before signing.",
+      },
+    ];
+    const headline =
+      bet.betKind === "close" ? "Close cancelled — price moved" : "Bet cancelled — price moved";
+    await this.push(bet.userId, {
+      status: "failed",
+      verb: "prediction_market_bet_drift",
+      headline,
+      fields,
+      complexity: "simple",
+      nextActions: [this.openInPolymarket(bet.marketId)],
+    });
+  }
+
   async broadcastPositionResolved(input: { userId: string; position: PositionRow }): Promise<void> {
     const { userId, position } = input;
     const fields: ResultField[] = [

@@ -25,6 +25,18 @@ export const SUBJECTS = [
   "SP500_LEVEL",
   "NASDAQ_LEVEL",
   "UEFA_CHAMPIONS_LEAGUE_2025_26",
+  // 2026-05-20 expansion (Phase B unblock). Seed audit (B1) found these as
+  // the largest OTHER-bucket recurring partitions: FIFA / Eurovision /
+  // NHL / IPL all map cleanly to mutually-exclusive winner sets;
+  // WTI_CRUDE_USD_SPOT mirrors BTC_USD_SPOT for the crude-oil threshold
+  // markets; LARGEST_COMPANY_MARKET_CAP is the rotating "biggest co. on
+  // date X" partition (Microsoft / Tesla / Aramco / Apple variants).
+  "FIFA_WORLD_CUP_2026_WINNER",
+  "EUROVISION_2026_WINNER",
+  "NHL_STANLEY_CUP_2026_WINNER",
+  "IPL_2026_WINNER",
+  "WTI_CRUDE_USD_SPOT",
+  "LARGEST_COMPANY_MARKET_CAP",
   /** Sentinel — any market the LLM can't match goes here AND is forced into
    *  the review queue. `OTHER` markets never enter the hot path. */
   "OTHER",

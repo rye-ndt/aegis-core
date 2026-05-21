@@ -18,4 +18,12 @@ export interface IPredictionMarketReceiptBroadcaster {
   }): Promise<void>;
   /** Pushed by the poller when a market resolves on Polymarket. */
   broadcastPositionResolved(input: { userId: string; position: PositionRow }): Promise<void>;
+  /**
+   * Pushed from `advance()` when a queue-driven bet fails the pre-sign drift
+   * check (live mid moved beyond `maxOrderDriftBps` vs the recorded ref).
+   * The legacy FE-driven path reported drift via `pmApi.driftDetected`; in the
+   * one-click flow the mini-app has no UI to surface it, so the BE pushes a
+   * chat card directly.
+   */
+  emitDriftCard(bet: BetRow): Promise<void>;
 }

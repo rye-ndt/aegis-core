@@ -101,7 +101,7 @@ import type { IPredictionMarketVerifier } from "../../use-cases/interface/predic
 import type { IPredictionMarketBetRepository } from "../../use-cases/interface/predictionMarket/IPredictionMarketBetRepository";
 import type { IPredictionMarketBetUseCase } from "../../use-cases/interface/predictionMarket/IPredictionMarketBetUseCase";
 import type { IPredictionMarketReceiptBroadcaster } from "../../use-cases/interface/predictionMarket/IPredictionMarketReceiptBroadcaster";
-import type { IPolymarketAdapter } from "../../use-cases/interface/predictionMarket/IPolymarketAdapter";
+import type { IPolymarketReadAdapter } from "../../use-cases/interface/predictionMarket/IPolymarketAdapter";
 import { TelegramArtifactRenderer } from "../implementations/output/artifactRenderer/telegram";
 import { AnkrBalanceProvider } from "../implementations/output/balance/ankrBalanceProvider";
 import { CachedBalanceProvider } from "../implementations/output/balance/cachedBalanceProvider";
@@ -230,7 +230,7 @@ export class AssistantInject {
   private _predictionMarketDeterministicDetector: DeterministicPredictionMarketDetector | null = null;
   private _predictionMarketScanJob: PredictionMarketScanJob | null = null;
   private _predictionMarketNoStartWarned = false;
-  private _polymarketAdapter: IPolymarketAdapter | null = null;
+  private _polymarketAdapter: IPolymarketReadAdapter | null = null;
   private _predictionMarketBetUseCase: IPredictionMarketBetUseCase | null = null;
   private _predictionMarketReceiptBroadcaster: IPredictionMarketReceiptBroadcaster | null = null;
   private _polymarketPositionPollerJob: PolymarketPositionPollerJob | null = null;
@@ -575,7 +575,6 @@ export class AssistantInject {
         } catch (err) {
           log.error({ err }, "onResolved (chat) threw");
         }
-        if (!PREDICTION_MARKETS_ENV.useSignQueue) return;
         if (!event.betId && !event.setupForUserId) return;
         const betUseCase = this.getPredictionMarketBetUseCase();
         if (!betUseCase) return;
@@ -921,7 +920,9 @@ export class AssistantInject {
 
     const betUseCase = this.getPredictionMarketBetUseCase();
     if (betUseCase) {
-      registry.register(new PlaceBetCapability(betUseCase, this.getPredictionMarketRepo()));
+      registry.register(
+        new PlaceBetCapability(betUseCase, this.getPredictionMarketRepo()),
+      );
       registry.register(new ClosePositionCapability(betUseCase));
     } else {
       log.info(
@@ -1349,6 +1350,8 @@ export class AssistantInject {
       maxCriteriaChars: PREDICTION_MARKETS_ENV.maxCriteriaChars,
       promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
       cacheTtlSec: PREDICTION_MARKETS_ENV.clusterCacheTtlSec,
+      reasoningEffort: PREDICTION_MARKETS_ENV.classifierReasoningEffort,
+      maxTokens: PREDICTION_MARKETS_ENV.classifierMaxTokens,
     });
     return this._predictionMarketClassifier;
   }
@@ -1383,6 +1386,8 @@ export class AssistantInject {
       promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
       cacheTtlSec: PREDICTION_MARKETS_ENV.detectorCacheTtlSec,
       priceBucketBps: PREDICTION_MARKETS_ENV.detectorPriceBucketBps,
+      reasoningEffort: PREDICTION_MARKETS_ENV.detectorReasoningEffort,
+      maxTokens: PREDICTION_MARKETS_ENV.detectorMaxTokens,
     });
     return this._predictionMarketDetector;
   }
@@ -1611,21 +1616,20 @@ export class AssistantInject {
       );
       return undefined;
     }
-    // Optional sign-queue deps. Only wired when the flag is on AND every
-    // dependency is available; otherwise the bet use case constructs in
-    // legacy-only mode and advance()/notifySignResolved no-op.
+    // Sign-queue deps. Wired when redis + the mini-app request cache are
+    // available; otherwise the bet use case constructs in a no-op shape and
+    // advance()/notifySignResolved log + exit.
     const redis = this.getRedis();
     const miniAppRequestCache = this.getMiniAppRequestCache();
     const sqlDB = this.getSqlDB();
     const signQueueDeps =
-      PREDICTION_MARKETS_ENV.useSignQueue && redis && miniAppRequestCache
+      redis && miniAppRequestCache
         ? {
             // Lazy getter breaks the circular dep with signingRequestUseCase
             // (whose onResolved wrapper resolves the bet use case).
             getSigningRequestUseCase: () => this._signingRequestUseCase ?? undefined,
             miniAppRequestCache,
             redis,
-            useSignQueue: true,
             chatIdResolver: async (userId: string) => {
               const session = await sqlDB.telegramSessions.findByUserId(userId);
               const chatId = session?.telegramChatId;
@@ -1633,6 +1637,11 @@ export class AssistantInject {
               const n = Number(chatId);
               return Number.isFinite(n) ? n : null;
             },
+            // Optional; used by `enqueueOrderSign` to push a `bet_drift` chat
+            // card when a queue-driven bet is rejected for price drift before
+            // signing. Undefined when the bot hasn't started yet (rare —
+            // off-path startup); the use case falls back to log-only.
+            receiptBroadcaster: this.getPredictionMarketReceiptBroadcaster(),
           }
         : undefined;
     this._predictionMarketBetUseCase = new PredictionMarketBetUseCase(
@@ -1646,7 +1655,6 @@ export class AssistantInject {
 
   getPredictionMarketStuckBetSweeperJob(): PredictionMarketStuckBetSweeperJob | undefined {
     if (this._predictionMarketStuckBetSweeperJob) return this._predictionMarketStuckBetSweeperJob;
-    if (!PREDICTION_MARKETS_ENV.useSignQueue) return undefined;
     const useCase = this.getPredictionMarketBetUseCase();
     const redis = this.getRedis();
     if (!useCase || !redis) {
@@ -1665,7 +1673,7 @@ export class AssistantInject {
     return this._predictionMarketStuckBetSweeperJob;
   }
 
-  getPolymarketAdapter(): IPolymarketAdapter {
+  getPolymarketAdapter(): IPolymarketReadAdapter {
     if (!this._polymarketAdapter) {
       this._polymarketAdapter = new PolymarketAdapter(PREDICTION_MARKETS_ENV.clobApiBase);
     }
@@ -1740,8 +1748,6 @@ export class AssistantInject {
       () => this.getCapabilityDispatcher(),
       this.getPredictionMarketBetUseCase(),
       this.getPolymarketAdapter(),
-      this.getPredictionMarketReceiptBroadcaster(),
-      this.getRelayClient(),
       this.getPredictionMarketRepo(),
       new PimlicoBundlerProxy(),
     );

@@ -11,10 +11,21 @@ export interface DetectorInput {
   reqId: string;
 }
 
-export interface IPredictionMarketDetector {
+export interface DetectorResult {
   /**
-   * Returns zero or more draft findings. Empty result is the common case;
-   * the LLM is explicitly told `{ findings: [] }` is acceptable.
+   * Zero or more draft findings. Empty result is the common case; the LLM
+   * is explicitly told `{ findings: [] }` is acceptable.
    */
-  detect(input: DetectorInput): Promise<DraftFinding[]>;
+  drafts: DraftFinding[];
+  /**
+   * True iff this invocation was served from the Redis response cache (LLM
+   * detector). Always false for the deterministic detector. Exposed so the
+   * scan use case can roll up per-tick hit/miss counts at
+   * `step: "stage3-end"`.
+   */
+  cacheHit: boolean;
+}
+
+export interface IPredictionMarketDetector {
+  detect(input: DetectorInput): Promise<DetectorResult>;
 }

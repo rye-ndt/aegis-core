@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from "../llm/openrouterClient";
+
 function num(key: string, def: number): number {
   const v = process.env[key];
   if (!v) return def;
@@ -7,6 +9,12 @@ function num(key: string, def: number): number {
 
 function str(key: string, def: string): string {
   return process.env[key]?.trim() || def;
+}
+
+function reasoningEffort(key: string, def: ReasoningEffort): ReasoningEffort {
+  const v = process.env[key]?.trim().toLowerCase();
+  if (v === "minimal" || v === "low" || v === "medium" || v === "high") return v;
+  return def;
 }
 
 function bool(key: string, def: boolean): boolean {
@@ -27,25 +35,46 @@ export const PREDICTION_MARKETS_ENV = {
   maxDaysToResolution: num("PREDICTION_MARKETS_MAX_DAYS", 60),
   classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
   maxCriteriaChars: num("PREDICTION_MARKETS_MAX_CRITERIA_CHARS", 4000),
-  reclusterDelta: num("PREDICTION_MARKETS_RECLUSTER_DELTA", 10),
+  // Raised 10 → 25 on 2026-05-20 (LLM-cost reduction plan, Phase A4): with
+  // topN=100, 10% churn between ticks is normal and was forcing a full
+  // re-cluster every tick.
+  reclusterDelta: num("PREDICTION_MARKETS_RECLUSTER_DELTA", 25),
   maxReclusterAgeMs: num("PREDICTION_MARKETS_MAX_RECLUSTER_AGE_MS", 24 * 60 * 60 * 1000),
   clusterCacheTtlSec: num("PREDICTION_MARKETS_CLUSTER_CACHE_TTL_SEC", 24 * 60 * 60),
   broadcastConcurrency: num("PREDICTION_MARKETS_BROADCAST_CONCURRENCY", 5),
-  // Bumped from v1 → v2 alongside the verifier's pattern-aware magnitude fix
-  // and the detector prompt's mutually-exclusive anti-example / calibration
-  // additions. v2 → v3 is Phase 0 of the deterministic-detection plan: the
-  // detector now emits per-finding role tags (wider/narrower or earlier/later)
-  // and the verifier drops wrong-direction findings. The version is part of
-  // the detector Redis cache key, so the bump invalidates pre-fix cached
-  // drafts on first deploy.
-  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v3"),
+  // Part of the classifier/detector Redis cache keys; bumping invalidates
+  // pre-change cached drafts on deploy so we don't serve outputs produced
+  // under an older prompt or reasoning budget. v4 (2026-05-20) bumps with
+  // Phase A — reasoning effort medium → low, classifier cache key drops
+  // resolution epoch.
+  promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v4"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
     str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
   ),
   detectorConcurrency: num("PREDICTION_MARKETS_DETECTOR_CONCURRENCY", 3),
-  detectorCacheTtlSec: num("PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC", 1800),
-  detectorPriceBucketBps: num("PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS", 50),
+  // 2026-05-20 LLM-cost reduction (Phase A2): TTL 30m → 1h so the typical
+  // 30-min scan tick lands at least one cache hit between price drifts;
+  // bucket 50bps → 200bps quadruples the steady-state hit rate while still
+  // preserving 2¢ price movement granularity (well inside the 4¢
+  // finding-threshold pipeline).
+  detectorCacheTtlSec: num("PREDICTION_MARKETS_DETECTOR_CACHE_TTL_SEC", 3600),
+  detectorPriceBucketBps: num("PREDICTION_MARKETS_DETECTOR_PRICE_BUCKET_BPS", 200),
+  // 2026-05-20 LLM-cost reduction (Phase A1): both default to "low" effort
+  // and an 8k token budget — the classifier/detector were burning the bulk
+  // of OpenRouter quota at (12000, medium). Env-flip restore knobs: raise
+  // back to (12000, "medium") or, in emergency, (16000, "high") for the
+  // detector (the highest-stakes step).
+  classifierReasoningEffort: reasoningEffort(
+    "PREDICTION_MARKETS_CLASSIFIER_REASONING_EFFORT",
+    "low",
+  ),
+  classifierMaxTokens: num("PREDICTION_MARKETS_CLASSIFIER_MAX_TOKENS", 8000),
+  detectorReasoningEffort: reasoningEffort(
+    "PREDICTION_MARKETS_DETECTOR_REASONING_EFFORT",
+    "low",
+  ),
+  detectorMaxTokens: num("PREDICTION_MARKETS_DETECTOR_MAX_TOKENS", 8000),
   verifyFreshnessMs: num("PREDICTION_MARKETS_VERIFY_FRESHNESS_MS", 60_000),
   oddsDriftToleranceBps: num("PREDICTION_MARKETS_ODDS_DRIFT_TOLERANCE_BPS", 50),
   minGapBps: num("PREDICTION_MARKETS_MIN_GAP_BPS", 100),
@@ -57,13 +86,6 @@ export const PREDICTION_MARKETS_ENV = {
   polymarketAffiliateParam: str("PREDICTION_MARKETS_POLYMARKET_AFFILIATE", ""),
   findingsEnabled: bool("PREDICTION_MARKETS_FINDINGS_ENABLED", false),
   betsEnabled: bool("PREDICTION_MARKETS_BETS_ENABLED", false),
-  // Slice B kill switch (2026-05-15 zero-sign bet rewrite). When false, the
-  // new `advance()`-driven state machine is dormant: enqueue helpers no-op,
-  // the /response hook skips its bet-use-case fan-out, and the stuck-bet
-  // sweeper exits early. Flipping this on without the matching FE deploy
-  // (Slice D) is a no-op for live traffic — only sign requests written with
-  // `betId` enter the new flow, and nothing writes that until Slice D.
-  useSignQueue: bool("PREDICTION_MARKETS_USE_SIGN_QUEUE", false),
   // Sister tick for the stuck-bet sweeper job. Independent of the position
   // poller cadence: the sweeper re-enqueues lapsed sign-requests for bets
   // whose mini-app session closed mid-flow.
@@ -86,14 +108,20 @@ export const PREDICTION_MARKETS_ENV = {
   // 0.05 MATIC funds the EOA for one-time Polymarket approvals during setup.
   maticBootstrapWei: str("PREDICTION_MARKETS_MATIC_BOOTSTRAP_WEI", "50000000000000000"),
   // AES-256-GCM master key, 32 bytes hex (64 chars). REQUIRED before
-  // `betsEnabled=true`; storePolymarketCreds throws if empty.
+  // `betsEnabled=true`; the polymarket adapter throws when unsealing existing
+  // L2 cred rows without it. (BE-side cred *writes* removed in Slice E-3.)
   credsKeyHex: str("PREDICTION_MARKETS_CREDS_KEY_HEX", ""),
   // Phase 2 (deterministic-detection) — per-market LLM extractor + hourly job.
   // The regex layer is the safety net so a small/cheap model is fine for
   // first-pass structured output.
   extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "openai/gpt-5-nano"),
   extractorConcurrency: num("PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY", 8),
-  extractorPromptVersion: str("PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION", "v1"),
+  // v1 → v2 (2026-05-20): SUBJECTS vocabulary expanded with six partitions
+  // (FIFA / Eurovision / NHL / IPL / WTI crude / largest-cap), and the
+  // regex verifier's `eq` keyword list + OFFICIAL_LEAGUE_SCORE aliases
+  // broadened. Bumping invalidates the prior model+prompt pinning on
+  // `prediction_market_facts` so the hourly job re-extracts.
+  extractorPromptVersion: str("PREDICTION_MARKETS_EXTRACTOR_PROMPT_VERSION", "v2"),
   extractFactsIntervalMs: num("PREDICTION_MARKETS_EXTRACT_INTERVAL_MS", 60 * 60 * 1000),
   // Telegram chat id (NOT user id) that receives extraction-review prompts
   // and is gated to handle the approve/edit/reject callbacks. Empty disables
@@ -109,6 +137,13 @@ export const PREDICTION_MARKETS_ENV = {
   // `prediction_market_clusters_shadow` for offline diffing. Shadow output
   // is never broadcast and never feeds the detector.
   shadowMode: bool("PREDICTION_MARKETS_SHADOW_MODE", false),
+  // Phase C (2026-05-20 LLM-cost reduction, classifier path). When true,
+  // the deterministic clusterer runs an event_id-first pass that groups
+  // markets sharing a Polymarket `event_id` into `mutually_exclusive`
+  // clusters BEFORE the fact-based pass — bypassing the LLM classifier
+  // entirely for those markets. Independent of `deterministicSubjects`
+  // (which gates the fact-based path / Phase B cut-over).
+  eventIdClusteringEnabled: bool("PREDICTION_MARKETS_EVENT_ID_CLUSTERING_ENABLED", false),
   // Phase 5 (Part 6) — LP sizing. Disabled by default keeps verifier behaviour
   // identical to today; flip after a manual sane-run. The analytical sizer
   // ships in-tree; glpk.js WASM is a future swap-in via the same port.

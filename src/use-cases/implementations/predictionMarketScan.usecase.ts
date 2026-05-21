@@ -175,6 +175,11 @@ export class PredictionMarketScanUseCase {
     const factsByMarketId = needFacts && this.factRepo
       ? await this.factRepo.getByMarketIds(markets.map((m) => m.marketId))
       : null;
+    // Phase C: event_id-first pass runs alongside (or instead of) the
+    // fact-based cut-over. Independent flag; doesn't require facts.
+    const eventIdFirst = env.eventIdClusteringEnabled;
+    const deterministicClusterUseful =
+      cutOverSubjects.size > 0 || env.shadowMode || eventIdFirst;
 
     let clusters: DraftCluster[];
     // Carry-forward keeps the prior run's clusterId so the stage-3 detector
@@ -183,10 +188,11 @@ export class PredictionMarketScanUseCase {
     if (shouldRecluster) {
       let deterministic: DraftCluster[] = [];
       let llmEligible = markets;
-      if (this.deterministicCluster && cutOverSubjects.size > 0) {
+      if (this.deterministicCluster && deterministicClusterUseful) {
         const detResult = await this.deterministicCluster.cluster({
           runId, universe: markets, cutOverSubjects, reqId,
           factsByMarketId: factsByMarketId ?? undefined,
+          eventIdFirst,
         });
         deterministic = detResult.deterministic;
         llmEligible = detResult.llmEligible;
@@ -213,6 +219,12 @@ export class PredictionMarketScanUseCase {
           const shadow = await this.deterministicCluster.cluster({
             runId, universe: markets, cutOverSubjects, reqId, shadowMode: true,
             factsByMarketId: factsByMarketId ?? undefined,
+            // Shadow mode exists to diff the FACT-based path against the
+            // live clusters; the event_id pass is deterministic given the
+            // same universe, so re-running it here would duplicate
+            // identical output. The live call's event_id clusters already
+            // landed in the live table — shadow only needs the fact pass.
+            eventIdFirst: false,
           });
           await this.repo.insertShadowClusters(runId, shadow.deterministic, nowSec);
           log.info(
@@ -328,6 +340,16 @@ export class PredictionMarketScanUseCase {
         .sort((a, b) => b.rankScore - a.rankScore);
       findingsVerified = allVerified.length;
 
+      // LLM-served clusters only — the deterministic detector has no LLM
+      // cache and would skew the ratio toward "misses".
+      let detectorCacheHits = 0;
+      let detectorCacheMisses = 0;
+      for (let i = 0; i < publishedStored.length; i++) {
+        if (this.detectorFor(publishedStored[i], cutOverSubjects) !== this.detector) continue;
+        if (perCluster[i].cacheHit) detectorCacheHits += 1;
+        else detectorCacheMisses += 1;
+      }
+
       if (allVerified.length > 0) {
         await this.repo.insertFindings(allVerified);
 
@@ -357,6 +379,8 @@ export class PredictionMarketScanUseCase {
           findingsDetected,
           findingsVerified,
           findingsBroadcast,
+          detectorCacheHits,
+          detectorCacheMisses,
           durationMs: Date.now() - tickStart,
         },
         "scan",
@@ -398,19 +422,19 @@ export class PredictionMarketScanUseCase {
     runId: string,
     reqId: string,
     cutOverSubjects: Set<string>,
-  ): Promise<{ drafts: number; verified: VerifiedFinding[] }> {
-    if (!this.verifier) return { drafts: 0, verified: [] };
+  ): Promise<{ drafts: number; verified: VerifiedFinding[]; cacheHit: boolean }> {
+    if (!this.verifier) return { drafts: 0, verified: [], cacheHit: false };
     const detector = this.detectorFor(cluster, cutOverSubjects);
-    if (!detector) return { drafts: 0, verified: [] };
+    if (!detector) return { drafts: 0, verified: [], cacheHit: false };
     const members: RawMarket[] = [];
     for (const id of cluster.marketIds) {
       const m = marketById.get(id);
       if (m) members.push(m);
     }
-    if (members.length < 2) return { drafts: 0, verified: [] };
+    if (members.length < 2) return { drafts: 0, verified: [], cacheHit: false };
     try {
-      const drafts = await detector.detect({ cluster, members, reqId });
-      if (drafts.length === 0) return { drafts: 0, verified: [] };
+      const { drafts, cacheHit } = await detector.detect({ cluster, members, reqId });
+      if (drafts.length === 0) return { drafts: 0, verified: [], cacheHit };
       const verified = await this.verifier.verify({
         reqId,
         runId,
@@ -418,10 +442,10 @@ export class PredictionMarketScanUseCase {
         snapshotMembers: members,
         drafts,
       });
-      return { drafts: drafts.length, verified };
+      return { drafts: drafts.length, verified, cacheHit };
     } catch (err) {
       log.error({ err, reqId, runId, clusterId: cluster.clusterId }, "stage3 cluster failed");
-      return { drafts: 0, verified: [] };
+      return { drafts: 0, verified: [], cacheHit: false };
     }
   }
 
@@ -473,7 +497,7 @@ export class PredictionMarketScanUseCase {
       if (m) members.push(m);
     }
     if (members.length < 2) return [];
-    const drafts = await this.deterministicDetector.detect({ cluster, members, reqId });
+    const { drafts } = await this.deterministicDetector.detect({ cluster, members, reqId });
     if (drafts.length === 0) return [];
     const verified = await this.verifier.verify({
       reqId,

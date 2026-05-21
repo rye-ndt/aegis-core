@@ -1,6 +1,7 @@
 import { InlineKeyboard } from "grammy";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
 import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
+import { openMiniAppArtifact } from "./miniAppLaunch";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newUuid } from "../../../../helpers/uuid";
 import type {
@@ -173,15 +174,16 @@ export class PlaceBetCapability implements Capability<PlaceBetParams> {
 
     if (params.kind === "confirm") {
       try {
-        await this.betUseCase.confirmBetIntent({
+        const { enqueuedRequestId } = await this.betUseCase.confirmBetIntent({
           userId: ctx.userId,
           intentId: params.intentId,
           clientOrderId: newUuid(),
         });
-        // Deep-link target is the *intentId*, not the betId — the FE
-        // PlaceBetHandler is keyed off intentId (`place_bet:<intentId>` per
-        // fe/.../utils/deepLink.ts) and looks up the bet via `pmApi.intent`.
-        return openMiniAppArtifact(params.intentId);
+        return openMiniAppArtifact({
+          enqueuedRequestId,
+          startedText: "Bet started. Opening the mini app…",
+          queuedText: `Bet queued. Open the mini app to finish placing it (intent id \`${params.intentId.slice(0, 8)}…\`).`,
+        });
       } catch (err) {
         log.error({ err, userId: ctx.userId, intentId: params.intentId }, "confirm-failed");
         return resultArtifact({
@@ -271,24 +273,6 @@ function confirmCardArtifact(
   return { kind: "result_card", result };
 }
 
-function openMiniAppArtifact(intentId: string): Artifact {
-  const text = `Bet started. Open the mini app to finish placing it (intent id \`${intentId.slice(0, 8)}…\`).`;
-  // FE deeplink contract: read from `?startapp=` (URL fallback) or Telegram
-  // `start_param` — see fe/.../utils/deepLink.ts. Without MINI_APP_URL we
-  // can only emit a plain message; a callback button would be a no-op
-  // because nothing handles `open_app:*` callbacks.
-  if (!MINI_APP_URL) {
-    return { kind: "chat", text, parseMode: "Markdown" };
-  }
-  const url = `${MINI_APP_URL}?startapp=place_bet:${intentId}`;
-  return {
-    kind: "chat",
-    text,
-    parseMode: "Markdown",
-    keyboard: new InlineKeyboard().webApp("Open mini app", url),
-  };
-}
-
 /**
  * Re-emitted when a user re-taps a finding side after their previous intent
  * has reached `executing` but the bet was never finished (typical cause: the
@@ -307,9 +291,11 @@ function executingArtifact(intentId: string): Artifact {
   if (!MINI_APP_URL) {
     return { kind: "chat", text, parseMode: "Markdown", keyboard: cancelButtonRow };
   }
-  const url = `${MINI_APP_URL}?startapp=place_bet:${intentId}`;
+  // No `?requestId=` available on the re-tap path: the use-case's idempotent
+  // advance() runs from the stuck-bet sweeper, not here. The mini-app's
+  // useRequest hook will fetch the next queued sign-request on open.
   const keyboard = new InlineKeyboard()
-    .webApp("Open mini app", url)
+    .webApp("Open mini app", MINI_APP_URL)
     .row()
     .text("Cancel & start over", `cancel_executing:${intentId}`);
   return { kind: "chat", text, parseMode: "Markdown", keyboard };

@@ -1,6 +1,4 @@
-import { InlineKeyboard } from "grammy";
 import { PREDICTION_MARKETS_ENV } from "../../../../helpers/env/predictionMarketEnv";
-import { MINI_APP_URL } from "../../../../helpers/env/telegramEnv";
 import {
   formatPnlCents,
   formatPriceBps,
@@ -8,6 +6,7 @@ import {
 } from "../../../../helpers/format/humanFormat";
 import { createLogger } from "../../../../helpers/observability/logger";
 import { newUuid } from "../../../../helpers/uuid";
+import { openMiniAppArtifact } from "./miniAppLaunch";
 import type {
   Artifact,
   Capability,
@@ -39,7 +38,9 @@ export class ClosePositionCapability implements Capability<ClosePositionParams> 
     callbackPrefix: [...CALLBACK_PREFIXES],
   };
 
-  constructor(private readonly betUseCase: IPredictionMarketBetUseCase) {}
+  constructor(
+    private readonly betUseCase: IPredictionMarketBetUseCase,
+  ) {}
 
   async collect(ctx: CapabilityCtx): Promise<CollectResult<ClosePositionParams>> {
     if (!PREDICTION_MARKETS_ENV.betsEnabled) {
@@ -78,16 +79,17 @@ export class ClosePositionCapability implements Capability<ClosePositionParams> 
         // confirm taps can be material on thin books).
         const preview = await this.betUseCase.previewClose(ctx.userId, params.positionId);
         if (!preview) return chat("That position is no longer open.");
-        await this.betUseCase.initiateClose({
+        const { enqueuedRequestId } = await this.betUseCase.initiateClose({
           userId: ctx.userId,
           positionId: params.positionId,
           clientOrderId: newUuid(),
           refPriceBps: preview.bestBidPriceBps,
         });
-        // Deep-link target is the *positionId*, not the new betId — the FE
-        // ClosePositionHandler is keyed off positionId per
-        // fe/.../utils/deepLink.ts (`close_position:<positionId>`).
-        return openMiniAppArtifact(params.positionId);
+        return openMiniAppArtifact({
+          enqueuedRequestId,
+          startedText: "Close started. Opening the mini app…",
+          queuedText: `Close queued. Open the mini app to finish (position \`${params.positionId.slice(0, 8)}…\`).`,
+        });
       } catch (err) {
         log.error(
           { err, userId: ctx.userId, positionId: params.positionId },
@@ -145,20 +147,6 @@ function previewArtifact(
     ],
   };
   return { kind: "result_card", result };
-}
-
-function openMiniAppArtifact(positionId: string): Artifact {
-  const text = `Close started. Open the mini app to finish (position \`${positionId.slice(0, 8)}…\`).`;
-  if (!MINI_APP_URL) {
-    return { kind: "chat", text, parseMode: "Markdown" };
-  }
-  const url = `${MINI_APP_URL}?startapp=close_position:${positionId}`;
-  return {
-    kind: "chat",
-    text,
-    parseMode: "Markdown",
-    keyboard: new InlineKeyboard().webApp("Open mini app", url),
-  };
 }
 
 function chat(text: string): Artifact {
