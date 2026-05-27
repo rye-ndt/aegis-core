@@ -158,7 +158,7 @@ function dedupeOverlap(clusters: DraftCluster[], reqId: string): DraftCluster[] 
   return kept;
 }
 
-export interface OpenAIPredictionMarketClassifierConfig {
+export interface OpenRouterPredictionMarketClassifierConfig {
   model: string;
   cache?: RedisResponseCache;
   maxCriteriaChars: number;
@@ -168,10 +168,10 @@ export interface OpenAIPredictionMarketClassifierConfig {
   maxTokens: number;
 }
 
-export class OpenAIPredictionMarketClassifier implements IPredictionMarketClassifier {
+export class OpenRouterPredictionMarketClassifier implements IPredictionMarketClassifier {
   private readonly client: OpenAI;
 
-  constructor(private readonly cfg: OpenAIPredictionMarketClassifierConfig) {
+  constructor(private readonly cfg: OpenRouterPredictionMarketClassifierConfig) {
     this.client = createOpenRouterClient();
   }
 

@@ -62,6 +62,7 @@ Non-custodial, intent-based AI trading agent on Avalanche (and beyond). Hexagona
 12. **Native pseudo-address is `0xEeee…EEeE`.** Always `isNativeAddress(addr)` (case-insensitive). Never insert native rows into `tokenRegistry` — synthesized from chain config.
 13. **Terminal capability outcomes are `result_card`, never `chat`.** `chat` is for intermediate ask/disambiguation. Capabilities never write MarkdownV2 — hand renderer plain strings via `IntentResult`; `escapeMd` runs in `resultCard.render.ts`. Exceptions go through `interpretError(err, {verb, requestId})` from `errorCatalog.ts` — never inline raw error strings.
 14. **Sign-request previews go through `buildPreview`.** ERC-20 / native spend `sign_calldata` MUST set `preview: buildPreview({...})`. Multi-step: preview on FIRST step only (rest `undefined`; FE chains silently). Use `executeSignSteps({previews})` array variant only for distinct per-step modal labels.
+15. **`sign_calldata` artifacts MUST carry `chainId` (required field).** The renderer (`telegram.ts`) threads it onto the `SignRequest` (stored in `miniAppRequestCache`, the FE's source of truth) and `SigningRequestRecord`. The FE derives its session-key client + bundler URL from `req.chainId` (`dispatchSign.ts`) and throws loudly if absent — never silently defaults to home chain. Was the cause of the 2026-05-27 "Chain undefined is not configured" send regression (the one-click-bet refactor moved auto-sign into `dispatchSign` and dropped the FE's old `?? getChainId()` fallback while `sendCapability` never set `chainId`). swap/yield set it on their `SignRequest` directly via `executeSignSteps`.
 
 ## Project structure (essentials)
 ```
@@ -229,16 +230,16 @@ message
 | `LOYALTY_ACTIVE_SEASON_CACHE_TTL_MS`, `_LEADERBOARD_CACHE_TTL_MS` | `60000` / `30000` | |
 | `PREDICTION_MARKETS_ENABLED`, `_FETCH_INTERVAL_MS`, `_GAMMA_API`, `_MAX_FETCH_PAGES`, `_TOP_N` | `false` / `1800000` / `https://gamma-api.polymarket.com` / `4` / `100` | Scan toggle + cadence |
 | `PREDICTION_MARKETS_MIN_OI_USD`, `_MIN_7D_VOLUME_USD`, `_MIN_DAYS`, `_MAX_DAYS` | `50000` / `20000` / `3` / `60` | Stage-1 filters (plus binary YES/NO + non-empty resolution criteria + `acceptingOrders=true`), ranked by liquidity, capped to `TOP_N` |
-| `PREDICTION_MARKETS_CLASSIFIER_MODEL`, `_MAX_CRITERIA_CHARS`, `_PROMPT_VERSION`, `_CLUSTER_CACHE_TTL_SEC` | `gpt-4o` / `4000` / `v1` / `86400` | Stage-2 (structured outputs strict) |
-| `PREDICTION_MARKETS_RECLUSTER_DELTA`, `_MAX_RECLUSTER_AGE_MS` | `10` / `86400000` | Stage-2 trigger |
+| `PREDICTION_MARKETS_CLASSIFIER_MODEL`, `_MAX_CRITERIA_CHARS`, `_PROMPT_VERSION`, `_CLUSTER_CACHE_TTL_SEC` | `deepseek-v4-flash` / `4000` / `v4` / `86400` | Stage-2 classifier. Legacy OpenRouter/OpenAI model ids are normalized back to the DeepSeek default at env load. |
+| `PREDICTION_MARKETS_RECLUSTER_DELTA`, `_MAX_RECLUSTER_AGE_MS` | `25` / `86400000` | Stage-2 trigger |
 | `PREDICTION_MARKETS_BROADCAST_CONCURRENCY` | `5` | Per-tick `pLimit` |
 | `PREDICTION_MARKETS_FINDINGS_ENABLED` | `false` | Stage-3 dark-launch. Read once at `runOnce`; independent of `_ENABLED`. |
-| `PREDICTION_MARKETS_DETECTOR_MODEL`, `_CONCURRENCY`, `_CACHE_TTL_SEC`, `_PRICE_BUCKET_BPS` | `${classifierModel}` / `3` / `1800` / `50` | Stage-3 detector. Smaller bucket = more misses, fresher. |
+| `PREDICTION_MARKETS_DETECTOR_MODEL`, `_CONCURRENCY`, `_CACHE_TTL_SEC`, `_PRICE_BUCKET_BPS` | `${classifierModel}` / `3` / `3600` / `200` | Stage-3 detector. Legacy OpenRouter/OpenAI model ids are normalized back to the DeepSeek-compatible default. |
 | `PREDICTION_MARKETS_VERIFY_FRESHNESS_MS`, `_ODDS_DRIFT_TOLERANCE_BPS`, `_MIN_GAP_BPS`, `_FINDING_MIN_LIQUIDITY_USD` | `60000` / `50` / `100` / `25000` | Stage-3 verifier gates |
 | `PREDICTION_MARKETS_POLYMARKET_AFFILIATE` | `""` | Optional `?affiliate=…` on Polymarket URL buttons |
 | `PREDICTION_MARKETS_DETERMINISTIC_SUBJECTS` | `""` | Empty=100% LLM. Listed subjects routed to deterministic clusterer/detector (requires regex-verified facts). |
 | `PREDICTION_MARKETS_SHADOW_MODE` | `false` | Run deterministic alongside LLM on full universe; write to `*_shadow` tables. |
-| `PREDICTION_MARKETS_EXTRACT_INTERVAL_MS`, `_EXTRACTOR_CONCURRENCY` | `3600000` / `8` | Hourly redis-locked extractor |
+| `PREDICTION_MARKETS_EXTRACTOR_MODEL`, `_EXTRACT_INTERVAL_MS`, `_EXTRACTOR_CONCURRENCY` | `deepseek-v4-flash` / `3600000` / `8` | Hourly redis-locked extractor. Legacy OpenRouter/OpenAI model ids are normalized back to the DeepSeek default. |
 | `PREDICTION_MARKETS_REVIEW_ADMIN_CHAT_ID`, `_REVIEW_QUEUE_ALERT_THRESHOLD` | — / `10` | Admin TG chat + queue depth alert |
 | `PREDICTION_MARKETS_SIZING_ENABLED`, `_SIZER_BUDGET_USDC`, `_SIZER_FEE_BPS`, `_SIZER_GAS_ESTIMATE_USDC`, `_SIZER_DEPTH_LEVELS` | `false` / `100` / `200` / `0.05` / `10` | LP sizing. **Inert without `outcomeTokenIdResolver` wired into verifier.** |
 | `PREDICTION_MARKETS_BETS_ENABLED` | `false` | Real-money pipeline. 503 on `/predictionMarket/*` when false. |

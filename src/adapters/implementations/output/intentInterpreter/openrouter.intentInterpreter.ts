@@ -37,17 +37,17 @@ Fields:
 {fields}
 Extra context (JSON): {context}`;
 
-export interface OpenAIIntentInterpreterOptions {
+export interface OpenRouterIntentInterpreterOptions {
   model: string;
   cache?: RedisResponseCache;
 }
 
-export class OpenAIIntentInterpreter implements IIntentInterpreter {
+export class OpenRouterIntentInterpreter implements IIntentInterpreter {
   private readonly client: OpenAI;
   private readonly model: string;
   private readonly cache?: RedisResponseCache;
 
-  constructor(opts: OpenAIIntentInterpreterOptions) {
+  constructor(opts: OpenRouterIntentInterpreterOptions) {
     this.client = createOpenRouterClient();
     this.model = opts.model;
     this.cache = opts.cache;

@@ -301,6 +301,7 @@ export class SendCapability implements Capability<SendParams> {
             : undefined);
         await ctx.emit({
           kind: "sign_calldata",
+          chainId: this.deps.chainId,
           to: calldata.to,
           data: calldata.data,
           value: calldata.value,
@@ -387,6 +388,7 @@ export class SendCapability implements Capability<SendParams> {
       | undefined;
     await ctx.emit({
       kind: "sign_calldata",
+      chainId: this.deps.chainId,
       to: calldata.to,
       data: calldata.data,
       value: calldata.value,

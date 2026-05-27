@@ -185,7 +185,7 @@ const FINDING_SCHEMA = {
   },
 } as const;
 
-export interface OpenAIPredictionMarketDetectorConfig {
+export interface OpenRouterPredictionMarketDetectorConfig {
   model: string;
   cache?: RedisResponseCache;
   promptVersion: string;
@@ -202,10 +202,10 @@ function bucketPriceBp(priceFraction: number, bucketBps: number): number {
   return Math.round(bp / bucketBps) * bucketBps;
 }
 
-export class OpenAIPredictionMarketDetector implements IPredictionMarketDetector {
+export class OpenRouterPredictionMarketDetector implements IPredictionMarketDetector {
   private readonly client: OpenAI;
 
-  constructor(private readonly cfg: OpenAIPredictionMarketDetectorConfig) {
+  constructor(private readonly cfg: OpenRouterPredictionMarketDetectorConfig) {
     this.client = createOpenRouterClient();
   }
 

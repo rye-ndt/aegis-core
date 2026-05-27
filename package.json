@@ -17,7 +17,8 @@
     "db:migrate": "ts-node src/migrate.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "check:no-clob-secrets": "bash scripts/check-no-clob-secrets.sh"
+    "check:no-clob-secrets": "bash scripts/check-no-clob-secrets.sh",
+    "test": "tsx --test 'tests/**/*.test.ts' 'src/**/__tests__/*.test.ts'"
   },
   "keywords": [
     "hexagonal",

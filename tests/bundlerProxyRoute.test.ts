@@ -47,8 +47,8 @@ function stubFetch(behaviour: { status: number; body: Buffer } | "throw"): { res
 async function boot(): Promise<{ baseUrl: string; close: () => void }> {
   // Construct with the bare minimum: authUseCase, port=0 (we override below),
   // and the bundler proxy. Every other dep is optional. Constructor takes
-  // authUseCase, port, then 24 optional deps, then the optional bundler proxy.
-  const optionalDeps = new Array(24).fill(undefined);
+  // authUseCase, port, then 22 optional deps, then the optional bundler proxy.
+  const optionalDeps = new Array(22).fill(undefined);
   const server = new HttpApiServer(
     fakeAuth,
     0,

@@ -11,7 +11,7 @@ import {
 import { INTENT_COMMAND } from "../../helpers/enums/intentCommand.enum";
 import type { YIELD_PROTOCOL_ID } from "../../helpers/enums/yieldProtocolId.enum";
 import { LOYALTY_ENV } from "../../helpers/env/loyaltyEnv";
-import { OPENAI_MODEL } from "../../helpers/env/openaiEnv";
+import { OPENROUTER_MODEL } from "../../helpers/env/openrouterEnv";
 import { isOpenRouterConfigured } from "../../helpers/llm/openrouterClient";
 import { TRANSFER_HISTORY_ENV } from "../../helpers/env/transferHistoryEnv";
 import { YIELD_ENV } from "../../helpers/env/yieldEnv";
@@ -69,14 +69,14 @@ import { YieldPoolScanJob } from "../implementations/input/jobs/yieldPoolScanJob
 import { YieldReportJob } from "../implementations/input/jobs/yieldReportJob";
 import { PredictionMarketScanJob } from "../implementations/input/jobs/predictionMarketScanJob";
 import { PredictionMarketExtractFactsJob } from "../implementations/input/jobs/predictionMarketExtractFactsJob";
-import { OpenAIPredictionMarketExtractor } from "../implementations/output/predictionMarket/openaiPredictionMarketExtractor";
+import { OpenRouterPredictionMarketExtractor } from "../implementations/output/predictionMarket/openrouterPredictionMarketExtractor";
 import { PredictionMarketExtractFactsUseCase } from "../../use-cases/implementations/predictionMarketExtractFacts.usecase";
 import { PredictionMarketReviewHandler } from "../implementations/input/telegram/predictionMarketReviewHandler";
 import { PolymarketPositionPollerJob } from "../implementations/input/jobs/polymarketPositionPollerJob";
 import { PredictionMarketStuckBetSweeperJob } from "../implementations/input/jobs/predictionMarketStuckBetSweeperJob";
 import { PolymarketProvider } from "../implementations/output/predictionMarket/polymarketProvider";
-import { OpenAIPredictionMarketClassifier } from "../implementations/output/predictionMarket/openaiPredictionMarketClassifier";
-import { OpenAIPredictionMarketDetector } from "../implementations/output/predictionMarket/openaiPredictionMarketDetector";
+import { OpenRouterPredictionMarketClassifier } from "../implementations/output/predictionMarket/openrouterPredictionMarketClassifier";
+import { OpenRouterPredictionMarketDetector } from "../implementations/output/predictionMarket/openrouterPredictionMarketDetector";
 import { DeterministicPredictionMarketDetector } from "../implementations/output/predictionMarket/deterministicPredictionMarketDetector";
 import { AnalyticalPredictionMarketSizer } from "../implementations/output/predictionMarket/analyticalPredictionMarketSizer";
 import { PredictionMarketBroadcaster } from "../implementations/output/predictionMarket/predictionMarketBroadcaster";
@@ -124,9 +124,9 @@ import {
 } from "../implementations/output/capabilities/yieldCapability";
 import { DelegationRequestBuilder } from "../implementations/output/delegation/delegationRequestBuilder";
 import { OpenAIEmbeddingService } from "../implementations/output/embedding/openai";
-import { OpenAISchemaCompiler } from "../implementations/output/intentParser/openai.schemaCompiler";
-import { OpenAIOrchestrator } from "../implementations/output/orchestrator/openai";
-import { OpenAIIntentInterpreter } from "../implementations/output/intentInterpreter/openai.intentInterpreter";
+import { OpenRouterSchemaCompiler } from "../implementations/output/intentParser/openrouter.schemaCompiler";
+import { OpenRouterOrchestrator } from "../implementations/output/orchestrator/openrouter";
+import { OpenRouterIntentInterpreter } from "../implementations/output/intentInterpreter/openrouter.intentInterpreter";
 import { makeRedisResponseCache } from "../../helpers/cache/redisResponseCache";
 import { getResultCardEnv } from "../../helpers/env/resultCardEnv";
 import type { IIntentInterpreter } from "../../use-cases/interface/output/intentInterpreter.interface";
@@ -175,7 +175,7 @@ export class AssistantInject {
   private _bot: Bot | null = null;
   private _viemClient: ViemClientAdapter | null = null;
   private _solverRegistry: SolverRegistry | null = null;
-  private _schemaCompiler: OpenAISchemaCompiler | null = null;
+  private _schemaCompiler: OpenRouterSchemaCompiler | null = null;
   private _tokenRegistryService: DbTokenRegistryService | null = null;
   private _tokenCrawlerJob: TokenCrawlerJob | null = null;
   private _embeddingService: OpenAIEmbeddingService | null = null;
@@ -235,7 +235,7 @@ export class AssistantInject {
   private _predictionMarketReceiptBroadcaster: IPredictionMarketReceiptBroadcaster | null = null;
   private _polymarketPositionPollerJob: PolymarketPositionPollerJob | null = null;
   private _predictionMarketStuckBetSweeperJob: PredictionMarketStuckBetSweeperJob | null = null;
-  private _predictionMarketExtractor: OpenAIPredictionMarketExtractor | null = null;
+  private _predictionMarketExtractor: OpenRouterPredictionMarketExtractor | null = null;
   private _predictionMarketExtractFactsUseCase: PredictionMarketExtractFactsUseCase | null = null;
   private _predictionMarketExtractFactsJob: PredictionMarketExtractFactsJob | null = null;
   private _predictionMarketReviewHandler: PredictionMarketReviewHandler | null = null;
@@ -367,16 +367,16 @@ export class AssistantInject {
     if (!env.enabled || !env.available) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "interp") : undefined;
-    this._intentInterpreter = new OpenAIIntentInterpreter({
+    this._intentInterpreter = new OpenRouterIntentInterpreter({
       model: env.model,
       cache,
     });
     return this._intentInterpreter;
   }
 
-  getSchemaCompiler(): OpenAISchemaCompiler {
+  getSchemaCompiler(): OpenRouterSchemaCompiler {
     if (!this._schemaCompiler) {
-      this._schemaCompiler = new OpenAISchemaCompiler();
+      this._schemaCompiler = new OpenRouterSchemaCompiler();
     }
     return this._schemaCompiler;
   }
@@ -397,7 +397,7 @@ export class AssistantInject {
     if (!this.useCase) {
       const sqlDB = this.getSqlDB();
 
-      const orchestrator = new OpenAIOrchestrator(OPENAI_MODEL);
+      const orchestrator = new OpenRouterOrchestrator(OPENROUTER_MODEL);
 
       const webSearchService = new TavilyWebSearchService(
         process.env.TAVILY_API_KEY ?? "",
@@ -1344,7 +1344,7 @@ export class AssistantInject {
     if (!isOpenRouterConfigured()) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "pm-cluster") : undefined;
-    this._predictionMarketClassifier = new OpenAIPredictionMarketClassifier({
+    this._predictionMarketClassifier = new OpenRouterPredictionMarketClassifier({
       model: PREDICTION_MARKETS_ENV.classifierModel,
       cache,
       maxCriteriaChars: PREDICTION_MARKETS_ENV.maxCriteriaChars,
@@ -1380,7 +1380,7 @@ export class AssistantInject {
     if (!isOpenRouterConfigured()) return undefined;
     const redis = this.getRedis();
     const cache = redis ? makeRedisResponseCache(redis, "pm-detect") : undefined;
-    this._predictionMarketDetector = new OpenAIPredictionMarketDetector({
+    this._predictionMarketDetector = new OpenRouterPredictionMarketDetector({
       model: PREDICTION_MARKETS_ENV.detectorModel,
       cache,
       promptVersion: PREDICTION_MARKETS_ENV.promptVersion,
@@ -1534,10 +1534,10 @@ export class AssistantInject {
     return this.getSqlDB().predictionMarketBets;
   }
 
-  getPredictionMarketExtractor(): OpenAIPredictionMarketExtractor | undefined {
+  getPredictionMarketExtractor(): OpenRouterPredictionMarketExtractor | undefined {
     if (this._predictionMarketExtractor) return this._predictionMarketExtractor;
     if (!isOpenRouterConfigured()) return undefined;
-    this._predictionMarketExtractor = new OpenAIPredictionMarketExtractor({
+    this._predictionMarketExtractor = new OpenRouterPredictionMarketExtractor({
       model: PREDICTION_MARKETS_ENV.extractorModel,
       promptVersion: PREDICTION_MARKETS_ENV.extractorPromptVersion,
     });

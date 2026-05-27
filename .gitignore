@@ -26,3 +26,5 @@ npm-debug.log*
 *.tsbuildinfo
 
 fly-secrets.sh
+
+.env.bak-openrouter

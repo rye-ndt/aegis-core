@@ -106,15 +106,15 @@ const EXTRACTOR_SCHEMA = {
   },
 } as const;
 
-export interface OpenAIPredictionMarketExtractorConfig {
+export interface OpenRouterPredictionMarketExtractorConfig {
   model: string;
   promptVersion: string;
 }
 
-export class OpenAIPredictionMarketExtractor implements IPredictionMarketExtractor {
+export class OpenRouterPredictionMarketExtractor implements IPredictionMarketExtractor {
   private readonly client: OpenAI;
 
-  constructor(private readonly cfg: OpenAIPredictionMarketExtractorConfig) {
+  constructor(private readonly cfg: OpenRouterPredictionMarketExtractorConfig) {
     this.client = createOpenRouterClient();
   }
 
@@ -141,13 +141,13 @@ export class OpenAIPredictionMarketExtractor implements IPredictionMarketExtract
       systemPrompt: SYSTEM_PROMPT,
       userMessage,
       jsonSchema: { type: "json_schema", json_schema: EXTRACTOR_SCHEMA },
-      // Single MarketFact — small JSON, but `subject` / `resolution_source`
-      // classification has real subtleties (e.g. distinguishing Coinbase vs
-      // CoinGecko-TWAP from criteria phrasing). The regex verifier catches
-      // shape errors, not semantic mispicks — so we spend medium reasoning
-      // for better category selection. 8k leaves headroom after reasoning.
+      // Single MarketFact — small strict-schema JSON. `subject` /
+      // `resolution_source` classification has subtleties (e.g. Coinbase vs
+      // CoinGecko-TWAP), but the regex verifier routes shape failures to
+      // human review, so we run `minimal` effort to keep gpt-5-nano cost down
+      // and leave the whole 8k budget for the visible JSON.
       maxTokens: 8000,
-      reasoningEffort: "medium",
+      reasoningEffort: "minimal",
       logCtx: { reqId, marketId: market.marketId, op: "extract" },
     });
 

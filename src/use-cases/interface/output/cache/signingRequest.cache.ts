@@ -21,6 +21,10 @@ export type SigningRequestRecord = {
   id: string;
   userId: string;
   chatId: number;
+  // Chain the calldata executes on. Mirrors the SignRequest the FE reads from
+  // miniAppRequestCache; persisted here for diagnostics/parity. Optional only
+  // for backward-compat with pre-existing rows — new emitters always set it.
+  chainId?: number;
   to: string;
   value: string;
   data: string;

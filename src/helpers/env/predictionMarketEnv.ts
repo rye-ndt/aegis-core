@@ -33,7 +33,10 @@ export const PREDICTION_MARKETS_ENV = {
   minVolume7dUsd: num("PREDICTION_MARKETS_MIN_7D_VOLUME_USD", 20_000),
   minDaysToResolution: num("PREDICTION_MARKETS_MIN_DAYS", 3),
   maxDaysToResolution: num("PREDICTION_MARKETS_MAX_DAYS", 60),
-  classifierModel: str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
+  classifierModel: str(
+    "PREDICTION_MARKETS_CLASSIFIER_MODEL",
+    "openai/gpt-5-nano",
+  ),
   maxCriteriaChars: num("PREDICTION_MARKETS_MAX_CRITERIA_CHARS", 4000),
   // Raised 10 → 25 on 2026-05-20 (LLM-cost reduction plan, Phase A4): with
   // topN=100, 10% churn between ticks is normal and was forcing a full
@@ -50,7 +53,10 @@ export const PREDICTION_MARKETS_ENV = {
   promptVersion: str("PREDICTION_MARKETS_PROMPT_VERSION", "v4"),
   detectorModel: str(
     "PREDICTION_MARKETS_DETECTOR_MODEL",
-    str("PREDICTION_MARKETS_CLASSIFIER_MODEL", "openai/gpt-5-nano"),
+    str(
+      "PREDICTION_MARKETS_CLASSIFIER_MODEL",
+      "openai/gpt-5-nano",
+    ),
   ),
   detectorConcurrency: num("PREDICTION_MARKETS_DETECTOR_CONCURRENCY", 3),
   // 2026-05-20 LLM-cost reduction (Phase A2): TTL 30m → 1h so the typical
@@ -114,7 +120,10 @@ export const PREDICTION_MARKETS_ENV = {
   // Phase 2 (deterministic-detection) — per-market LLM extractor + hourly job.
   // The regex layer is the safety net so a small/cheap model is fine for
   // first-pass structured output.
-  extractorModel: str("PREDICTION_MARKETS_EXTRACTOR_MODEL", "openai/gpt-5-nano"),
+  extractorModel: str(
+    "PREDICTION_MARKETS_EXTRACTOR_MODEL",
+    "openai/gpt-5-nano",
+  ),
   extractorConcurrency: num("PREDICTION_MARKETS_EXTRACTOR_CONCURRENCY", 8),
   // v1 → v2 (2026-05-20): SUBJECTS vocabulary expanded with six partitions
   // (FIFA / Eurovision / NHL / IPL / WTI crude / largest-cap), and the

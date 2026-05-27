@@ -19,9 +19,9 @@ import type {
   IOrchestratorMessage,
 } from "../../../../use-cases/interface/output/orchestrator.interface";
 
-const log = createLogger("openaiOrchestrator");
+const log = createLogger("openrouterOrchestrator");
 
-export class OpenAIOrchestrator implements ILLMOrchestrator {
+export class OpenRouterOrchestrator implements ILLMOrchestrator {
   private readonly client: OpenAI;
 
   constructor(private readonly model: string) {
@@ -36,7 +36,7 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
           msg.role === MESSAGE_ROLE.ASSISTANT_TOOL_CALL &&
           msg.toolCallsJson
         ) {
-          return this.toOpenAiToolCallMessage(msg);
+          return this.toOpenRouterToolCallMessage(msg);
         }
         if (msg.role === MESSAGE_ROLE.TOOL) {
           return {
@@ -142,7 +142,7 @@ export class OpenAIOrchestrator implements ILLMOrchestrator {
     return { text: message.content ?? "", usage };
   }
 
-  private toOpenAiToolCallMessage(
+  private toOpenRouterToolCallMessage(
     msg: IOrchestratorMessage,
   ): ChatCompletionMessageParam {
     const toolCalls: IToolCall[] = JSON.parse(msg.toolCallsJson!);

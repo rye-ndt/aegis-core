@@ -12,7 +12,7 @@ import { extractAddressFields } from "../../../../helpers/schema/addressFields";
 import { CHAIN_CONFIG } from "../../../../helpers/chainConfig";
 import { normalizeFiatAmount } from "../capabilities/send.utils";
 import { createLogger } from "../../../../helpers/observability/logger";
-import { OPENAI_MODEL } from "../../../../helpers/env/openaiEnv";
+import { OPENROUTER_MODEL } from "../../../../helpers/env/openrouterEnv";
 
 const log = createLogger("schemaCompiler");
 
@@ -98,7 +98,7 @@ Instructions:
 - Output extracted params as a JSON-encoded string in the paramsJson field (e.g. "{\"amount\":\"5\"}"). Use "{}" if no params were extracted.${resolverFieldsInstruction}`;
 }
 
-export class OpenAISchemaCompiler implements ISchemaCompiler {
+export class OpenRouterSchemaCompiler implements ISchemaCompiler {
   private readonly client: OpenAI;
 
   constructor() {
@@ -129,7 +129,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       this.client.chat.completions.parse(
         withRouterHints(
           {
-            model: OPENAI_MODEL,
+            model: OPENROUTER_MODEL,
             messages: [
               { role: "system" as const, content: systemPrompt },
               { role: "user" as const, content: userContent },
@@ -147,7 +147,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
     );
 
     const parsed = response.choices[0]?.message.parsed;
-    if (!parsed) throw new Error("No parsed response from OpenAI schema compiler");
+    if (!parsed) throw new Error("No parsed response from OpenRouter schema compiler");
 
     const params = JSON.parse(parsed.paramsJson) as Record<string, unknown>;
 
@@ -202,7 +202,7 @@ export class OpenAISchemaCompiler implements ISchemaCompiler {
       this.client.chat.completions.create(
         withRouterHints(
           {
-            model: OPENAI_MODEL,
+            model: OPENROUTER_MODEL,
             messages: [
               {
                 role: "user" as const,

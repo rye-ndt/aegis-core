@@ -101,6 +101,11 @@ export type Artifact =
   | { kind: "chat"; text: string; keyboard?: InlineKeyboard; parseMode?: "Markdown" }
   | {
       kind: "sign_calldata";
+      // Chain the calldata must execute on. REQUIRED — the FE derives the
+      // session-key client + bundler URL from this. The renderer threads it
+      // onto the SignRequest + SigningRequestRecord. A missing value
+      // previously surfaced FE-side as "Chain undefined is not configured".
+      chainId: number;
       to: string;
       data: string;
       value: string;

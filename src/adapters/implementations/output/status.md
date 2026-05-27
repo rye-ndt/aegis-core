@@ -1,5 +1,155 @@
 # Output adapters — status
 
+## LLM provider → OpenRouter (gpt-5-nano), DeepSeek/OpenAI-chat retired (2026-05-27)
+
+**What:** Every chat/completions adapter now runs on OpenRouter with default
+model `openai/gpt-5-nano`. The previously-unwired `openai*` sibling adapters
+(which already targeted OpenRouter via `createOpenRouterClient()`) were renamed
+to `openrouter*` and wired into `assistant.di.ts`; the DeepSeek sibling adapters
+were deleted. Affected adapters: `orchestrator/openrouter.ts`
+(`OpenRouterOrchestrator`), `intentParser/openrouter.schemaCompiler.ts`,
+`intentInterpreter/openrouter.intentInterpreter.ts`, and the three
+`openrouterPredictionMarket{Extractor,Classifier,Detector}.ts`. DI now gates on
+`isOpenRouterConfigured()` (was `isDeepseekConfigured()`).
+
+OpenRouter creds + the default model moved to a dedicated
+`helpers/env/openrouterEnv.ts` (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`,
+`OPENROUTER_REFERER`, `OPENROUTER_APP_TITLE`, `OPENROUTER_MODEL`). `openaiEnv.ts`
+is now embeddings-only (`OPENAI_API_KEY`). `resultCardEnv` gates on
+`OPENROUTER_API_KEY` / defaults to `OPENROUTER_MODEL`.
+
+**Why:** DeepSeek and OpenAI credits were exhausted; OpenRouter is the active
+account. The OpenRouter transport already existed (client + dead `openai*`
+siblings), so re-activating + renaming it was lower-risk than authoring fresh
+adapters. The DeepSeek client/env helpers and their unit test were deleted —
+nothing consumed them once the adapters were swapped (the "DeepSeek
+structured-output fixup" entry below is now historical).
+
+**Conventions introduced / changed:**
+
+1. **OpenRouter is the only chat provider.** New chat adapters use
+   `createOpenRouterClient()` + `withRouterHints(...)` and an `OPENROUTER_MODEL`
+   slug (`<provider>/<model>`). Embeddings stay on OpenAI (`embedding/openai.ts`)
+   — OpenRouter exposes no embeddings endpoint.
+2. **Reasoning effort:** orchestrator/tool-selection runs `low`; strict-JSON
+   extraction flows (schema compiler, intent interpreter, PM extractor) run
+   `minimal` to leave the full token budget for visible JSON and minimise cost
+   on `gpt-5-nano`. PM classifier/detector keep their env-tuned effort
+   (`PREDICTION_MARKETS_*_REASONING_EFFORT`, default `low`).
+3. **PM model knobs are OpenRouter slugs, passthrough.** `predictionMarketEnv`
+   model fields read straight through `str(...)`, so operators can point the
+   high-stakes detector at a stronger slug via
+   `PREDICTION_MARKETS_DETECTOR_MODEL` and it is honoured verbatim. (The
+   DeepSeek detour's `normalizeDeepseekModel`, which rejected provider slugs,
+   is gone.)
+
+## DeepSeek structured-output fixup (2026-05-23)
+
+**What:** Reworked the DeepSeek native structured-output paths to use
+DeepSeek's documented JSON mode (`response_format: { type: "json_object" }`)
+plus local validation, instead of OpenAI/OpenRouter strict-schema transport.
+`DeepseekSchemaCompiler` no longer uses `chat.completions.parse()` /
+`zodResponseFormat(...)`; the prediction-market classifier / detector /
+extractor all validate parsed JSON locally before continuing. The
+orchestrator's cache metrics now read DeepSeek's `usage.prompt_cache_hit_tokens`
+field, and `applyDeepseekHints()` now returns a copied body instead of mutating
+the caller's object in place.
+
+**Why:** The first OpenAI→DeepSeek swap reused OpenRouter/OpenAI conventions
+that the native DeepSeek endpoint does not honor consistently. The practical
+failure mode was 400s or non-parseable content on every strict-schema path,
+which darkened send/swap/yield schema compilation and the prediction-market
+LLM pipeline. Local validation restores the existing port contracts without
+pretending the transport is stricter than it is.
+
+**Conventions introduced:**
+
+1. **DeepSeek structured output uses JSON mode, not `json_schema`
+   transport.** If a DeepSeek adapter needs structured data, send
+   `response_format: { type: "json_object" }`, embed the target schema in the
+   prompt, and validate the parsed JSON locally (Zod or equivalent). Do not
+   use `chat.completions.parse()` or rely on provider-side strict-schema
+   enforcement on the native DeepSeek endpoint.
+2. **`applyDeepseekHints()` is copy-on-write.** Callers may safely reuse a
+   request body literal across invocations; only the returned object may have
+   `model` rewritten to `DEEPSEEK_REASONER_MODEL`.
+3. **Extractor stays on the default chat model.** The prediction-market fact
+   extractor now uses `reasoningEffort: "minimal"` on DeepSeek. Do not route
+   that path to the thinking model unless we have fresh evidence that JSON-mode
+   reliability stays acceptable there.
+4. **DeepSeek prompt-cache telemetry comes from
+   `usage.prompt_cache_hit_tokens`.** `prompt_tokens_details.cached_tokens` is
+   OpenAI/OpenRouter-shaped compatibility data at best; prefer the native field
+   when present.
+5. **Prediction-market model envs are DeepSeek-normalized at the env layer.**
+   `PREDICTION_MARKETS_{CLASSIFIER,DETECTOR,EXTRACTOR}_MODEL` now default to
+   DeepSeek-native ids (`classifier`: `deepseek-v4-flash`; detector falls back
+   to classifier; extractor defaults to `deepseek-v4-flash`). If an operator
+   leaves behind a stale OpenRouter/OpenAI value such as `openai/gpt-5-nano`
+   or `gpt-4.1-mini`, `predictionMarketEnv.ts` coerces it back to the
+   DeepSeek default instead of letting the job fail with `model_not_found`.
+
+## DeepSeek provider added (2026-05-23)
+
+**What:** Added a parallel DeepSeek provider alongside the existing
+OpenRouter-backed OpenAI adapters. Every chat/completions call site is now
+wired through DeepSeek; the embedding adapter still hits OpenAI directly
+(DeepSeek does not offer embeddings).
+
+**New files (mirrors of the OpenAI adapters — old files are preserved):**
+
+- `helpers/env/deepseekEnv.ts` — `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`
+  (default `https://api.deepseek.com`), `DEEPSEEK_MODEL` (default
+  `deepseek-v4-pro`), `DEEPSEEK_REASONER_MODEL` (default `deepseek-reasoner`).
+- `helpers/llm/deepseekClient.ts` — `createDeepseekClient()`,
+  `isDeepseekConfigured()`, `applyDeepseekHints()` (model-swap hint),
+  `callJsonSchemaWithRetry()` mirroring the OpenRouter variant.
+- `orchestrator/deepseek.ts`
+- `intentParser/deepseek.schemaCompiler.ts`
+- `intentInterpreter/deepseek.intentInterpreter.ts`
+- `predictionMarket/deepseek{Classifier,Detector,Extractor}.ts`
+
+**Why:** Move chat traffic off OpenRouter for cost / vendor reasons. The
+DeepSeek REST API is OpenAI-compatible, so we reuse the `openai` SDK with a
+custom `baseURL` — same pattern as the OpenRouter client. We keep the old
+adapters in tree (per hexagonal: swap implementations, not interfaces) so a
+single DI flip can roll back if DeepSeek regresses.
+
+**Conventions introduced (do NOT break):**
+
+1. **OpenRouter `provider` / `reasoning` hints are NOT valid on DeepSeek
+   native API.** `withRouterHints` is OpenRouter-only. The DeepSeek client
+   exposes `applyDeepseekHints` instead, which may rewrite `model` on the
+   returned copy but NEVER attaches `provider` / `reasoning` fields.
+2. **`reasoningEffort: "high"` maps to model selection on DeepSeek.** When a
+   caller asks for high effort, `applyDeepseekHints` upgrades `model` to
+   `DEEPSEEK_REASONER_MODEL`. Lower values are no-ops on the default chat
+   model. Call sites that previously passed `"medium"` should pass either
+   `"minimal"` (cheaper, default chat) or `"high"` (reasoner) — there is no
+   intermediate gear on DeepSeek native.
+3. **`DEEPSEEK_MODEL` is a bare model id**, not a `<provider>/<model>` slug.
+   This is the opposite of `OPENAI_MODEL` (OpenRouter slug).
+4. **Embedding stays on OpenAI** (`OPENAI_API_KEY` against `api.openai.com`).
+   DeepSeek has no embeddings endpoint; do NOT route Pinecone tool-index
+   queries through DeepSeek.
+5. **The shared `openaiLimiter` (p-limit, env `OPENAI_CONCURRENCY`) gates
+   BOTH providers.** Concurrency is a shared resource for outbound LLM
+   traffic; do not introduce a parallel `deepseekLimiter`.
+
+**DI swaps (in `adapters/inject/assistant.di.ts`):**
+
+`OpenAIOrchestrator` → `DeepseekOrchestrator`, `OpenAISchemaCompiler` →
+`DeepseekSchemaCompiler`, `OpenAIIntentInterpreter` →
+`DeepseekIntentInterpreter`, and the three prediction-market adapters
+likewise. `isOpenRouterConfigured()` gates → `isDeepseekConfigured()`.
+`resultCardEnv.ts` reads `DEEPSEEK_API_KEY` for its `available` flag.
+
+**Prediction-market env knobs:** `PREDICTION_MARKETS_*_MODEL`,
+`_REASONING_EFFORT`, `_MAX_TOKENS` still drive the DeepSeek adapters since the
+type contract (`ReasoningEffort`) is identical between the two LLM clients.
+Model envs are normalized through `predictionMarketEnv.ts` so legacy
+OpenRouter/OpenAI model ids don't break DeepSeek-native callers.
+
 ## LLM provider split (2026-05-14 OpenRouter migration)
 
 Two-client architecture for the LLM family:

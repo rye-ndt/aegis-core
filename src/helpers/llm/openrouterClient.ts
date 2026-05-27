@@ -6,7 +6,7 @@ import {
   OPENROUTER_APP_TITLE,
   OPENROUTER_BASE_URL,
   OPENROUTER_REFERER,
-} from "../env/openaiEnv";
+} from "../env/openrouterEnv";
 import { createLogger } from "../observability/logger";
 
 const log = createLogger("openrouterClient");
